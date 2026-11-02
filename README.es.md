@@ -119,6 +119,10 @@ tarjeta libre. En otras dos medidas escribió entre un 6 y un 8 % más lento tra
 14.3 y escribió entre un 7 y un 14 % más lento. Con la caché de expertos fija, como se comprueba una versión, las
 respuestas son iguales token a token.
 
+Al revés, `"--lock-experts"` bloquea en RAM los expertos que quedan fuera de la VRAM, así el sistema no da esa memoria
+a otros programas ni el motor tiene que volver a leerlos del SSD. En Linux bloquea como mucho lo que permite
+`ulimit -l`, y el motor dice al arrancar cuánto bloqueó.
+
 El motor también necesita entre 350 y 400 MiB menos de VRAM para leer prompts: se los queda la caché de expertos
 (Qwen3.6 guarda 2,712 expertos en VRAM en vez de 2,444), o `--vram-reserve-mib` los deja a otros programas. Cómo
 funciona y cómo se midió: [docs/BACKENDS.md](docs/BACKENDS.md#less-of-the-pcs-ram-and-vram).

@@ -119,6 +119,10 @@ livre. Em outras duas medições escreveu de 6 a 8% mais devagar depois do promp
 No Linux (uma RTX PRO 6000 limitada a cerca de 8 GB) ocupou de 7.0 a 7.7 GiB em vez de 12.3 a 14.3 e escreveu de 7 a
 14% mais devagar. Com o cache de experts fixo, como uma versão é conferida, as respostas são iguais token a token.
 
+Ao contrário, `"--lock-experts"` trava na RAM os experts que ficam fora da VRAM, então o sistema não passa essa memória
+para outros programas e o motor não precisa lê-los de novo do SSD. No Linux ele trava no máximo o que o `ulimit -l`
+permite, e o motor diz ao iniciar quanto travou.
+
 O motor também precisa de 350 a 400 MiB a menos de VRAM para ler prompts: o cache de experts fica com eles (o Qwen3.6
 mantém 2,712 experts na VRAM em vez de 2,444), ou `--vram-reserve-mib` os deixa para outros programas.
 Como foi medido: [docs/BACKENDS.md](docs/BACKENDS.md#less-of-the-pcs-ram-and-vram).

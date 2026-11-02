@@ -115,6 +115,10 @@ two other runs it wrote 6 to 8% slower after the 32K prompt and 8 to 10% slower 
 (an RTX PRO 6000 held to about 8 GB) it held 7.0 to 7.7 GiB instead of 12.3 to 14.3 and wrote 7 to 14% slower. With
 the expert cache held still, as a release is checked, the answers are the same token for token.
 
+The other way round, `"--lock-experts"` locks the experts outside VRAM in RAM, so the system cannot give their
+memory to other programs and have the engine read them from the SSD again later. Under Linux it locks no more than
+`ulimit -l` allows, and the engine says at the start how much it locked.
+
 The engine also needs 350 to 400 MiB less VRAM for reading prompts: the expert cache takes it (Qwen3.6 keeps 2,712
 experts in VRAM instead of 2,444), or `--vram-reserve-mib` leaves it to other programs.
 How it works and how it was measured: [docs/BACKENDS.md](docs/BACKENDS.md#less-of-the-pcs-ram-and-vram).

@@ -41,6 +41,7 @@
 #include <sched.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <unistd.h>
 #endif
 #ifdef _WIN32
@@ -235,7 +236,7 @@ void map_pages(const std::vector<std::pair<const uint8_t*, size_t>>& spans, cons
 // machine counts them as available and takes them for whatever needs memory, and a read that comes after finds
 // them there without the disk.  After a 32K prompt on the laptop the engine held all 15.9 GiB of Qwen3.6's file,
 // 4.2 GiB of it dense weights and experts the card had; with those dropped, the 11.7 GiB of experts the CPU reads.
-void drop_pages(const uint8_t* p, size_t n) {
+size_t page_bytes() {
     static const size_t page = [] {
 #ifdef _WIN32
         SYSTEM_INFO si;
@@ -245,12 +246,39 @@ void drop_pages(const uint8_t* p, size_t n) {
         return (size_t) sysconf(_SC_PAGESIZE);
 #endif
     }();
+    return page;
+}
+
+void drop_pages(const uint8_t* p, size_t n) {
+    const size_t page = page_bytes();
     const uintptr_t a = ((uintptr_t) p + page - 1) / page * page, b = ((uintptr_t) p + n) / page * page;
     if (!p || b <= a) return;
 #ifdef _WIN32
     VirtualUnlock((void*) a, b - a);   // pages that are not locked leave the working set (and it returns FALSE)
 #else
     madvise((void*) a, b - a, MADV_DONTNEED);   // a private mapping that is never written reads the file again
+#endif
+}
+
+// Options::lock_experts: a span's pages locked into RAM, where the file cache cannot hand them to another program,
+// reading in the ones it had already dropped; false when the system refuses (Linux past `ulimit -l`, Windows past
+// the working-set minimum lock_outside() raised).  Unlocking takes the span's whole pages only: one it shares with
+// a neighbour stays as the neighbour has it.
+bool lock_pages(const uint8_t* p, size_t n, bool lock) {
+    if (lock) {
+#ifdef _WIN32
+        return VirtualLock((void*) p, n) != 0;
+#else
+        return mlock(p, n) == 0;
+#endif
+    }
+    const size_t page = page_bytes();
+    const uintptr_t a = ((uintptr_t) p + page - 1) / page * page, b = ((uintptr_t) p + n) / page * page;
+    if (b <= a) return true;
+#ifdef _WIN32
+    return VirtualUnlock((void*) a, b - a) != 0;
+#else
+    return munlock((void*) a, b - a) == 0;
 #endif
 }
 
@@ -1983,6 +2011,9 @@ void Engine::load(const Options& o) {
         throw std::runtime_error("0 to 64 experts can be on their way into the cache at a time");
     if (opt_.window < 0 || opt_.window > 8)
         throw std::runtime_error("a window is 1 to 8 tokens, or 0 for the model's own");
+    if (opt_.lock_experts && opt_.ram_experts_mib >= 0)
+        throw std::runtime_error("--lock-experts locks every expert outside VRAM in RAM, so it does not go with "
+                                 "--ram-experts-mib");
     if (opt_.tail_skip < 0) throw std::runtime_error("--tail-skip (STRATA_ROUTE_TAIL_SKIP) cannot be negative");
     if (!(opt_.skip_weight >= 0.f && opt_.skip_weight < 1.f))
         throw std::runtime_error("--skip-weight is a share of a token's experts' weight: 0 (off) up to below 1");
@@ -2232,9 +2263,19 @@ void Engine::load(const Options& o) {
     if (opt_.cache_bias > 0.f) bias_rl_.assign((size_t) n_expert_, 0.f);
     start_swaps();
     reset();
+    std::vector<std::pair<int, int>> outside;
+    if (opt_.lock_experts) {
+        locked_.assign(layers_.size() * (size_t) n_expert_, 0);
+        for (size_t il = 0; il < layers_.size(); ++il)
+            for (int e = 0; layers_[il].moe && e < n_expert_; ++e)
+                if (!layers_[il].slot[(size_t) e]) outside.emplace_back((int) il, e);
+    }
     // nothing is read from the files when every expert is in VRAM
     if (!all_cached())
-        mapper_ = std::thread([this, cpu = std::move(cpu)] { map_pages(cpu, *gg_, map_quit_); });
+        mapper_ = std::thread([this, cpu = std::move(cpu), outside = std::move(outside)] {
+            map_pages(cpu, *gg_, map_quit_);
+            if (!outside.empty()) lock_outside(outside);
+        });
 }
 
 void Engine::load_drafter() {
@@ -2530,7 +2571,90 @@ void Engine::load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t 
 // that half still held LFM2.5's first short chat to 61 tokens/s in place of 67, so it goes then only under the RAM
 // budget: Qwen3.6 held 5.3 GiB after the load with --ram-experts-mib 3072 in place of 7.1.  Under the budget all of
 // the card's experts go: one the cache moves out comes to the CPU through pool_, read from the files.
+// Options::lock_experts, on mapper_ once map_pages() is done: the experts outside VRAM at the load, locked one by
+// one so that relock() knows which are.  Windows locks no more pages than the working-set minimum leaves room
+// for, so it is raised once, by those experts and 512 MiB for the rest of the process.  It says what it got.
+void Engine::lock_outside(const std::vector<std::pair<int, int>>& outside) {
+    size_t want = 0, got = 0;
+    for (const auto& [il, e] : outside)
+        expert_bytes(layers_[(size_t) il], e, e + 1, [&](const uint8_t*, size_t n) { want += n; });
+#ifdef _WIN32
+    const HANDLE self = GetCurrentProcess();
+    SIZE_T lo = 0, hi = 0;
+    DWORD flags = 0;
+    if (GetProcessWorkingSetSizeEx(self, &lo, &hi, &flags)) {
+        const SIZE_T min = lo + want + ((SIZE_T) 512 << 20);
+        SetProcessWorkingSetSizeEx(self, min, std::max(hi, min + ((SIZE_T) 512 << 20)),
+                                   QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE);
+    }
+#endif
+    bool refused = false;
+    for (const auto& [il, e] : outside) {
+        if (map_quit_.load(std::memory_order_relaxed)) return;
+        bool ok = true;
+        size_t n = 0;
+        expert_bytes(layers_[(size_t) il], e, e + 1, [&](const uint8_t* p, size_t b) {
+            ok = ok && lock_pages(p, b, true);
+            n += b;
+        });
+        if (!ok) {
+            refused = true;
+            break;
+        }
+        locked_[(size_t) il * n_expert_ + e] = 1;
+        got += n;
+    }
+    const double gib = 1.0 / (1ull << 30);
+    if (!refused) {
+        std::fprintf(stderr, "strata-poly: %.1f GiB of experts outside VRAM locked in RAM (--lock-experts)\n",
+                     want * gib);
+    } else {
+#ifdef _WIN32
+        char why[64];
+        std::snprintf(why, sizeof why, "VirtualLock refused the rest (error %lu)", GetLastError());
+#else
+        char why[96];
+        rlimit r{};
+        if (getrlimit(RLIMIT_MEMLOCK, &r) == 0 && r.rlim_cur != RLIM_INFINITY)
+            std::snprintf(why, sizeof why, "mlock refused the rest: ulimit -l is %llu MiB",
+                          (unsigned long long) (r.rlim_cur >> 20));
+        else
+            std::snprintf(why, sizeof why, "mlock refused the rest");
+#endif
+        std::fprintf(stderr, "strata-poly: --lock-experts locked %.1f of the %.1f GiB of experts outside VRAM; %s, "
+                             "so they stay in the file cache\n", got * gib, want * gib, why);
+    }
+    locks_ready_.store(true, std::memory_order_release);
+}
+
+// Options::lock_experts, between requests: the experts the cache took since are unlocked, then the ones it gave
+// up are locked, until the system refuses one.  The split changes while an answer is written (follow()) and when
+// the cache is cut or sized again; this keeps the locked ones the CPU's without a lock at each of those.  Nothing
+// before lock_outside() is done.
+void Engine::relock() {
+    if (!opt_.lock_experts || !locks_ready_.load(std::memory_order_acquire)) return;
+    for (int pass = 0; pass < 2; ++pass)
+        for (size_t il = 0; il < layers_.size(); ++il) {
+            const Layer& L = layers_[il];
+            if (!L.moe) continue;
+            for (int e = 0; e < n_expert_; ++e) {
+                uint8_t& k = locked_[il * (size_t) n_expert_ + e];
+                const bool outside = !L.slot[(size_t) e];
+                if (pass == 0 && k && !outside) {
+                    expert_bytes(L, e, e + 1, [](const uint8_t* p, size_t n) { lock_pages(p, n, false); });
+                    k = 0;
+                } else if (pass == 1 && !k && outside) {
+                    bool ok = true;
+                    expert_bytes(L, e, e + 1, [&](const uint8_t* p, size_t n) { ok = ok && lock_pages(p, n, true); });
+                    if (!ok) return;
+                    k = 1;
+                }
+            }
+        }
+}
+
 void Engine::trim() {
+    relock();   // first: under Linux the pages dropped below must not be locked
     struct Held {
         float recent;
         int64_t used;

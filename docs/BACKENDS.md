@@ -2094,6 +2094,26 @@ and 232.18); one run each, 1,024 tokens of a short chat at 196.5 where 227.7 and
 where 200.6. With the experts held still and no guesses (`--expert-swaps 0 --cpu-share 0 --tail-skip 0 --window 1`)
 the 256 tokens of each of the three answers were the same as with every expert in RAM, on Windows and on Linux.
 
+`--lock-experts`, off by default, goes the other way: the experts outside VRAM are locked in RAM, so the system
+cannot hand their memory to another program. Without it they are pages of the file, which Windows counts in the
+engine's working set and Linux in its page cache, and either takes them back when memory runs short; a token that
+needs one then reads it from the disk again. A user's 16.7 GB file had 3.4 GB of it left in memory under Linux
+([issue 79](https://github.com/VecSzn/PolyStrata/issues/79)). The engine locks them once the load has read them
+in (mlock under Linux, VirtualLock under Windows), and between requests unlocks the ones the cache has taken and
+locks the ones it has given up. Linux locks no more than `ulimit -l` allows; past it the engine says how much it
+locked and the rest stay in the file cache. It does not go with `--ram-experts-mib`.
+
+On the laptop with Qwen3.6 UD-Q3_K_M it locked 10.1 GiB. With Windows emptying the engine's working set from
+outside, as it does when memory runs short, 0.07 GiB of the 14.05 stayed without the lock and 10.13 GiB with it.
+After a 32K prompt the cache gave up 345 experts, and 10.63 GiB stayed. With the cache the same size in both runs
+(`--vram-reserve-mib 2000`), the three answers above were the same with it and without it.
+
+Under Linux, on the lab's RTX PRO 6000 held to about 8.9 GB, it locked 8.8 GiB, which /proc showed as VmLck.
+With `ulimit -l` at 1 GiB it locked 1.0 GiB and said that mlock refused the rest at that limit. A short chat, a
+32K prompt and the short chat again left 8.86, 9.24 and 9.24 GiB locked: the attention caches grew with the long
+prompt, the cache gave up experts for them, and those were locked as well. The answers were the same with and
+without it.
+
 ### Qwen3.6 on two engines
 
 Since its 0.1.44 the [Strata](https://github.com/Niko1221/Strata) project runs Qwen3.6-35B-A3B on an engine path of

@@ -121,6 +121,10 @@ dans le chat suivant. Sous Linux (une RTX PRO 6000 limitée à environ 8 Go) il 
 14.3 et écrivait 7 à 14 % moins vite. Avec le cache d'experts figé, comme on vérifie une version, les réponses sont
 identiques token par token.
 
+À l'inverse, `"--lock-experts"` verrouille en RAM les experts hors de la VRAM : le système ne peut pas donner cette
+mémoire à d'autres programmes, et le moteur n'a pas à les relire depuis le SSD. Sous Linux il en verrouille au plus
+ce que permet `ulimit -l`, et le moteur indique au démarrage combien il en a verrouillé.
+
 Le moteur demande aussi 350 à 400 MiB de VRAM de moins pour lire les prompts : le cache d'experts les prend (Qwen3.6
 garde 2,712 experts en VRAM au lieu de 2,444), ou `--vram-reserve-mib` les laisse aux autres programmes.
 Comment c'est mesuré : [docs/BACKENDS.md](docs/BACKENDS.md#less-of-the-pcs-ram-and-vram).

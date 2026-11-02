@@ -122,6 +122,10 @@ freier Karte. In zwei anderen Läufen schrieb es nach dem 32K-Prompt 6 bis 8 % l
 schrieb 7 bis 14 % langsamer. Mit festgehaltenem Experten-Cache, wie ein Release geprüft wird, sind die Antworten
 Token für Token gleich.
 
+Umgekehrt sperrt `"--lock-experts"` die Experten außerhalb des VRAM im RAM, sodass das System ihren Speicher nicht an
+andere Programme gibt und die Engine sie später nicht wieder von der SSD liest. Unter Linux sperrt es höchstens, was
+`ulimit -l` erlaubt, und die Engine sagt beim Start, wie viel es war.
+
 Zum Lesen von Prompts braucht die Engine außerdem 350 bis 400 MiB weniger VRAM: Der Expertencache nimmt sie (Qwen3.6
 hält 2,712 statt 2,444 Experten im VRAM), oder `--vram-reserve-mib` lässt sie anderen Programmen. Wie es funktioniert
 und gemessen wurde: [docs/BACKENDS.md](docs/BACKENDS.md#less-of-the-pcs-ram-and-vram).
