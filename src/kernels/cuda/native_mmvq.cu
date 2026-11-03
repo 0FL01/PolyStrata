@@ -633,13 +633,13 @@ __device__ __forceinline__ float iq4_xs_q8_dot(const IQ4XSBlock* __restrict__ w,
 }
 
 // IQ4_XS generic MMVQ: QK=256, QI=32, VDR=4,16 blocks per iteration.
-template<bool SmallK>
-__launch_bounds__(WARPS * WARP, 1)
+template<bool SmallK, int ActiveWarps = WARPS>
+__launch_bounds__(ActiveWarps * WARP, 1)
 __global__ void native_iq4_xs_mmvq_kernel(const IQ4XSBlock* __restrict__ w,
                                          const Q81Block* __restrict__ x,
                                          float* __restrict__ y, int n_in, int n_out) {
-    constexpr int ROWS = SmallK ? WARPS : 1;
-    constexpr int BLOCKS_PER_ITER = 4 * WARPS * WARP / 32;
+    constexpr int ROWS = SmallK ? ActiveWarps : 1;
+    constexpr int BLOCKS_PER_ITER = 4 * ActiveWarps * WARP / 32;
     const int tid = WARP * int(threadIdx.y) + int(threadIdx.x);
     const int row0 = ROWS * int(blockIdx.x);
     const int blocks_per_row = n_in / 256;
@@ -655,7 +655,7 @@ __global__ void native_iq4_xs_mmvq_kernel(const IQ4XSBlock* __restrict__ w,
             }
         }
     }
-    __shared__ float partial[WARPS - 1][ROWS][WARP];
+    __shared__ float partial[ActiveWarps > 1 ? ActiveWarps - 1 : 1][ROWS][WARP];
     if (threadIdx.y > 0) {
 #pragma unroll
         for (int i = 0; i < ROWS; ++i) partial[threadIdx.y - 1][i][threadIdx.x] = tmp[i];
@@ -665,7 +665,8 @@ __global__ void native_iq4_xs_mmvq_kernel(const IQ4XSBlock* __restrict__ w,
 #pragma unroll
     for (int i = 0; i < ROWS; ++i) {
 #pragma unroll
-        for (int l = 0; l < WARPS - 1; ++l) tmp[i] += partial[l][i][threadIdx.x];
+        for (int l = 0; l < WARPS - 1; ++l)
+            tmp[i] += l < ActiveWarps - 1 ? partial[l][i][threadIdx.x] : 0.f;
         tmp[i] = warp_sum(tmp[i]);
         if (threadIdx.x == i && row0 + i < n_out) y[row0 + i] = tmp[i];
     }
@@ -2936,6 +2937,28 @@ void native_q2_k_mmvq(const void* weights, const void* x_q8_1, float* y,
     launch_check();
 }
 
+#if defined(__HIPCC__) && !defined(STRATA_HIP_GFX906)
+static bool rdna2_iq4_rows_on() {
+    static const bool requested = [] {
+        const char* v = std::getenv("STRATA_RDNA2_IQ4_ROWS");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    if (!requested) return false;
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess) throw std::runtime_error("native IQ4_XS: cannot query device");
+    thread_local int last_device = -1;
+    thread_local bool enabled = false;
+    if (dev != last_device) {
+        cudaDeviceProp prop{};
+        if (cudaGetDeviceProperties(&prop, dev) != cudaSuccess)
+            throw std::runtime_error("native IQ4_XS: cannot query device properties");
+        enabled = gfx_arch_is(prop.gcnArchName, "gfx1031");
+        last_device = dev;
+    }
+    return enabled;
+}
+#endif
+
 void native_iq4_xs_mmvq(const void* weights, const void* x_q8_1, float* y,
                        int n_in, int n_out, int ncols, void* stream) {
     validate_shape(n_in, ncols, 256);
@@ -2953,6 +2976,18 @@ void native_iq4_xs_mmvq(const void* weights, const void* x_q8_1, float* y,
     const auto* w = static_cast<const IQ4XSBlock*>(weights);
     const auto* x = static_cast<const Q81Block*>(x_q8_1);
     const auto s = static_cast<cudaStream_t>(stream);
+#if defined(__HIPCC__) && !defined(STRATA_HIP_GFX906)
+    // These widths use only one or two of the old kernel's four warps. Smaller
+    // row groups expose more active waves; dot expressions and partial order stay.
+    if ((n_in == 512 || n_in == 2048) && rdna2_iq4_rows_on()) {
+        if (n_in == 512)
+            native_iq4_xs_mmvq_kernel<true, 1><<<unsigned(n_out), dim3(WARP, 1), 0, s>>>(w, x, y, n_in, n_out);
+        else
+            native_iq4_xs_mmvq_kernel<true, 2><<<unsigned((n_out + 1) / 2), dim3(WARP, 2), 0, s>>>(w, x, y, n_in, n_out);
+        launch_check();
+        return;
+    }
+#endif
     const dim3 threads(WARP, WARPS);
     if (n_in / 256 < 4 * WARPS * WARP / 32) {
         const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);

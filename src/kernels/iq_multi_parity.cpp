@@ -169,6 +169,52 @@ void check_mmvq(int t, int n_in, int n_out, cudaStream_t s, std::mt19937& rng) {
     cudaFree(dw); cudaFree(dwf); cudaFree(dx); cudaFree(dxq); cudaFree(dy_old); cudaFree(dy_new);
 }
 
+// Native IQ4_XS's single-column row geometry against the unchanged exact
+// multi-column layout, including graph capture/replay and a partial output row.
+void check_native_iq4_rows(cudaStream_t s, std::mt19937& rng) {
+    k::native_mmvq_set_multi_exact(true);
+    for (int n_in : {512, 2048}) {
+        const int n_out = n_in == 512 ? 67 : 2048;
+        const auto w = random_rows(23, n_out, n_in, rng);
+        const auto x = random_x((size_t) 8 * n_in, rng);
+        auto* dw = dalloc<uint8_t>(w.size());
+        auto* dx = dalloc<float>(x.size());
+        const size_t qcol = k::native_q8_1_bytes(n_in);
+        auto* xq = dalloc<uint8_t>(8 * qcol);
+        auto* old = dalloc<float>((size_t) 8 * n_out);
+        auto* one = dalloc<float>((size_t) 8 * n_out);
+        ck(cudaMemcpy(dw, w.data(), w.size(), cudaMemcpyHostToDevice), "IQ4 weights");
+        ck(cudaMemcpy(dx, x.data(), x.size() * 4, cudaMemcpyHostToDevice), "IQ4 activations");
+        k::quantize_q8_1_rows(dx, 8, n_in, xq, s);
+        ck(cudaStreamSynchronize(s), "IQ4 quantize");
+        for (int nc : {2, 3, 4, 8}) {
+            k::native_mmvq(23, dw, xq, old, n_in, n_out, nc, s);
+            ck(cudaStreamSynchronize(s), "IQ4 reference");
+            cudaGraph_t graph;
+            cudaGraphExec_t exec;
+            ck(cudaStreamBeginCapture(s, cudaStreamCaptureModeThreadLocal), "IQ4 capture");
+            for (int j = 0; j < nc; ++j)
+                k::native_mmvq(23, dw, xq + (size_t) j * qcol, one + (size_t) j * n_out,
+                               n_in, n_out, 1, s);
+            ck(cudaStreamEndCapture(s, &graph), "IQ4 end capture");
+            ck(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0), "IQ4 instantiate");
+            ck(cudaGraphLaunch(exec, s), "IQ4 graph replay");
+            ck(cudaStreamSynchronize(s), "IQ4 synchronize");
+            std::vector<float> a((size_t) nc * n_out), b(a.size());
+            ck(cudaMemcpy(a.data(), old, a.size() * 4, cudaMemcpyDeviceToHost), "IQ4 old");
+            ck(cudaMemcpy(b.data(), one, b.size() * 4, cudaMemcpyDeviceToHost), "IQ4 one");
+            const bool same = std::memcmp(a.data(), b.data(), a.size() * 4) == 0;
+            const bool finite = std::all_of(b.begin(), b.end(), [](float v) { return std::isfinite(v); });
+            std::printf("native IQ4_XS %d x %d, %d columns, graph: %s\n", n_out, n_in, nc,
+                        same && finite ? "bitwise equal" : "FAIL");
+            g_fail += !(same && finite);
+            ck(cudaGraphExecDestroy(exec), "IQ4 graph exec destroy");
+            ck(cudaGraphDestroy(graph), "IQ4 graph destroy");
+        }
+        cudaFree(dw); cudaFree(dx); cudaFree(xq); cudaFree(old); cudaFree(one);
+    }
+}
+
 // ---------------------------------------------------------------------------------- (2) native_expert_grouped
 struct Grouped {
     k::NativeExpertLayout L;
@@ -418,6 +464,7 @@ int main(int argc, char** argv) {
         check_grouped(gu, 23, 1024, 512, s, rng);                           // IQ4_XS down needs n_ff % 256 == 0
     }
     check_q8_1_finite(s, rng);
+    check_native_iq4_rows(s, rng);
     if (do_bench) bench(s, rng);
     std::printf("iq_multi_parity: %d failures\n", g_fail);
     cudaStreamDestroy(s);
