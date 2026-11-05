@@ -69,7 +69,8 @@ int tile_class(int rows) {
 }
 
 // A container's CPU quota is not in the affinity mask: a 25-CPU pod on a 208-thread host shows 208.
-int usable_cpus() {
+// `quota` is set when there is one.
+int usable_cpus(bool* quota_set = nullptr) {
     long long n = (long long) std::thread::hardware_concurrency();
 #ifdef __linux__
     cpu_set_t set;
@@ -86,9 +87,26 @@ int usable_cpus() {
             std::fclose(p);
         }
     }
-    if (quota > 0 && period > 0) n = std::min(n, std::max(1LL, quota / period));
+    if (quota > 0 && period > 0) {
+        n = std::min(n, std::max(1LL, quota / period));
+        if (quota_set) *quota_set = true;
+    }
+#else
+    (void) quota_set;
 #endif
     return (int) std::max(n, 1LL);
+}
+
+// The CPU threads when --threads names none: 70% of the usable CPUs, so that the PC's other programs keep the
+// rest.  With a thread for every CPU the CPU was 90 to 94% busy while an answer was written, on 16 cores of a
+// Xeon beside a card held to 8 GB; 22 threads of 32 left it 66% busy, wrote as fast, and 19 to 23% faster
+// beside another program's load on 8 CPUs, since a layer waits for its slowest thread and a thread that has to
+// share its CPU is the slowest.  A container with a CPU quota keeps them all: that is a server with no desktop
+// to leave CPU to, and GLM 5.3 Flash's CPU experts there take 15 ms a token with 18 threads where 12.8 with 24.
+int default_threads() {
+    bool quota = false;
+    const int n = usable_cpus(&quota);
+    return quota ? n : std::max(1, (n * 7 + 5) / 10);
 }
 
 // On a machine with several NUMA nodes the file cache's pages are on the node whose CPU read them first, and the
@@ -2169,7 +2187,7 @@ void Engine::load(const Options& o) {
             }
         }
     }
-    const int threads = opt_.threads > 0 ? opt_.threads : usable_cpus();
+    const int threads = opt_.threads > 0 ? opt_.threads : default_threads();
     mind_memory();
     // the routed experts in the mapped files, and of them the ones the CPU reads through the mapping: those the
     // card does not have, as many as Options::ram_experts_mib keeps

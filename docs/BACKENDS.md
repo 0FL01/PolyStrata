@@ -2005,6 +2005,45 @@ the laptop, with Qwen3.6 UD-Q3_K_M as setup runs it, six turns of 188 tokens beh
 with either value, two rounds of each in turn. The new prompts of 300, 500 and 800 tokens after them took 499 to
 844 ms with 1,024 and 1,276 to 1,432 with 256, where their calls copy ahead and the CPU takes no share.
 
+### CPU left to other programs
+
+The engine took a thread for every usable CPU. A thread without a task spins a millisecond before it sleeps,
+and the tasks of a token come closer together than that, so while an answer was written the CPU was all but full.
+The engine now takes 70% of the CPUs, rounded, unless `--threads` names a count. A container with a CPU quota
+(`/sys/fs/cgroup/cpu.max`, as a rented cloud machine has) keeps every CPU: it has no desktop to leave CPU to, and
+that is where GLM 5.3 Flash and DeepSeek V4 Flash run, whose CPU experts are most of a token (on the RTX 5090
+machine on 2026-10-12, GLM's took 15 ms a token with 18 threads where 12.8 with 24). A server with no quota is
+taken for a PC: give it `--threads` with its CPU count for those two models. On a hybrid CPU setup writes a count
+of its own, as before.
+
+It was measured with a test script kept outside the repository: Qwen3.6 UD-Q3_K_M, the engine of
+0.1.45-poly.7 alone, the README's short chat, a prompt of about 24,000 tokens and the short chat again, 256 tokens
+each, three rounds and the medians of the last two. Under Linux on 16 cores and 32 threads of a node of the RTX
+PRO 6000's Xeon (`taskset`), the card held to 8 GB, with others' work on 10 to 15% of each core; tokens/s
+written, and the share of the 32 CPUs busy while it wrote:
+
+| Threads | Short chat | After the prompt | Short chat again | CPU busy | Alongside a load on 8 CPUs |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 32, as before | 177.9 | 178.3 | 211.5 | 90 to 94% | 146.0, 136.6, 155.3; the load at 60 to 63 of its 95 alone |
+| 22, the new default | 185.0 | 177.1 | 209.6 | 66 to 67% | 173.8, 165.0, 191.2; the load at 62 to 65 |
+| 16 | 186.5 | 170.2 | 210.5 | 49 to 50% | 173.9, 152.8, 184.9; the load at 65 to 68 |
+
+The columns beside the load are one session's, the others another's. A thread that has to share its CPU with
+another program is the slowest of a layer's, and the layer waits for it, which is why fewer threads write faster
+beside a load. A thread of the test that slept 5 ms woke 3.1 to 3.5 ms late at the 99th percentile with 32
+threads, and 0.1 ms late with 22 or 16. On the laptop (RTX 4070 Laptop, i7-14700HX, Windows), where setup writes
+13 threads, the CPU was 41 to 45% busy while it wrote; 10 threads made it 33 to 37% at the same speed within the
+runs' noise, and 8 threads 28 to 31% at 0% to 4% slower.
+
+Three other ways were measured and are not taken. Keeping more VRAM free costs experts in VRAM: 1,024 MiB
+(the default leaves 256) wrote 6 to 7% slower under Linux, and as fast on the laptop, whose cache gave up 387
+of its 2,712 experts; 2,048 MiB wrote 11 to 17% slower under Linux and 3 to 6% slower on the laptop. A lower
+priority (`nice 10`, Windows' below normal) wrote as fast alone, and a load beside it ran about as fast as beside
+the normal priority (64 to 66 against 61 to 65 under Linux), most likely because what the two share is a core's
+two threads and the memory, which a priority does not divide. A
+CPU set of 22 CPUs (20 on the laptop) wrote 4% to 9% slower than the same count of threads free to move. The
+Windows runs with every CPU taken by a load did not run: the laptop's RAM was in use.
+
 ### Less of the PC's RAM and VRAM
 
 On the laptop (RTX 4070 Laptop 8 GB, 32 GB of RAM), Qwen3.6 UD-Q3_K_M held the whole of its 15.9 GiB file in its

@@ -1049,7 +1049,8 @@ void usage() {
     std::fprintf(stderr,
                  "usage: strata-poly --model FILE.gguf (--serve | --tokens ID,ID,... [--max-new N])\n"
                  "  --max-context N        tokens the attention caches hold (default 8192)\n"
-                 "  --threads N            CPU threads for the experts that are not in VRAM (default: all usable)\n"
+                 "  --threads N            CPU threads for the experts that are not in VRAM (default: 70%% of the usable\n"
+                 "                         CPUs; all of them in a container with a CPU quota)\n"
                  "  --vram-reserve-mib N   VRAM left free beside the expert cache, 256 at least (default: a\n"
                  "                         thirty-second of the card, 256 to 768, or a sixteenth, 512 to 1024,\n"
                  "                         when the PC's free RAM is within 4 GiB of the model's files, and then\n"

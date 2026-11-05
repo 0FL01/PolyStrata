@@ -6995,7 +6995,7 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     if not multi and poly_batch(fam, d, vram, ctx):
         args += ["--prompt-batch", "2048"]
         ok("prompts are read 2,048 tokens at a time (--prompt-batch in the config)")
-    # The engine's own count is every logical CPU.  On a hybrid CPU that is the slowest: an efficiency core runs
+    # The engine's own count is 70% of the logical CPUs.  A hybrid CPU gets one of setup's: an efficiency core runs
     # an expert at half the speed, and a layer waits for its slowest part (hybrid_pool_workers()).
     cores = cpu_cores()
     threads = hybrid_pool_workers(cores)
