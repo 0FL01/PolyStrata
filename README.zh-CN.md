@@ -105,6 +105,9 @@ Qwen3.6-35B-A3B 读完 32,000 个 token 的提示后，0.1.45-poly.6 占 17.9 Gi
 8% 到 10%。Linux 上（RTX PRO 6000 限到约 8 GB），它占 7.0 到 7.7 GiB，默认是 12.3 到 14.3 GiB，写得慢 7% 到 14%。把专家缓存
 固定住（发布前就是这样检查的），回答逐个 token 都一样。
 
+反过来，加上 `"--lock-experts"` 会把显卡外的专家锁在内存里，系统不能把这部分内存让给别的程序，引擎也就不用回头从 SSD
+重读。Linux 上最多锁 `ulimit -l` 允许的量，引擎启动时会说锁了多少。
+
 读提示用的显存也少了 350 到 400 MiB：要么给专家缓存（Qwen3.6 显存里的专家从 2,444 个变成 2,712 个），要么用
 `--vram-reserve-mib` 留给别的程序。原理和测法见 [docs/BACKENDS.md](docs/BACKENDS.md#less-of-the-pcs-ram-and-vram)。
 

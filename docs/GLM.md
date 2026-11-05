@@ -269,6 +269,7 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 | `--stage-mib N` | 128 on an NVIDIA card where a longer read can widen it (one card), else 2048 | VRAM the experts outside the cache pass through while a prompt is read |
 | `--stage-read-mib N` | 2048 with the 128 MiB `--stage-mib` default, else 0 | a prompt read of several batches widens the staging buffer to N MiB (at most a layer's experts) with VRAM the expert cache lends it until the answer starts; 0 = never |
 | `--ram-experts-mib N` | all of them | the MiB of RAM held for the experts outside VRAM, while an answer is written too, the most used first; the rest stay in the file cache for other programs to take and are read back when a token needs them, which writes slower |
+| `--lock-experts` | off | the experts outside VRAM locked in RAM, so the system cannot drop them when another program wants the memory; Linux locks up to `ulimit -l`; not with `--ram-experts-mib` |
 | `--stage-ahead N` | 1024 | from N tokens, a batch copies those experts before the layer has chosen, as does every batch of a prompt of N tokens or more that is read several at a time; 0 = never |
 | `--cpu-share F` | as the times say | in a batch of fewer tokens than `--stage-ahead`, the share of the experts outside VRAM that the CPU computes while the others are copied: the ones the fewest tokens chose; 0 = none |
 | `--prompt-cache N` | 6 | checkpoints kept of a conversation; 0 = only a next turn is not read again |

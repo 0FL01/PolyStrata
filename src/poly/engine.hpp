@@ -79,7 +79,9 @@ struct Options {
                                   ///< the ones used most lately are read into it from the files; the others are left
                                   ///< to the file cache, which gives them to whatever needs the memory, and come back
                                   ///< from it or the disk when a token routes to them.  Below 0: all of them
-    bool stay_near = true;        ///< with several NUMA nodes, keep the CPU threads on the one that holds the experts
+    bool lock_experts = false;    ///< the experts outside VRAM locked into RAM, so the system cannot drop them from
+                                  ///< the file cache when another program wants the memory (Linux: up to ulimit -l)
+    bool stay_near = true;       ///< with several NUMA nodes, keep the CPU threads on the one that holds the experts
     bool graphs = true;           ///< a token's fixed launches are recorded once, a CUDA graph a layer, and replayed
     bool kv_grow = true;          ///< the attention caches get VRAM as the sequence grows, where the card can map it
                                   ///< so; false: for the whole context at load, as the expert cache gets the rest
@@ -597,6 +599,12 @@ protected:
     double node_share_ = 0;
     std::thread mapper_;                  ///< reads the experts' pages once after load, so they are mapped
     std::atomic<bool> map_quit_{false};
+    /// Options::lock_experts: the experts whose pages are locked (layer * n_expert + expert), first by mapper_, then
+    /// by relock() between requests once mapper_ is done (locks_ready_)
+    std::vector<uint8_t> locked_;
+    std::atomic<bool> locks_ready_{false};
+    void lock_outside(const std::vector<std::pair<int, int>>& outside);
+    void relock();
     void* st_ = nullptr;   ///< the stream everything but the staging ahead runs on
     bool freeze_experts_ = false;            ///< STRATA_FREEZE_EXPERTS: the experts' split is frozen
                                              ///< for the engine's whole run (see Engine::load())
