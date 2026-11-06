@@ -104,7 +104,8 @@ Um weniger zu belegen, füge `"--ram-experts-mib", "6144"` zur `"args"`-Liste vo
 ([wo](docs/INSTALL.md#where-things-are-stored)) und starte neu. Die Engine hält dann so viele MiB RAM für die Experten
 außerhalb des VRAM, auch während sie antwortet, und sagt das beim Start. Die übrigen bleiben im Dateicache des
 Systems, wo andere Programme den Speicher nutzen können, und werden von dort gelesen, wenn ein Token sie braucht.
-Standardmäßig ist das aus, weil es langsamer schreibt; wir arbeiten weiter daran. Auf dem Laptop (RTX 4070 Laptop
+Passen die Experten in den freien RAM, ist das standardmäßig aus, weil es langsamer schreibt; wir arbeiten weiter
+daran. Passen sie nicht hinein, schaltet die Engine es selbst ein (siehe unten). Auf dem Laptop (RTX 4070 Laptop
 8 GB, 32 GB RAM, Windows 11), Qwen3.6-35B-A3B UD-Q3_K_M:
 
 | | Standard | `--ram-experts-mib 6144` |
@@ -122,6 +123,22 @@ freier Karte. In zwei anderen Läufen schrieb es nach dem 32K-Prompt 6 bis 8 % l
 10 %. Unter Linux (eine RTX PRO 6000, auf etwa 8 GB begrenzt) belegte es 7.0 bis 7.7 GiB statt 12.3 bis 14.3 und
 schrieb 7 bis 14 % langsamer. Mit festgehaltenem Experten-Cache, wie ein Release geprüft wird, sind die Antworten
 Token für Token gleich.
+
+Passen die Experten außerhalb des VRAM nicht in den freien RAM, hält die Engine jetzt die meistgenutzten in einem
+Budget aus diesem RAM minus 4 GiB und liest die übrigen von der SSD, wenn ein Token sie braucht; das sagt sie beim
+Start. Vorher bildete sie alle ab, und das System las sie Seitenfehler für Seitenfehler zurück. Das Speicherlimit
+eines Containers zählt mit. Gemessen unter Linux auf einer RTX PRO 6000, auf etwa 8 GB begrenzt, mit der Engine auf
+12 GB und auf 10 GB RAM begrenzt (was ihr auf einem PC mit 16 GB bleibt) und der Modelldatei bei jedem Start
+außerhalb des Dateicaches: Qwen3.6-35B-A3B UD-Q3_K_M, Token/s im ersten kurzen Chat, nach einem 24,000-Token-Prompt
+und in einem kurzen Chat danach.
+
+| RAM für die Engine | alle Experten abgebildet (vorher) | das Budget, das sie jetzt nimmt |
+| --- | ---: | ---: |
+| 12 GB | 51 / 75-78 / 94-98 | **57-60 / 77-85 / 131-139** |
+| 10 GB | 39 / 48 / 69 | **51 / 64 / 92** |
+
+Ohne Limit schreibt dieselbe Maschine 63 / 169 / 203. Unter Windows, wo derselbe Code läuft, wurde es nicht
+gemessen. `"--ram-experts-mib", "-1"` bildet wie bisher alle Experten ab.
 
 Umgekehrt sperrt `"--lock-experts"` die Experten außerhalb des VRAM im RAM, sodass das System ihren Speicher nicht an
 andere Programme gibt und die Engine sie später nicht wieder von der SSD liest. Unter Linux sperrt es höchstens, was

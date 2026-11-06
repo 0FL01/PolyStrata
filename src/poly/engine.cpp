@@ -2255,6 +2255,22 @@ void Engine::load(const Options& o) {
         if (L.moe)
             expert_runs(L, n_expert_, [&](int e) { return !L.slot[(size_t) e]; },
                         [&](const uint8_t*, size_t n) { outside_bytes_ += n; });
+    // Options::ram_experts_mib below -1, the default: every expert outside VRAM in RAM when they fit in what is free,
+    // with kRamHeadroom left for the rest of the process; else a budget of what is free less that.  Through the
+    // mapping, experts that do not fit are read back a fault at a time: on the lab's machine held to 12 GB, Qwen3.6
+    // UD-Q3_K_M wrote 51, 73 and 99 tokens/s (a chat, after a 24,000-token prompt, a chat again) with every expert
+    // mapped and 61, 88 and 120 with a budget of 6 GiB.
+    if (opt_.ram_experts_mib < -1) {
+        constexpr size_t kRamHeadroom = size_t(4) << 30;
+        const size_t avail = ram_available();
+        opt_.ram_experts_mib = -1;
+        if (avail && !opt_.lock_experts && outside_bytes_ + kRamHeadroom > avail) {
+            opt_.ram_experts_mib = std::max<int64_t>(1024, (int64_t) ((avail > kRamHeadroom ? avail - kRamHeadroom : 0) >> 20));
+            std::fprintf(stderr, "strata-poly: %.1f GiB of RAM free for %.1f GiB of experts outside VRAM: they do not fit, "
+                                 "so the ones used most stay in RAM (--ram-experts-mib -1 maps them all)\n",
+                         (double) avail / (1 << 30), (double) outside_bytes_ / (1 << 30));
+        }
+    }
     if (opt_.ram_experts_mib >= 0) {
         // each size of slot takes the share of the budget its experts outside VRAM have of all of those
         pool_size_of_.assign(layers_.size(), 0);

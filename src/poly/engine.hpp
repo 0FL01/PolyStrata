@@ -75,10 +75,11 @@ struct Options {
                                   ///< below 0: as the two took the time between them; 0: none
     int expert_swaps = 64;        ///< experts on their way into the cache at a time while an answer is written, each
                                   ///< to the slot of one the answer uses less; 0: the cache stays as it was loaded
-    int64_t ram_experts_mib = -1; ///< the memory this process holds for the experts outside VRAM, answer or not:
+    int64_t ram_experts_mib = -2; ///< the memory this process holds for the experts outside VRAM, answer or not:
                                   ///< the ones used most lately are read into it from the files; the others are left
                                   ///< to the file cache, which gives them to whatever needs the memory, and come back
-                                  ///< from it or the disk when a token routes to them.  Below 0: all of them
+                                  ///< from it or the disk when a token routes to them.  -1: all of them; below
+                                  ///< that, all of them when they fit in the RAM that is free, else a budget
     bool lock_experts = false;    ///< the experts outside VRAM locked into RAM, so the system cannot drop them from
                                   ///< the file cache when another program wants the memory (Linux: up to ulimit -l)
     bool stay_near = true;       ///< with several NUMA nodes, keep the CPU threads on the one that holds the experts

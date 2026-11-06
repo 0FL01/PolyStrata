@@ -101,7 +101,8 @@ Para ocupar menos, añade `"--ram-experts-mib", "6144"` a la lista `"args"` de `
 ([dónde](docs/INSTALL.md#where-things-are-stored)) y reinicia. El motor guarda entonces esos MiB de RAM para los
 expertos que quedan fuera de la VRAM, también mientras responde, y lo dice al arrancar. Los demás se quedan en la
 caché de archivos del sistema, donde tus otros programas pueden usar esa memoria, y se leen de ahí cuando un token
-los necesita. Viene apagado porque escribe más lento, y seguimos trabajando en ello. En el portátil (RTX 4070 Laptop
+los necesita. Si los expertos caben en la RAM libre viene apagado, porque escribe más lento, y seguimos trabajando en
+ello; si no caben, el motor lo enciende solo (más abajo). En el portátil (RTX 4070 Laptop
 8 GB, 32 GB de RAM, Windows 11), Qwen3.6-35B-A3B UD-Q3_K_M:
 
 | | por defecto | `--ram-experts-mib 6144` |
@@ -119,6 +120,22 @@ tarjeta libre. En otras dos medidas escribió entre un 6 y un 8 % más lento tra
 10 % en el chat siguiente. En Linux (una RTX PRO 6000 limitada a unos 8 GB) ocupó de 7.0 a 7.7 GiB en vez de 12.3 a
 14.3 y escribió entre un 7 y un 14 % más lento. Con la caché de expertos fija, como se comprueba una versión, las
 respuestas son iguales token a token.
+
+Cuando los expertos fuera de la VRAM no caben en la RAM libre, el motor ahora guarda los más usados en un presupuesto
+de esa RAM menos 4 GiB y lee los demás del SSD cuando un token los necesita; lo dice al arrancar. Antes los mapeaba
+todos y el sistema los volvía a leer fallo de página a fallo de página. También cuenta el límite de memoria de un
+contenedor. Medido en Linux en una RTX PRO 6000 limitada a unos 8 GB, con el motor limitado a 12 GB y a 10 GB de RAM,
+lo que le queda en un PC de 16 GB, y el archivo del modelo fuera de la caché de archivos en cada arranque:
+Qwen3.6-35B-A3B UD-Q3_K_M, tokens/s en el primer chat corto, tras un prompt de 24,000 tokens y en un chat corto
+después.
+
+| RAM para el motor | todos los expertos mapeados (antes) | el presupuesto que toma ahora |
+| --- | ---: | ---: |
+| 12 GB | 51 / 75-78 / 94-98 | **57-60 / 77-85 / 131-139** |
+| 10 GB | 39 / 48 / 69 | **51 / 64 / 92** |
+
+Sin límite, la misma máquina escribe 63 / 169 / 203. No se midió en Windows, donde corre el mismo código.
+`"--ram-experts-mib", "-1"` mantiene todos los expertos mapeados como antes.
 
 Al revés, `"--lock-experts"` bloquea en RAM los expertos que quedan fuera de la VRAM, así el sistema no da esa memoria
 a otros programas ni el motor tiene que volver a leerlos del SSD. En Linux bloquea como mucho lo que permite

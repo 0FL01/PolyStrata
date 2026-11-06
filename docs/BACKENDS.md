@@ -2153,6 +2153,55 @@ With `ulimit -l` at 1 GiB it locked 1.0 GiB and said that mlock refused the rest
 prompt, the cache gave up experts for them, and those were locked as well. The answers were the same with and
 without it.
 
+#### When the experts do not fit in RAM
+
+Without `--ram-experts-mib` the engine looks at the RAM that is free once the expert cache is filled. When the
+experts outside VRAM and 4 GiB more do not fit in it, it takes a budget of what is free less 4 GiB, as if
+`--ram-experts-mib` had named it, and says so:
+
+    strata-poly: 11.7 GiB of RAM free for 9.3 GiB of experts outside VRAM: they do not fit, so the ones used most stay in RAM (--ram-experts-mib -1 maps them all)
+
+Otherwise every expert stays mapped, as before, and `-1` keeps them mapped whatever the RAM. Free is what the system
+reports (MemAvailable under Linux, the available physical memory under Windows), and under Linux no more than the
+room under the cgroup memory limits on the way to the root, a group's file pages counted as free: a container sees
+the host's RAM in /proc/meminfo. With `--lock-experts` the engine takes no budget by itself.
+
+Through the mapping, experts that do not fit come back a page fault at a time, each fault a few pages read and
+waited for. Measured on the lab's machine with Qwen3.6 UD-Q3_K_M (a 15.9 GiB file, 9.3 GiB of experts outside the
+card): the card held to about 8 GB, 16 cores and 32 threads of the Xeon's second node, the engine in a systemd scope
+with MemoryMax of 12 or 10 GB and no swap, and the model file dropped from the page cache before every start
+(POSIX_FADV_DONTNEED: a page that another cgroup read in is not charged to the scope, and runs before that found the
+file in memory). Three rounds, the medians of the last two, tokens/s:
+
+| RAM | | First short chat | After 24,000 tokens | Short chat again |
+| --- | --- | ---: | ---: | ---: |
+| 12 GB | every expert mapped | 51.1 | 78.4 | 94.0 |
+| | 6,144 MiB | 56.1 | 86.1 | 115.8 |
+| | 7,168 MiB | 60.0 | 81.0 | 115.8 |
+| | by itself: 7,902 MiB | 59.5 | 84.6 | 138.8 |
+| 10 GB | every expert mapped | 39.1 | 48.2 | 69.2 |
+| | 4,096 MiB | 51.1 | 59.1 | 80.1 |
+| | by itself: 5,855 MiB | 51.1 | 64.1 | 91.7 |
+| no limit | every expert mapped | 63.1 | 168.5 | 202.8 |
+
+In another session, two runs under 12 GB with the build as committed, every expert mapped wrote 50.8, 75.3 and 97.9
+tokens/s and the budget it took 57.0, 77.0 and 130.7: after the long prompt the two are closer there, and that cell
+moves most from session to session. The engine found 11.7 GiB free under the 12 GB limit and 9.7 GiB under 10 GB.
+With the experts held still, the three
+answers under 12 GB were the same token for token with the budget it took and with every expert mapped. The first
+chat is slow in every row: it comes right after the load, with none of the file in memory yet.
+
+Two more were tried and left out. Reading the experts outside the budget past the page cache (O_DIRECT), which the
+lab's NVMe gives 3.41 GB/s with eight threads reading 256 KiB where plain pread gives 2.06 from a cold cache, wrote
+slower with the same budget: 6,144 MiB wrote 58, 79 and 99 tokens/s where it wrote 63, 90 and 114 through the cache,
+since the cache holds what the budget leaves free. A budget that makes up for it has to be just right: 8,192 MiB wrote
+57, 82 and 125, and 9,216 MiB 54, 64 and 116, when the engine's own memory and the mapped part of the budget no longer
+fitted under 12 GB. And reading the file ahead at the load, as Windows does, did not make the first answer after a
+cold start faster under Linux: with madvise(MADV_WILLNEED) over the spans it came at 63.5 tokens/s and with a thread
+of 16 MiB preads at 61.8, where 63.1 without either, with no limit.
+
+Windows decides the same way and was not measured; the budget's reads there are the ReadFile ones measured above.
+
 ### Qwen3.6 on two engines
 
 Since its 0.1.44 the [Strata](https://github.com/Niko1221/Strata) project runs Qwen3.6-35B-A3B on an engine path of
