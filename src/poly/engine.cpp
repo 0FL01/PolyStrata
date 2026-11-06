@@ -516,7 +516,60 @@ int default_reserve_mib(size_t total_b, bool ram_tight) {
     return (int) std::clamp<size_t>(total_b >> 25, 256, 768);
 }
 
-// The RAM the machine has free for the model's file, or 0 when it cannot tell.
+#ifdef __linux__
+// A cgroup's memory limit is not in /proc/meminfo: a container, or a systemd scope, with one shows the host's RAM.
+// The room under the tightest limit on the way to the root: each limit less what its group holds that the kernel
+// cannot drop (its file pages it can).  SIZE_MAX when no group has a limit.
+size_t cgroup_room() {
+    std::string path;
+    if (FILE* f = std::fopen("/proc/self/cgroup", "r")) {
+        char line[512];
+        while (std::fgets(line, sizeof(line), f))
+            if (std::strncmp(line, "0::", 3) == 0) {
+                path = line + 3;
+                break;
+            }
+        std::fclose(f);
+    }
+    while (!path.empty() && path.back() == '\n') path.pop_back();
+    if (path.empty() || path[0] != '/') return SIZE_MAX;   // cgroup v1 only
+    size_t room = SIZE_MAX;
+    for (;;) {
+        const std::string dir = "/sys/fs/cgroup" + (path == "/" ? std::string() : path);
+        unsigned long long max = 0, cur = 0, file = 0;
+        bool limited = false;   // "max" when there is no limit
+        if (FILE* f = std::fopen((dir + "/memory.max").c_str(), "r")) {
+            limited = std::fscanf(f, "%llu", &max) == 1;
+            std::fclose(f);
+        }
+        if (limited) {
+            if (FILE* f = std::fopen((dir + "/memory.current").c_str(), "r")) {
+                if (std::fscanf(f, "%llu", &cur) != 1) cur = 0;
+                std::fclose(f);
+            }
+            if (FILE* f = std::fopen((dir + "/memory.stat").c_str(), "r")) {
+                char key[64];
+                unsigned long long v = 0;
+                while (std::fscanf(f, "%63s %llu", key, &v) == 2)
+                    if (std::strcmp(key, "file") == 0) {
+                        file = v;
+                        break;
+                    }
+                std::fclose(f);
+            }
+            const unsigned long long held = cur > file ? cur - file : 0;
+            room = std::min(room, max > held ? (size_t) (max - held) : 0);
+        }
+        if (path == "/") break;
+        const size_t cut = path.find_last_of('/');
+        path = cut == 0 ? "/" : path.substr(0, cut);
+    }
+    return room;
+}
+#endif
+
+// The RAM the machine has free for the model's file, or 0 when it cannot tell: under a cgroup's limit, what that
+// leaves if it is less.
 size_t ram_available() {
 #ifdef _WIN32
     MEMORYSTATUSEX st{};
@@ -530,7 +583,11 @@ size_t ram_available() {
             if (std::sscanf(line, "MemAvailable: %zu kB", &kb) == 1) break;
         std::fclose(f);
     }
+#ifdef __linux__
+    return std::min(kb << 10, cgroup_room());
+#else
     return kb << 10;
+#endif
 #endif
 }
 
