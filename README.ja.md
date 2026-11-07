@@ -140,9 +140,9 @@ RTX PRO 6000、エンジンの RAM を 12 GB と 10 GB に制限（16 GB の PC 
 | [Qwen3.8-Flash-Next](docs/models/qwen38.ja.md) | NVIDIA RTX 20〜50 シリーズ、または AMD RX 6800 / 6900, RX 7700 XT / 7800 XT / 7900 XT / XTX, RX 9060 XT / 9070 / 9070 XT, Radeon AI PRO R9700、12 GB 以上 | 32 GB 以上、64 GB ですべてのサイズ | 約 80 GB | Windows、Linux |
 | [GLM 5.3 Flash](docs/models/glm.ja.md) | NVIDIA RTX 20 シリーズ以降、32 GB のカードでのみ動作確認 | 32 GB のカードで 96 GB | 79〜114 GB、SSD に | Linux |
 | [DeepSeek V4 Flash](docs/models/deepseek.ja.md) | 同上 | 32 GB のカードで 72 GB | 91 GB、SSD に | Linux |
-| [LFM2.5-24B-A2B](docs/models/lfm25.ja.md) | NVIDIA RTX 20 シリーズ以降、8 GB 以上 | 8 GB のカードで約 20 GB | 11〜25 GB | Windows、Linux |
+| [LFM2.5-24B-A2B](docs/models/lfm25.ja.md) | NVIDIA RTX 20 シリーズ以降、8 GB 以上 | 8 GB のカードで約 20 GB | 11〜25 GB | Windows、Linux、Mac（ベータ版） |
 | [Flint 40B-A2.5B](docs/models/flint.ja.md) | 同上 | 8 GB のカードで約 22 GB | 18〜42 GB | Windows、Linux |
-| [Qwen3.6-35B-A3B](docs/models/qwen36.ja.md) | 同上、AMD はベータ | 8 GB のカードで約 21 GB | 13〜23 GB | Windows、Linux |
+| [Qwen3.6-35B-A3B](docs/models/qwen36.ja.md) | 同上、AMD はベータ | 8 GB のカードで約 21 GB | 13〜23 GB | Windows、Linux、Mac（ベータ版） |
 | [Clover-35B-A3B-Preview](docs/models/clover.ja.md) | NVIDIA RTX 20 シリーズ以降、8 GB 以上 | 8 GB のカードで約 20 GB | 13〜21 GB | Windows、Linux |
 | [Ornith 1.5](docs/models/ornith.ja.md) | 同上、AMD はベータ | 8 GB のカードで約 22 GB | 14〜24 GB | Windows、Linux |
 | [Gemma 4 26B-A4B](docs/models/gemma4.ja.md) | 同上、AMD はベータ | 8 GB のカードで約 18 GB | 11〜17 GB | Windows、Linux |
@@ -150,7 +150,7 @@ RTX PRO 6000、エンジンの RAM を 12 GB と 10 GB に制限（16 GB の PC 
 | [MiniCPM-V 4.7 35B-A3B](docs/models/minicpmv.ja.md) | 同上、AMD はベータ | 8 GB のカードで約 25 GB | 16〜29 GB | Windows、Linux |
 | [Kolibri 1](docs/models/kolibri.ja.md) | NVIDIA RTX 20 シリーズ以降、8 GB 以上 | 8 GB のカードで約 33 GB | 29〜48 GB | Windows、Linux |
 
-RAM はインストーラーの見積もりで、カードが大きいほど少なくて済みます。ほかはすべてインストーラーが用意します。Windows ではビルド済みのエンジンをダウンロードし、AVX2 のないプロセッサーや、手元のエンジンが最新リリースより新しいときだけ PC でコンパイルします（足りないツールは入れるか聞きます）。2〜3 枚のカードで 1 つのモデルを分担できます（[マルチ GPU](docs/MULTI_GPU.md)）。古いグラフィックカード、Intel Arc、Strix Halo、AVX2 のない古いプロセッサー：[詳しい一覧](docs/INSTALL.md#what-you-need)。各モデルのカード、RAM、サイズの詳細はそれぞれのページにあります。
+RAM はインストーラーの見積もりで、カードが大きいほど少なくて済みます。ほかはすべてインストーラーが用意します。Windows ではビルド済みのエンジンをダウンロードし、AVX2 のないプロセッサーや、手元のエンジンが最新リリースより新しいときだけ PC でコンパイルします（足りないツールは入れるか聞きます）。2〜3 枚のカードで 1 つのモデルを分担できます（[マルチ GPU](docs/MULTI_GPU.md)）。古いグラフィックカード、Intel Arc、Apple シリコンの Mac（Qwen3.8-Flash-Next、ベータ版として Qwen3.6 と LFM2.5）、Strix Halo、AVX2 のない古いプロセッサー：[詳しい一覧](docs/INSTALL.md#what-you-need)。各モデルのカード、RAM、サイズの詳細はそれぞれのページにあります。
 
 Qwen3.6、Clover、Ornith 1.5、Gemma 4、Tiel Coder、MiniCPM-V の 6 つのモデルそれぞれに必要なものと確認の方法：[docs/BACKENDS.md](docs/BACKENDS.md#install)（英語）。
 
@@ -180,7 +180,7 @@ PolyStrata のインストール、起動、停止もできます。
 - コンテキストをどのくらいにするか（モデルが覚えておけるテキストの量）
 - 画像を読ませるかどうか（GLM 5.3 Flash、DeepSeek V4 Flash、LFM2.5、Flint、Clover、Kolibri 1 は画像を読めません）
 
-**Mac（Apple シリコン、M1〜M5、macOS 15 以降）：** まず一度だけ Apple の Command Line Tools をインストールします（ターミナルで `xcode-select --install`。Xcode 本体は不要です）。次に PolyStrata フォルダーでターミナルを開き、**`./setup.sh`** を実行します。Mac 用エンジンをお使いの Mac 上でビルドし（約 7 分）、同じ質問をしてからモデルをダウンロードして起動します。次回からは `./setup.sh` ですぐに起動します。どのサイズが Mac に合うかと速度：[docs/MAC.md](docs/MAC.md)。Mac 用エンジンで動くのは Qwen3.8-Flash-Next だけで、残りの 11 個には NVIDIA か AMD のグラフィックカードが必要です。
+**Mac（Apple シリコン、M1〜M5、macOS 15 以降）：** まず一度だけ Apple の Command Line Tools をインストールします（ターミナルで `xcode-select --install`。Xcode 本体は不要です）。次に PolyStrata フォルダーでターミナルを開き、**`./setup.sh`** を実行します。Mac 用エンジンをお使いの Mac 上でビルドし（約 7 分）、同じ質問をしてからモデルをダウンロードして起動します。次回からは `./setup.sh` ですぐに起動します。どのサイズが Mac に合うかと速度：[docs/MAC.md](docs/MAC.md)。標準では Qwen3.8-Flash-Next をセットアップします。`./setup.sh --family qwen36` または `--family lfm25` を使うと、代わりに Qwen3.6 か LFM2.5 を strata-poly の Metal エンジンでセットアップします（ベータ版）。M5 Ultra では Qwen3.6 UD-Q2_K_XL が短いチャットで毎秒 134 トークンを書き、3,768 トークンのプロンプトを毎秒 2,978 トークンで読みました。GLM、DeepSeek、Ornith、Gemma 4、Tiel Coder、MiniCPM-V も Mac でセットアップできますが、Mac ではまだ実際の重みで動かしていません。Kolibri、Flint、Clover には NVIDIA か AMD のグラフィックカードが必要です。
 
 毎回 Enter を押せば、おすすめの答えになります。そのあとモデル（Qwen3.8-Flash-Next は約 70 GB、GLM 5.3 Flash は 79〜114 GB、DeepSeek V4 Flash は 91 GB、Kolibri 1 は 29〜48 GB、ほかの 8 つは 11〜42 GB）をダウンロードして起動します。
 ダウンロードが止まったら、もう一度実行してください。続きから再開します。ブラウザーで PolyStrata アプリが

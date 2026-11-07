@@ -106,8 +106,9 @@ Daha azını tutması için `strata-<model>.json` dosyasındaki `"args"` listesi
 ([nerede](docs/INSTALL.md#where-things-are-stored)) ve yeniden başlat. Motor bundan sonra VRAM dışında kalan uzmanlar
 (experts) için, yanıt verirken de, RAM'de bu kadar MiB tutar ve başlarken bunu söyler. Geri kalanlar sistemin dosya
 önbelleğinde kalır; orada diğer programların bu belleği kullanabilir ve bir token onlara ihtiyaç duyduğunda oradan
-okunurlar. Daha yavaş yazdığı için varsayılan olarak kapalıdır ve bunun üzerinde hâlâ çalışıyoruz. Dizüstünde
-(RTX 4070 Laptop 8 GB, 32 GB RAM, Windows 11), Qwen3.6-35B-A3B UD-Q3_K_M:
+okunurlar. Uzmanlar boştaki RAM'e sığıyorsa daha yavaş yazdığı için varsayılan olarak kapalıdır ve bunun üzerinde
+hâlâ çalışıyoruz; sığmıyorsa motor bunu kendisi açar (aşağıda). Dizüstünde (RTX 4070 Laptop 8 GB, 32 GB RAM,
+Windows 11), Qwen3.6-35B-A3B UD-Q3_K_M:
 
 | | varsayılan | `--ram-experts-mib 6144` |
 | --- | ---: | ---: |
@@ -125,6 +126,26 @@ daha yavaş yazdı. Linux'ta (yaklaşık 8 GB ile sınırlanmış bir RTX PRO 60
 tuttu ve %7 ila 14 daha yavaş yazdı. Uzman önbelleği sabit tutulduğunda (bir sürüm kontrol edilirken yapıldığı gibi),
 yanıtlar token token aynıdır.
 
+VRAM dışındaki uzmanlar boştaki RAM'e sığmadığında motor artık en çok kullanılanları o RAM'in 4 GiB eksiği kadar bir
+bütçede tutar, diğerlerini bir token onlara ihtiyaç duyduğunda SSD'den okur ve başlarken bunu söyler. Önceden hepsini
+eşliyordu ve sistem onları sayfa hatası başına bir sayfa olarak geri okuyordu. Bir konteynerin bellek sınırı da
+sayılır. Linux'ta yaklaşık 8 GB ile sınırlanmış bir RTX PRO 6000 üzerinde, motor 12 GB ve 10 GB RAM ile (16 GB'lık bir
+PC'nin ona bıraktığı kadar) sınırlanmış ve model dosyası her başlangıçta dosya önbelleğinin dışındayken ölçüldü:
+Qwen3.6-35B-A3B UD-Q3_K_M, token/sn olarak ilk kısa sohbette, 24.000 token'lık bir prompt'tan sonra ve ondan sonraki
+kısa bir sohbette.
+
+| Motora kalan RAM | her uzman eşlenmiş (önce) | şimdi aldığı bütçe |
+| --- | ---: | ---: |
+| 12 GB | 51 / 75-78 / 94-98 | **57-60 / 77-85 / 131-139** |
+| 10 GB | 39 / 48 / 69 | **51 / 64 / 92** |
+
+Sınır olmadan aynı makine 63 / 169 / 203 yazar. Aynı kodun çalıştığı Windows'ta ölçülmedi.
+`"--ram-experts-mib", "-1"` her uzmanı önceki gibi eşlenmiş tutar.
+
+Tersine, `"--lock-experts"` VRAM dışındaki uzmanları RAM'de kilitler; böylece sistem onların belleğini diğer
+programlara verip motorun onları daha sonra SSD'den yeniden okumasına yol açamaz. Linux'ta `ulimit -l`'in izin
+verdiğinden fazlasını kilitlemez ve motor başlarken ne kadarını kilitlediğini söyler.
+
 Motor ayrıca prompt okumak için 350 ila 400 MiB daha az VRAM'e ihtiyaç duyar: bu alanı uzman önbelleği kullanır
 (Qwen3.6, VRAM'de 2.444 yerine 2.712 uzman tutar) ya da `--vram-reserve-mib` onu diğer programlara bırakır.
 Nasıl çalıştığı ve nasıl ölçüldüğü: [docs/BACKENDS.md](docs/BACKENDS.md#less-of-the-pcs-ram-and-vram).
@@ -136,9 +157,9 @@ Nasıl çalıştığı ve nasıl ölçüldüğü: [docs/BACKENDS.md](docs/BACKEN
 | [Qwen3.8-Flash-Next](docs/models/qwen38.md) | NVIDIA RTX 20 ila 50 serisi ya da AMD RX 6800 / 6900, RX 7700 XT / 7800 XT / 7900 XT / XTX, RX 9060 XT / 9070 / 9070 XT, Radeon AI PRO R9700; 12 GB veya daha fazla | 32 GB veya daha fazla; 64 GB ile her boyut çalışır | yaklaşık 80 GB | Windows, Linux |
 | [GLM 5.3 Flash](docs/models/glm.md) | NVIDIA RTX 20 serisi veya daha yenisi; yalnızca 32 GB'lık bir kartta çalıştırıldı | 32 GB'lık bir kartın yanında 96 GB | 79 ila 114 GB, bir SSD'de | Linux |
 | [DeepSeek V4 Flash](docs/models/deepseek.md) | yukarıdakiyle aynı | 32 GB'lık bir kartın yanında 72 GB | 91 GB, bir SSD'de | Linux |
-| [LFM2.5-24B-A2B](docs/models/lfm25.md) | NVIDIA RTX 20 serisi veya daha yenisi, 8 GB veya daha fazla | 8 GB'lık bir kartın yanında yaklaşık 20 GB | 11 ila 25 GB | Windows, Linux |
+| [LFM2.5-24B-A2B](docs/models/lfm25.md) | NVIDIA RTX 20 serisi veya daha yenisi, 8 GB veya daha fazla | 8 GB'lık bir kartın yanında yaklaşık 20 GB | 11 ila 25 GB | Windows, Linux, Mac (beta) |
 | [Flint 40B-A2.5B](docs/models/flint.md) | yukarıdakiyle aynı | 8 GB'lık bir kartın yanında yaklaşık 22 GB | 18 ila 42 GB | Windows, Linux |
-| [Qwen3.6-35B-A3B](docs/models/qwen36.md) | yukarıdakiyle aynı; AMD beta olarak | 8 GB'lık bir kartın yanında yaklaşık 21 GB | 13 ila 23 GB | Windows, Linux |
+| [Qwen3.6-35B-A3B](docs/models/qwen36.md) | yukarıdakiyle aynı; AMD beta olarak | 8 GB'lık bir kartın yanında yaklaşık 21 GB | 13 ila 23 GB | Windows, Linux, Mac (beta) |
 | [Clover-35B-A3B-Preview](docs/models/clover.md) | NVIDIA RTX 20 serisi veya daha yenisi, 8 GB veya daha fazla | 8 GB'lık bir kartın yanında yaklaşık 20 GB | 13 ila 21 GB | Windows, Linux |
 | [Ornith 1.5](docs/models/ornith.md) | yukarıdakiyle aynı; AMD beta olarak | 8 GB'lık bir kartın yanında yaklaşık 22 GB | 14 ila 24 GB | Windows, Linux |
 | [Gemma 4 26B-A4B](docs/models/gemma4.md) | yukarıdakiyle aynı; AMD beta olarak | 8 GB'lık bir kartın yanında yaklaşık 18 GB | 11 ila 17 GB | Windows, Linux |
@@ -146,7 +167,7 @@ Nasıl çalıştığı ve nasıl ölçüldüğü: [docs/BACKENDS.md](docs/BACKEN
 | [MiniCPM-V 4.7 35B-A3B](docs/models/minicpmv.md) | yukarıdakiyle aynı; AMD beta olarak | 8 GB'lık bir kartın yanında yaklaşık 25 GB | 16 ila 29 GB | Windows, Linux |
 | [Kolibri 1](docs/models/kolibri.md) | NVIDIA RTX 20 serisi veya daha yenisi, 8 GB veya daha fazla | 8 GB'lık bir kartın yanında yaklaşık 33 GB | 29 ila 48 GB | Windows, Linux |
 
-RAM değeri yükleyicinin tahminidir; daha büyük bir kartla daha azı gerekir. Geri kalan her şeyi yükleyici kurar: Windows'ta motoru hazır derlenmiş olarak indirir; yalnızca AVX2 desteği olmayan bir işlemcide ya da senin kopyandaki motor son sürümden daha yeniyse onu bilgisayarında derler ve gereken araçları kurmayı önerir. İki ya da üç kart bir modeli paylaşabilir ([çoklu GPU](docs/MULTI_GPU.md)). Eski ekran kartları, Intel Arc, Apple Silicon Mac'ler (yalnızca Qwen3.8-Flash-Next), Strix Halo ve AVX2 desteği olmayan eski işlemciler: [tam liste](docs/INSTALL.md#what-you-need). Her modelin kart, RAM ve boyut ayrıntıları kendi sayfasında.
+RAM değeri yükleyicinin tahminidir; daha büyük bir kartla daha azı gerekir. Geri kalan her şeyi yükleyici kurar: Windows'ta motoru hazır derlenmiş olarak indirir; yalnızca AVX2 desteği olmayan bir işlemcide ya da senin kopyandaki motor son sürümden daha yeniyse onu bilgisayarında derler ve gereken araçları kurmayı önerir. İki ya da üç kart bir modeli paylaşabilir ([çoklu GPU](docs/MULTI_GPU.md)). Eski ekran kartları, Intel Arc, Apple Silicon Mac'ler (Qwen3.8-Flash-Next; beta olarak Qwen3.6 ve LFM2.5), Strix Halo ve AVX2 desteği olmayan eski işlemciler: [tam liste](docs/INSTALL.md#what-you-need). Her modelin kart, RAM ve boyut ayrıntıları kendi sayfasında.
 
 Qwen3.6, Clover, Ornith 1.5, Gemma 4, Tiel Coder ve MiniCPM-V'nin her birinin neye ihtiyaç duyduğu ve bunun nasıl kontrol edildiği: [docs/BACKENDS.md](docs/BACKENDS.md#install).
 
@@ -173,8 +194,11 @@ uygulamalarını nasıl bağlayacağını söyler. Yapay zekâ araçları PolySt
 (Terminal'de `xcode-select --install`; Xcode'un kendisine gerek yok). Sonra PolyStrata klasöründe Terminal'i aç ve
 **`./setup.sh`** komutunu çalıştır. Mac motorunu Mac'inde derler (yaklaşık 7 dakika), aynı soruları sorar, modeli
 indirir ve başlatır. Bir dahaki sefere `./setup.sh` onu hemen başlatır. Mac'ine hangi boyutun uyduğu ve ne kadar hızlı
-olduğu: [docs/MAC.md](docs/MAC.md). Mac motoru yalnızca Qwen3.8-Flash-Next'i çalıştırır; diğer on bir model bir NVIDIA
-veya AMD kart gerektirir.
+olduğu: [docs/MAC.md](docs/MAC.md). Varsayılan olarak Qwen3.8-Flash-Next'i kurar. `./setup.sh --family qwen36` ya da
+`--family lfm25` onun yerine Qwen3.6'yı ya da LFM2.5'i strata-poly'nin Metal motorunda beta olarak kurar: bir M5
+Ultra'da Qwen3.6 UD-Q2_K_XL kısa bir sohbette saniyede 134 token yazdı ve 3.768 token'lık bir prompt'u saniyede 2.978
+token hızla okudu. Kurulum Mac'te GLM, DeepSeek, Ornith, Gemma 4, Tiel Coder ve MiniCPM-V'yi de sunar, ama bunlar
+orada henüz gerçek ağırlıklarıyla çalıştırılmadı. Kolibri, Flint ve Clover bir NVIDIA veya AMD kart gerektirir.
 
 Yükleyici kartını bulur ve ona uygun motoru kurar. Sana birkaç soru sorar:
 
