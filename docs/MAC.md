@@ -193,7 +193,7 @@ This checks basic generation and API integration, not general accuracy, long con
 ## Install
 
 ```
-git clone https://github.com/Niko1221/Strata && cd PolyStrata
+git clone https://github.com/simplexai-labs/PolyStrata && cd PolyStrata
 ./setup.sh                 # asks the size; --yes takes the recommended answers
 ```
 
