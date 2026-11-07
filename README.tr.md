@@ -85,7 +85,7 @@ Tablo, her model için yükleyicinin seçtiği boyutu, saniyede token olarak ver
 
 Dizüstü: RTX 4070 Laptop (8 GB), Core i7-14700HX, 32 GB RAM. İş istasyonu: RTX 5090 (32 GB), Xeon Platinum 8470Q (25 vCPU), 90 ila 120 GB RAM. Flint, dizüstünde UD-Q3_K_XL boyutuyla (yükleyicinin 32 GB RAM ile seçtiği boyut), iş istasyonunda UD-Q4_K_XL boyutuyla ölçüldü. Kolibri 1, iş istasyonunda Q2_K boyutuyla ölçüldü; yükleyici orada Q4_K_M boyutunu seçer, bu boyut ölçülmedi.
 
-Qwen3.8-Flash-Next, Strata projesinin motorunda çalışır ve o proje tarafından RTX 5070 (12 GB) ve 64 GB RAM'li bir bilgisayarda ölçüldü: IQ2_XS boyutu saniyede 79 token yazar ve 32K'lık bir prompt'u saniyede 2.090 token hızla okur ([tüm boyutlar](docs/models/qwen38.md)).
+Qwen3.8-Flash-Next, [Strata](https://github.com/Niko1221/Strata) projesinin motorunda çalışır ve o proje tarafından RTX 5070 (12 GB) ve 64 GB RAM'li bir bilgisayarda ölçüldü: IQ2_XS boyutu saniyede 79 token yazar ve 32K'lık bir prompt'u saniyede 2.090 token hızla okur ([tüm boyutlar](docs/models/qwen38.md)).
 
 PolyStrata'nın kendi motorundaki on bir model, kendi bilgisayarında da çalıştırabileceğin benchmark aracıyla ölçüldü:
 `python polystrata.py benchmark --model <name> --prompt-tokens 24000`
