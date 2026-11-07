@@ -41,8 +41,9 @@ and build dependencies are separate. Files retain the shared installer's filenam
 `--family` selects the smaller engine; a setup without it keeps the existing Qwen3.8 choice and defaults.
 Within a smaller family, the default is its smallest download; `--model` keeps an explicit choice.
 
-This is **experimental**. LFM2.5 UD-Q3_K_XL has passed the real-weight smoke test below; the other families and
-quantizations have not been tested with full weights on Metal. There is no broad model-quality evaluation.
+This is **experimental**. LFM2.5 UD-Q3_K_XL has passed the real-weight smoke test below, and it and Qwen3.6
+UD-Q2_K_XL have answered prompts up to 7,000 tokens on an M5 Ultra; the other families and quantizations have not
+been tested with full weights on Metal. There is no broad model-quality evaluation.
 The measured Qwen3.8 numbers elsewhere on this page do not describe these families. The default smaller-model
 context is 8,192 tokens.
 
@@ -56,12 +57,28 @@ hyper-connections and sparse latent attention. DeepSeek uses native compression,
 The native implementation is in `metal/src/poly/`. It covers floating-point projections, quantized GGUF
 projections, expert routing, normalization and activation, attention with FP16/Q8 caches, rotary positions,
 convolution, and the recurrent delta network with speculative snapshots. The GGUF block decoders come from the
-same pinned ggml checkout as the CPU expert code. The projection and prompt attention kernels prioritize
-reference agreement; they have not been tuned for throughput. Decode attention gives a long context's keys to up
-to 16 SIMD groups, each with an online softmax of its own, and merges them; up to 128 keys, one group reads them
-in order. On the M5 Ultra Mac Studio, LFM2.5 UD-Q3_K_XL decoded 117, 120, 104 and 81 tokens/s after 644, 1,786,
-3,680 and 6,829 prompt tokens, against 58, 31, 16 and 10 with one group a head (thinking off, greedy, 200-token
-answers, medians of three runs taking turns with the older engine); prompt reading was unchanged.
+same pinned ggml checkout as the CPU expert code. Where MetalPerformancePrimitives' `matmul2d` compiles (macOS 26
+and newer) and `--metal-optimize` is on (the default), a prompt batch runs on the matrix units: the quantized
+projections decode their weights into threadgroup memory as fp16 and multiply there, a dense projection of 128
+rows or more is first turned into fp16 once, and prompt attention is a flash-style kernel for heads of 64, 128 and
+256 values. Otherwise the older kernels run. Decode attention splits a token's keys among up to 32 threadgroups
+and merges their results.
+
+On the M5 Ultra Mac Studio (thinking off, greedy, 200-token answers, medians of three runs taking turns with an
+older engine; the Mac was shared with other work):
+
+| Model | Prompt tokens | Prompt read | Decode |
+|---|---:|---:|---:|
+| LFM2.5 UD-Q3_K_XL | 30 | | 153 tok/s |
+| | 1,786 | 3,650 tok/s | 144 tok/s |
+| | 3,680 | 4,294 tok/s | 136 tok/s |
+| | 6,829 | 4,357 tok/s | 121 tok/s |
+| Qwen3.6 UD-Q2_K_XL | 32 | | 134 tok/s |
+| | 1,798 | 2,700 tok/s | 109 tok/s |
+| | 3,768 | 2,978 tok/s | 97 tok/s |
+| | 7,217 | 2,738 tok/s | 81 tok/s |
+
+Other Apple GPUs have not been measured.
 
 For these checks, add `-DSTRATA_METAL_POLY=ON` to the engine build below and run `ctest -L poly`. Tests include
 CPU-reference kernel comparisons, small generated GGUF fixtures for all five architectures, graph replay,
