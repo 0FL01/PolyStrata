@@ -328,7 +328,7 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
             multi ? per((g) => (g.temp == null ? "–" : `${fmt(g.temp)}°`)) : "");
   spark("sp-temp", h.gpu_temp, 90);
   setMetric("power", hw.gpu_power == null ? null : fmt(hw.gpu_power), "W", hw.gpu_power_limit ? `of ${fmt(hw.gpu_power_limit)} W limit` : "");
-  spark("sp-power", hw.gpu_power, hw.gpu_power_limit);
+  spark("sp-power", h.gpu_power, hw.gpu_power_limit);
   const gen = hw.gpu_pcie_gen_max || hw.gpu_pcie_gen;
   setMetric("pcie", gen ? `Gen${gen}` : null, hw.gpu_pcie_width ? `x${hw.gpu_pcie_width}` : "",
             hw.gpu_pcie_rx_mb == null ? "" : `to GPU ${fmt(hw.gpu_pcie_rx_mb, hw.gpu_pcie_rx_mb < 10 ? 1 : 0)} MB/s` +
@@ -643,7 +643,9 @@ function swipeLoad(m) {
   m.thinkSecs = s.thinkSecs || null; m.stopped = false; m.error = null; m.limit = null;
 }
 
-// The streaming itself, shared by send(), regenerateMessage() and editUserMessage().
+// The streaming itself, shared by send(), regenerateMessage() and editUserMessage(). On abort it sets
+// m.stopped and returns normally (so the caller can still save the partial answer); on any other error it
+// rethrows.
 async function streamInto(m, el, signal) {
   const body = {model: health.model, messages: apiMessages(), stream: true, reasoning_effort: settings.thinking};
   if (!(settings.temperature > 0)) {
@@ -794,13 +796,13 @@ function editUserMessage(i) {
   if (!el) return;
   const bubble = el.querySelector(".st-bubble");
   if (!bubble || el.querySelector(".edit-box")) return;
-  
+
   const original = m.text || "";
   const box = document.createElement("textarea");
   box.className = "edit-box st-input";
   box.value = original;
   box.rows = Math.min(20, Math.max(2, original.split("\n").length));
-  
+
   const actions = document.createElement("div");
   actions.className = "edit-actions";
   const save = document.createElement("button");
@@ -809,7 +811,7 @@ function editUserMessage(i) {
   const cancel = document.createElement("button");
   cancel.className = "st-btn st-btn--secondary";
   cancel.textContent = "Cancel";
-  
+
   actions.append(save, cancel);
   bubble.replaceWith(box);
   box.after(actions);
@@ -818,29 +820,29 @@ function editUserMessage(i) {
 
   const close = () => { box.replaceWith(bubble); actions.remove(); };
   cancel.onclick = close;
-  
+
   save.onclick = () => {
     const next = box.value.trim();
     if (next === original) { close(); return; }
-    
+
     // Variant B: keep the tail aside for Undo, then drop it
     const dropped = messages.slice(i + 1);
     m.text = next;
     messages = messages.slice(0, i + 1);
     editUndo = dropped.length ? {at: i + 1, items: dropped, wasText: original} : null;
     close();
-    
+
     // append a fresh assistant placeholder and start generation right away
     const a = {role: "assistant", text: "", reasoning: "", time: Date.now()};
     messages.push(a);
     saveChat();
     renderChat();
-    
+
     const el2 = $("chat").lastElementChild;
     const controller = new AbortController();
     busy = {controller, msg: a};
     setBusy(true);
-    
+
     (async () => {
       try {
         await streamInto(a, el2, controller.signal);
