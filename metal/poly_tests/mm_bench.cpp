@@ -1,6 +1,7 @@
 // metal/poly_tests/mm_bench.cpp - Mmq::mul's time on the shapes of a prompt batch of LFM2.5-24B-A2B (1,024 tokens,
-// 64 experts of 2,048 x 1,536, 4 a token): the dense projection, the experts' gate|up and down, for each tile height
-// of mm.metal's tiles and for poly_mul.  Not a test: run by hand.
+// 64 experts of 2,048 x 1,536, 4 a token): the dense projection, the experts' gate|up and down, for each of
+// mm.metal's tiles and for poly_mul.  The dense one takes poly_dq and poly_gemm whatever the tile.  Not a test: run
+// by hand.
 //   poly_mm_bench [reps]
 #include "test_utils.hpp"
 #include "strata/kernels/native_mmvq.hpp"
@@ -11,6 +12,7 @@
 #include <algorithm>
 #include <chrono>
 #include <random>
+#include <vector>
 namespace k=strata::kernels;
 namespace p=strata::poly;
 int main(int argc,char** argv){
@@ -33,19 +35,24 @@ int main(int argc,char** argv){
         Buffer dx(values(size_t(rows)*sh.ni)),q(p::Mmq::q8_bytes(rows,sh.ni)),y(size_t(rows)*sh.no*4),db(bounds.size()*4);
         db.put(bounds.data(),bounds.size()*4);
         const double flop=2.0*rows*sh.ni*sh.no;
-        const char* tiles[]={nullptr,"32,64,128,4","32,64,64,4","32,64,128,8","32,128,64,8","32,64,64,16","64,64,64,16"};
-        for(const char* tile:tiles) for(bool units:{true,false}) {
-            if(!units&&tile) continue;
-            p::metal_detail::allow_mm_rows(units);p::metal_detail::set_mm_tile(tile);
+        // the variants in turn, five rounds, each variant's best round: the Mac may be shared
+        std::vector<const char*> tiles={nullptr,"32,64,128,4","32,64,64,4","32,64,128,8","32,128,64,8","32,64,64,16",
+                                        "64,64,64,16","64,64,64,8","64,64,32,8","64,64,64,4"};
+        std::vector<double> best(tiles.size()+1,1e30);
+        for(int round=0;round<5;++round) for(size_t v=0;v<=tiles.size();++v) {
+            const bool units=v<tiles.size();
+            p::metal_detail::allow_mm_rows(units);p::metal_detail::set_mm_tile(units?tiles[v]:nullptr);
             p::Mmq mmq;p::Mmq::quantize(dx.as(),nullptr,q.ptr,sh.type,sh.ni,sh.ni,rows,s);
             auto run=[&]{mmq.mul(dw.ptr,sh.type,sh.no,sh.ni,per,sh.n,q.ptr,sh.n>1?db.as<int32_t>():nullptr,nullptr,rows,most,y.as(),sh.no,s);};
             run();ck(g::stream_synchronize(s));
             const auto t0=std::chrono::steady_clock::now();
             for(int r=0;r<reps;++r)run();
             ck(g::stream_synchronize(s));
-            const double us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-t0).count()/reps;
-            std::printf("%-40s %-14s %9.1f us  %6.2f TFLOP/s\n",sh.name,!units?"poly_mul":tile?tile:"32,64,64,8",us,flop/us*1e-6);
+            best[v]=std::min(best[v],std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-t0).count()/reps);
         }
+        for(size_t v=0;v<=tiles.size();++v)
+            std::printf("%-40s %-14s %9.1f us  %6.2f TFLOP/s\n",sh.name,v==tiles.size()?"poly_mul":tiles[v]?tiles[v]:"default",
+                        best[v],flop/best[v]*1e-6);
     }
     p::metal_detail::allow_mm_rows(true);p::metal_detail::set_mm_tile(nullptr);
     ck(g::stream_destroy(s));ggml_quantize_free();return 0;

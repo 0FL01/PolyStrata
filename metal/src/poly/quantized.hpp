@@ -15,6 +15,9 @@ const char* quant_name(int);
 /// with --metal-optimize, where matmul2d compiles (Metal 4) and cols is whole 64-value steps.  Else q8_1 rows and
 /// poly_mul, as before.
 bool mm_rows(int64_t cols);
+/// y (m rows of n floats) = a (m rows of k values) times b (n rows of k values) by matmul2d, fp32 or fp16 rows where
+/// they lie (mm.metal's poly_gemm).  False when the matrix units are not there (as mm_rows()): nothing is queued.
+bool mm_gemm(const void* a,const void* b,float* y,int m,int n,int k,bool f32,void* stream);
 /// Off: q8_1 rows and poly_mul even where mm_rows() could hold (STRATA_METAL_MM=0 sets it at start), for tests and
 /// comparisons.
 void allow_mm_rows(bool on);

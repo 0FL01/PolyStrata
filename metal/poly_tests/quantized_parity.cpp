@@ -114,6 +114,44 @@ int main(){
             bad+=compare(got,ref,units_used?"70 rows a matrix, matrix units":"70 rows a matrix",1e-4f);
         }
     }
+    // A dense call of 200 rows: on the matrix units the matrix goes to fp16 once (poly_dq) and poly_gemm multiplies;
+    // 100 outputs, so the last tile of them is partly past the matrix
+    for(int type:{2,3,6,7,8,10,11,12,13,14,16,17,18,19,20,21,22,23,29,39,42}) {
+        const int ni4=512,no4=100,rows4=200;
+        auto w=values(no4*ni4,.5f),x4=values(rows4*ni4,.7f);std::vector<float> imp(ni4,1);
+        auto ty=ggml_type(type);ggml_quantize_init(ty);
+        size_t wb=k::native_mmvq_weight_bytes(type,ni4,no4);
+        std::vector<unsigned char> packed(wb);ggml_quantize_chunk(ty,w.data(),packed.data(),0,no4,ni4,imp.data());
+        std::vector<float> dwf(w.size());ggml_get_type_traits(ty)->to_float(packed.data(),dwf.data(),dwf.size());
+        Buffer dw(packed.size()),dx4(x4),qx(p::Mmq::q8_bytes(rows4,ni4)),out(rows4*no4*4);
+        dw.put(packed.data(),packed.size());
+        g::metal::set_optimize(true);p::metal_detail::allow_mm_rows(true);
+        p::Mmq::quantize(dx4.as(),nullptr,qx.ptr,type,ni4,ni4,rows4,stream);
+        p::Mmq mmq;mmq.mul(dw.ptr,type,no4,ni4,0,1,qx.ptr,nullptr,nullptr,rows4,rows4,out.as(),no4,stream);
+        ck(g::stream_synchronize(stream));
+        const bool units_used=p::metal_detail::mm_rows(ni4);
+        auto in=mmq_rows(qx,x4,ni4,rows4);std::vector<float> ref(rows4*no4);
+        for(int r=0;r<rows4;++r)for(int o=0;o<no4;++o){
+            double sum=0;
+            for(int i=0;i<ni4;++i){float v=dwf[o*ni4+i];sum+=double(units_used?float(_Float16(v)):v)*in[r*ni4+i];}
+            ref[r*no4+o]=sum;
+        }
+        char label[64];std::snprintf(label,sizeof label,"%s dense 200 rows%s",ggml_type_name(ty),units_used?", matrix units":"");
+        bad+=compare(out.read(rows4*no4),ref,label,1e-4f);
+    }
+    // gemm_f32 (a router's fp32 matrix) for a batch: 64 and 100 outputs
+    for(int no5:{64,100}) {
+        const int ni5=512,rows5=200;
+        auto w=values(no5*ni5,.3f),x5=values(rows5*ni5,.9f);
+        Buffer dw(w),dx5(x5),out(rows5*no5*4);
+        g::metal::set_optimize(true);p::metal_detail::allow_mm_rows(true);
+        void* blas=p::blas_create(stream);
+        p::gemm_f32(blas,dw.as(),dx5.as(),out.as(),ni5,no5,no5,rows5);ck(g::stream_synchronize(stream));p::blas_destroy(blas);
+        std::vector<float> ref(rows5*no5);
+        for(int r=0;r<rows5;++r)for(int o=0;o<no5;++o){double sum=0;for(int i=0;i<ni5;++i)sum+=double(w[o*ni5+i])*x5[r*ni5+i];ref[r*no5+o]=sum;}
+        char label[64];std::snprintf(label,sizeof label,"gemm_f32 %d outputs",no5);
+        bad+=compare(out.read(rows5*no5),ref,label,1e-5f);
+    }
     p::metal_detail::allow_mm_rows(true);
     ck(g::stream_synchronize(stream));ck(g::stream_destroy(stream));ggml_quantize_free();return bad?1:0;
 }

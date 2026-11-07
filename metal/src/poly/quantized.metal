@@ -14,12 +14,16 @@ kernel void poly_quantize(constant QArgs& a [[buffer(0)]],uint2 group [[threadgr
     reinterpret_cast<device char*>(dst+4)[lane]=char(d?round(v/d):0);
     if(!lane) { reinterpret_cast<device half*>(dst)[0]=half(d);reinterpret_cast<device half*>(dst)[1]=half(sum); }
 }
-// Mmq::quantize() on the matrix-unit path (mm.metal): the rows in fp16, row i from row ids[i] of x
-kernel void poly_tohalf(constant QArgs& a [[buffer(0)]],uint i [[thread_position_in_grid]]) {
-    const uint n=uint(a.ni),row=i/n;
-    if(row>=uint(a.rows)) return;
+// Mmq::quantize() on the matrix-unit path (mm.metal): the rows in fp16, row i from row ids[i] of x; four values a
+// thread (a row is whole 64-value steps), a threadgroup row of them to each row
+kernel void poly_tohalf(constant QArgs& a [[buffer(0)]],uint2 tg [[threadgroup_position_in_grid]],
+                        uint tid [[thread_index_in_threadgroup]],uint2 shape [[threads_per_threadgroup]]) {
+    const uint k=(tg.x*shape.x+tid)*4,row=tg.y;
+    if(k>=uint(a.ni)) return;
     const int from=a.p[2]?static_cast<device int*>(a.p[2])[row]:int(row);
-    static_cast<device half*>(a.p[1])[i]=half(static_cast<device float*>(a.p[0])[ulong(from)*a.xstride+i%n]);
+    device const float* x=static_cast<device float*>(a.p[0])+ulong(from)*a.xstride+k;
+    const float4 v=a.xstride%4?float4(x[0],x[1],x[2],x[3]):*reinterpret_cast<device const float4*>(x);
+    *reinterpret_cast<device half4*>(static_cast<device half*>(a.p[1])+ulong(row)*a.ni+k)=half4(v);
 }
 template<typename Block,int QK,void Deq(device const Block*,short,thread float4x4&)>
 kernel void poly_mul(constant QArgs& a [[buffer(0)]],uint3 group [[threadgroup_position_in_grid]],

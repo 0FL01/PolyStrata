@@ -1,6 +1,7 @@
 // strata-poly's basic forward-pass operations on the native Metal stream runtime.
 #include "strata/poly/kernels.hpp"
 #include "strata/gpu/metal.hpp"
+#include "quantized.hpp"
 #include <algorithm>
 #include <fstream>
 #include <iterator>
@@ -130,11 +131,13 @@ void route_rows(const float* logits, int experts, int used, int rows, int gate, 
     const void* refs[]={logits,bias,escale,ids,weights};
     launch("poly_route",a,stream,{uint32_t(rows),1,1},32,{refs,5,true});
 }
-// The Metal batch path uses the same arithmetic as one-token GEMV.
 void* blas_create(void* stream) { return new void*(stream); }
 void blas_destroy(void* blas) { delete static_cast<void**>(blas); }
+// A batch's product on the matrix units where they are (mm.metal); per-group inputs and else one-token GEMV's sums
 void gemm_f32(void* blas, const float* w, const float* x, float* y, int ni, int no, int group, int rows) {
-    gemv_f32(w,x,y,ni,no,group,rows,blas ? *static_cast<void**>(blas) : nullptr);
+    void* s = blas ? *static_cast<void**>(blas) : nullptr;
+    if (group == no && metal_detail::mm_gemm(x, w, y, rows, no, ni, true, s)) return;
+    gemv_f32(w,x,y,ni,no,group,rows,s);
 }
 static void activation(const float* gate, const float* up, float* out, int n, int rows, float limit,
                        int kind, void* stream) {

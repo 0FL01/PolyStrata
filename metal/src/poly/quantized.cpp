@@ -46,6 +46,17 @@ struct MArgs {   // mm.metal's MmArgs
     int ni=0,no=0,total=0;
 };
 static_assert(sizeof(MArgs)==80);
+struct GArgs {   // mm.metal's GemmArgs
+    const void* p[3]{};
+    int m=0,n=0,k=0,pad=0;
+};
+static_assert(sizeof(GArgs)==40);
+// The fp16 copy of a dense matrix (poly_dq) that poly_gemm reads: grown to the largest one, kept.  Larger matrices
+// than kDqMax bytes of halves (an output head) and calls of fewer than kDqRows rows stay with poly_mm.
+void* dq_buf=nullptr;
+size_t dq_bytes=0;
+constexpr size_t kDqMax=size_t(64)<<20;
+constexpr int64_t kDqRows=128;
 }
 namespace {
 bool mm_allowed=!(std::getenv("STRATA_METAL_MM") && std::string(std::getenv("STRATA_METAL_MM"))=="0");
@@ -57,6 +68,14 @@ void set_mm_tile(const char* tile) {
     if(tile) std::sscanf(tile,"%d,%d,%d,%d",&mm_tile.tm,&mm_tile.tn,&mm_tile.tk,&mm_tile.sg);
 }
 bool mm_rows(int64_t cols) { return mm_allowed && cols>0 && cols%mm_tile.tk==0 && gpu::metal::optimize() && mm_ready(); }
+bool mm_gemm(const void* a,const void* b,float* y,int m,int n,int k,bool f32,void* s) {
+    if(!mm_allowed || m<=0 || n<=0 || k<=0 || !gpu::metal::optimize() || !mm_ready()) return false;
+    GArgs g;g.p[0]=a;g.p[1]=b;g.p[2]=y;g.m=m;g.n=n;g.k=k;
+    const int tn=n<=32?32:64;
+    const std::string name=std::string("poly_gemm_")+(f32?"float":"half")+"_64_"+std::to_string(tn)+"_4";
+    dispatch("poly_mm",mm_source(),name.c_str(),g,s,{uint32_t((n+tn-1)/tn),uint32_t((m+63)/64),1},128);
+    return true;
+}
 void qrun(const std::string& name,const QArgs& a,void* s,gpu::metal::Grid groups) {
     static const auto source=quant_source();
     const bool indirect = name.starts_with("poly_mul_") && (a.kind==1 || a.kind==4 || a.kind==5);
@@ -134,13 +153,36 @@ size_t Mmq::q8_bytes(int64_t rows,int64_t cols) {
 }
 void Mmq::quantize(const float* x,const int32_t* ids,void* q,int,int64_t cols,int64_t ld,int64_t rows,void* s) {
     QArgs a;a.p[0]=x;a.p[1]=q;a.p[2]=ids;a.ni=int(cols);a.rows=int(rows);a.xstride=ld;
-    if(mm_rows(cols)) { qrun("poly_tohalf",a,s,{uint32_t((uint64_t(cols)*rows+31)/32),1,1}); return; }
+    if(mm_rows(cols)) {
+        static const auto source=quant_source();
+        const uint32_t threads=uint32_t(std::min<int64_t>(256,cols/4));
+        dispatch("poly_quantized",source,"poly_tohalf",a,s,{uint32_t((cols/4+threads-1)/threads),uint32_t(rows),1},threads,
+                 {a.p,3,true});
+        return;
+    }
     qrun("poly_quantize",a,s,{uint32_t(cols/32),uint32_t(rows),1});
 }
 void Mmq::mul(const void* w,int type,int64_t nr,int64_t nc,size_t stride,int n,const void* x,
               const int32_t* bounds,const int32_t* ids,int64_t total,int64_t max_rows,float* y,int64_t ld,void* s) {
     if(n<=0 || total<=0 || max_rows<=0) return;
     if(!fits(type,nr,nc)) throw std::invalid_argument("Metal MMQ shape");
+    const size_t half_bytes=size_t(nr)*size_t(nc)*2;
+    if(mm_rows(nc) && !bounds && !ids && ld==nr && total>=kDqRows && half_bytes<=kDqMax) {
+        if(half_bytes>dq_bytes) {
+            if(dq_buf) { gpu::stream_synchronize(static_cast<gpu::Stream>(s)); gpu::free_device(dq_buf); }
+            dq_buf=nullptr;dq_bytes=0;
+            if(gpu::malloc_device_raw(&dq_buf,half_bytes)==gpu::kSuccess) dq_bytes=half_bytes;
+            else dq_buf=nullptr;
+        }
+        if(dq_buf) {
+            MArgs m;m.p[0]=w;m.p[1]=dq_buf;m.row_bytes=ggml_row_size(ggml_type(type),nc);m.ni=int(nc);m.no=int(nr);
+            const uint64_t threads=uint64_t(nr)*uint64_t(nc/16);
+            dispatch("poly_mm",mm_source(),(std::string("poly_dq_")+quant_name(type)).c_str(),m,s,
+                     {uint32_t((threads+255)/256),1,1},256);
+            mm_gemm(x,dq_buf,y,int(total),int(nr),int(nc),false,s);
+            return;
+        }
+    }
     if(mm_rows(nc)) {   // TM rows of one matrix and TN outputs a threadgroup, the rows past a matrix's bounds idle
         MArgs m;m.p[0]=w;m.p[1]=x;m.p[2]=y;m.p[3]=ids;m.p[4]=bounds;
         m.stride=stride;m.row_bytes=ggml_row_size(ggml_type(type),nc);m.ld=uint64_t(ld);m.ni=int(nc);m.no=int(nr);m.total=int(total);
