@@ -42,15 +42,34 @@ void attend(const float* q,const uint16_t* k,const uint16_t* v,int64_t pos,int r
     a.p[5]=kq.codes;a.p[6]=kq.scales;a.p[7]=vq.codes;a.p[8]=vq.scales;
     a.dim=dim;a.heads=heads;a.kv=kv;a.pos=pos;a.rows=rows;a.scale=scale;a.window=window;a.ring=ring;a.whole=whole;
     // The keys a token of the call reads: up to its own, within the window.  A recorded launch reads its position on
-    // the card and serves the contexts up to `room` rows: it is sized for the middle of them.  A SIMD group to each
-    // 128 of them or more, up to 16 (512 threads) and 16 KiB of threadgroup memory for the merge (16 for a head of
-    // 256, 8 for 512, 4 for 1024).  A prompt batch's rows give the card threadgroups enough: one SIMD group each.
+    // the card and serves the contexts up to `room` rows: it is sized for the middle of them.  Without splits, a SIMD
+    // group to each 128 of them or more, up to 16 (512 threads) and 16 KiB of threadgroup memory for the merge (16
+    // for a head of 256, 8 for 512, 4 for 1024).  A prompt batch's rows give the card threadgroups enough: one SIMD
+    // group each.
     int64_t keys=at?std::max<int64_t>(room/2,rows):pos+rows;
     if(window>0) keys=std::min<int64_t>(keys,int64_t(window)+rows);
+    // A token's keys among up to 32 threadgroups of 4 SIMD groups, about 16 keys a group, when there are 64 or
+    // more: a SIMD group walks keys slowly (poly_attention), and a head and token was one threadgroup on a GPU of
+    // 80 cores.  The runs meet in a scratch of its own (never freed: recorded launches keep its address).
+    static void* scratch=nullptr;
+    static bool tried=false;
+    constexpr size_t kSplitFloats=size_t(4)<<20;
+    int splits=1;
+    if(rows<32 && keys>=64) {
+        if(!tried) { tried=true; if(gpu::malloc_device_raw(&scratch,kSplitFloats*4)!=gpu::kSuccess) scratch=nullptr; }
+        if(scratch) {
+            splits=int(std::min<int64_t>((keys+63)/64,32));
+            splits=int(std::min<size_t>(size_t(splits),kSplitFloats/(size_t(rows)*heads*(dim+2))));
+        }
+    }
     int groups=1;
-    while(rows<32 && groups<16 && keys>=int64_t(groups)*256 && size_t(groups)*2*(dim+2)*4<=16640) groups*=2;
+    if(splits>1) groups=4;
+    else while(rows<32 && groups<16 && keys>=int64_t(groups)*256 && size_t(groups)*2*(dim+2)*4<=16640) groups*=2;
     const size_t shared=(size_t(groups)*(dim+2)*4+15)/16*16;
-    run(dim<=256?"poly_attention_256":"poly_attention",a,s,{uint32_t(heads),uint32_t(rows),1},uint32_t(32*groups),shared);
+    if(splits>1) { a.stride=splits;a.p[9]=scratch; }
+    run(dim<=256?"poly_attention_256":"poly_attention",a,s,{uint32_t(heads),uint32_t(rows),uint32_t(splits)},
+        uint32_t(32*groups),shared);
+    if(splits>1) run("poly_attention_join",a,s,{uint32_t(heads),uint32_t(rows),1});
 }
 size_t attend_split_floats(int,int,int,int) { return 0; } // online softmax has no score workspace
 // flash.metal on the matrix units (Metal 4's matmul2d) with --metal-optimize, for heads of 64, 128 and 256 values;
