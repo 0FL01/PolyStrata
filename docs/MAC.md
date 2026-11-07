@@ -56,8 +56,12 @@ hyper-connections and sparse latent attention. DeepSeek uses native compression,
 The native implementation is in `metal/src/poly/`. It covers floating-point projections, quantized GGUF
 projections, expert routing, normalization and activation, attention with FP16/Q8 caches, rotary positions,
 convolution, and the recurrent delta network with speculative snapshots. The GGUF block decoders come from the
-same pinned ggml checkout as the CPU expert code. The current projection and attention kernels prioritize
-reference agreement; they have not been tuned for throughput.
+same pinned ggml checkout as the CPU expert code. The projection and prompt attention kernels prioritize
+reference agreement; they have not been tuned for throughput. Decode attention gives a long context's keys to up
+to 16 SIMD groups, each with an online softmax of its own, and merges them; up to 128 keys, one group reads them
+in order. On the M5 Ultra Mac Studio, LFM2.5 UD-Q3_K_XL decoded 117, 120, 104 and 81 tokens/s after 644, 1,786,
+3,680 and 6,829 prompt tokens, against 58, 31, 16 and 10 with one group a head (thinking off, greedy, 200-token
+answers, medians of three runs taking turns with the older engine); prompt reading was unchanged.
 
 For these checks, add `-DSTRATA_METAL_POLY=ON` to the engine build below and run `ctest -L poly`. Tests include
 CPU-reference kernel comparisons, small generated GGUF fixtures for all five architectures, graph replay,

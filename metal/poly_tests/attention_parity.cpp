@@ -4,18 +4,22 @@
 namespace p=strata::poly;
 int main(){
     int bad=0; g::Stream s;ck(g::stream_create(&s));
-    for(int dim:{32,64,128})for(bool quant:{false,true})for(int window:{0,7})for(bool whole:{false,true}){
-        const int heads=4,kv=2,rows=3,total=19,pos=total-rows,ring=window?11:0,n=kv*dim;
-        auto keys=values(total*n),vals=values(total*n,.63f),query=values(rows*heads*dim,.42f);
-        Buffer dk(keys),dv(vals),dq(query),kcache(total*n*2),vcache(total*n*2),kscale(total*n/32*2),vscale(total*n/32*2),out(rows*heads*dim*4),at(8);
+    // One attend() call against a CPU reference over the cache as store wrote it: `total` rows, the last `rows` of
+    // them the call's tokens.  recorded: captured, with the position on the card and the launch sized for `room` rows.
+    auto attention=[&](int dim,bool quant,int window,int ring,bool whole,int heads,int kv,int rows,int total,
+                       bool recorded,int room){
+        const int pos=total-rows,n=kv*dim;
+        auto keys=values(size_t(total)*n),vals=values(size_t(total)*n,.63f),query=values(size_t(rows)*heads*dim,.42f);
+        Buffer dk(keys),dv(vals),dq(query),kcache(size_t(total)*n*2),vcache(size_t(total)*n*2),kscale(size_t(total)*n/32*2),
+               vscale(size_t(total)*n/32*2),out(size_t(rows)*heads*dim*4),at(8);
         long long position=0;at.put(&position,8);
         if(quant){p::store_q8_at(dk.as(),kcache.as<int8_t>(),kscale.as<uint16_t>(),n,at.as<long long>(),total,0,s);p::store_q8_at(dv.as(),vcache.as<int8_t>(),vscale.as<uint16_t>(),n,at.as<long long>(),total,0,s);}
         else {p::store_f16(dk.as(),kcache.as<uint16_t>(),n,0,total,s);p::store_f16_at(dv.as(),vcache.as<uint16_t>(),n,at.as<long long>(),total,0,s);}
         ck(g::stream_synchronize(s));
         // Independent CPU decoding of what store wrote, checked against FP16/Q8 rounding.
         auto decode=[&](Buffer& c,Buffer& scale,const std::vector<float>& original){
-            auto half=c.read<_Float16>(total*n);auto codes=c.read<int8_t>(total*n);auto scales=scale.read<_Float16>(total*n/32);
-            std::vector<float> result(total*n);
+            auto half=c.read<_Float16>(size_t(total)*n);auto codes=c.read<int8_t>(size_t(total)*n);auto scales=scale.read<_Float16>(size_t(total)*n/32);
+            std::vector<float> result(size_t(total)*n);
             for(int i=0;i<total*n;++i){
                 if(!quant){bad+=float(half[i])!=float(_Float16(original[i]));result[i]=float(half[i]);}
                 else {float mx=0;for(int j=i/32*32;j<i/32*32+32;++j)mx=std::max(mx,std::abs(original[j]));float d=mx/127;
@@ -24,7 +28,7 @@ int main(){
         };
         auto k=decode(kcache,kscale,keys),v=decode(vcache,vscale,vals);
         // Ring reads are tested against explicitly wrapped physical cache indices.
-        std::vector<float> ref(rows*heads*dim);
+        std::vector<float> ref(size_t(rows)*heads*dim);
         for(int t=0;t<rows;++t)for(int h=0;h<heads;++h){
             int lo=window?std::max(0,pos+t-window+1):0,hi=whole?total-1:pos+t;
             std::vector<double> scores;double mx=-1e100;
@@ -33,11 +37,27 @@ int main(){
             for(int d=0;d<dim;++d){double sum=0;for(int j=lo;j<=hi;++j)sum+=scores[j-lo]*v[((ring?j%ring:j)*kv+h/(heads/kv))*dim+d];ref[(t*heads+h)*dim+d]=sum/denom;}
         }
         p::Kvq8 kq{quant?kcache.as<int8_t>():nullptr,kscale.as<uint16_t>()},vq{quant?vcache.as<int8_t>():nullptr,vscale.as<uint16_t>()};
-        position=pos;at.put(&position,8);
-        ck(g::begin_capture(s));p::attend(dq.as(),kcache.as<uint16_t>(),vcache.as<uint16_t>(),0,rows,nullptr,2,out.as(),dim,heads,kv,.125f,s,window,ring,whole,at.as<long long>(),total,0,kq,vq);
-        g::Graph graph;ck(g::end_capture(s,&graph));g::GraphExec exec;ck(g::graph_instantiate(&exec,graph));ck(g::graph_launch(exec,s));ck(g::stream_synchronize(s));
-        bad+=compare(out.read(rows*heads*dim),ref,"attention");g::graph_exec_destroy(exec);g::graph_destroy(graph);
-    }
+        if(recorded){
+            position=pos;at.put(&position,8);
+            ck(g::begin_capture(s));p::attend(dq.as(),kcache.as<uint16_t>(),vcache.as<uint16_t>(),0,rows,nullptr,2,out.as(),dim,heads,kv,.125f,s,window,ring,whole,at.as<long long>(),room,0,kq,vq);
+            g::Graph graph;ck(g::end_capture(s,&graph));g::GraphExec exec;ck(g::graph_instantiate(&exec,graph));ck(g::graph_launch(exec,s));ck(g::stream_synchronize(s));
+            g::graph_exec_destroy(exec);g::graph_destroy(graph);
+        } else {
+            p::attend(dq.as(),kcache.as<uint16_t>(),vcache.as<uint16_t>(),pos,rows,nullptr,2,out.as(),dim,heads,kv,.125f,s,window,ring,whole,nullptr,0,0,kq,vq);
+            ck(g::stream_synchronize(s));
+        }
+        char label[96];
+        std::snprintf(label,sizeof label,"attention dim %d%s window %d%s, %d keys%s",dim,quant?" q8":"",window,whole?" whole":"",total,recorded?" recorded":"");
+        bad+=compare(out.read(size_t(rows)*heads*dim),ref,label);
+    };
+    for(int dim:{32,64,128})for(bool quant:{false,true})for(int window:{0,7})for(bool whole:{false,true})
+        attention(dim,quant,window,window?11:0,whole,4,2,3,19,true,19);
+    // Long contexts, whose keys a call splits among up to 16 SIMD groups (attend() picks them from the keys)
+    for(int dim:{64,128,256})for(bool quant:{false,true})for(int window:{0,700})for(bool recorded:{false,true})
+        attention(dim,quant,window,window?1024:0,false,8,2,3,2600,recorded,4096);
+    // 300 keys: a recorded launch has 16 SIMD groups and gives keys to 3 of them, a direct one has 2
+    for(int dim:{128,256})for(bool quant:{false,true})for(bool recorded:{false,true})
+        attention(dim,quant,0,0,false,8,2,3,300,recorded,4096);
     // Per-head RMS, NeoX pairs, frequencies, image axes, and an in-place output.
     for(bool axes:{false,true}){
         int dim=64,heads=2,rows=3,rot=32;auto x=values(dim*heads*rows),w=values(dim,.2f);for(auto& v:w)v+=1;

@@ -10,9 +10,9 @@ struct Args {
     float scale=0,eps=0;
 };
 static_assert(sizeof(Args)==144);
-void run(const char* name,const Args& a,void* stream,gpu::metal::Grid groups,uint32_t threads=32) {
+void run(const char* name,const Args& a,void* stream,gpu::metal::Grid groups,uint32_t threads=32,size_t shared=0) {
     static const auto source=metal_detail::read_source(STRATA_POLY_ATTENTION_SOURCE);
-    metal_detail::dispatch("poly_attention",source,name,a,stream,groups,threads);
+    metal_detail::dispatch("poly_attention",source,name,a,stream,groups,threads,{},shared);
 }
 void store(const float* x,void* cache,void* scales,int n,int64_t pos,const long long* at,int rows,int ring,int kind,void* s) {
     if(n<=0 || rows<=0) return;
@@ -33,15 +33,24 @@ void store_f16_at(const float* x,uint16_t* cache,int n,const long long* at,int r
 void store_q8(const float* x,int8_t* codes,uint16_t* scales,int n,int64_t pos,int rows,void* s) { store(x,codes,scales,n,pos,nullptr,rows,0,1,s); }
 void store_q8_at(const float* x,int8_t* codes,uint16_t* scales,int n,const long long* at,int rows,int ring,void* s) { store(x,codes,scales,n,0,at,rows,ring,1,s); }
 void attend(const float* q,const uint16_t* k,const uint16_t* v,int64_t pos,int rows,float*,int,float* out,
-            int dim,int heads,int kv,float scale,void* s,int window,int ring,bool whole,const long long* at,int,size_t,Kvq8 kq,Kvq8 vq,
-            const float* sinks,size_t) {
+            int dim,int heads,int kv,float scale,void* s,int window,int ring,bool whole,const long long* at,int room,size_t,
+            Kvq8 kq,Kvq8 vq,const float* sinks,size_t) {
     if(dim<=0 || dim>1024 || dim%4 || kv<=0 || heads%kv) throw std::invalid_argument("Metal attention shape");
     if(sinks) throw std::invalid_argument("Metal attention has no attention sinks (Flint)");
     if(rows<=0) return;
     Args a;a.p[0]=q;a.p[1]=k;a.p[2]=v;a.p[3]=out;a.p[4]=at;
     a.p[5]=kq.codes;a.p[6]=kq.scales;a.p[7]=vq.codes;a.p[8]=vq.scales;
     a.dim=dim;a.heads=heads;a.kv=kv;a.pos=pos;a.rows=rows;a.scale=scale;a.window=window;a.ring=ring;a.whole=whole;
-    run("poly_attention",a,s,{uint32_t(heads),uint32_t(rows),1});
+    // The keys a token of the call reads: up to its own, within the window.  A recorded launch reads its position on
+    // the card and serves the contexts up to `room` rows: it is sized for the middle of them.  A SIMD group to each
+    // 128 of them or more, up to 16 (512 threads) and 16 KiB of threadgroup memory for the merge (16 for a head of
+    // 256, 8 for 512, 4 for 1024).  A prompt batch's rows give the card threadgroups enough: one SIMD group each.
+    int64_t keys=at?std::max<int64_t>(room/2,rows):pos+rows;
+    if(window>0) keys=std::min<int64_t>(keys,int64_t(window)+rows);
+    int groups=1;
+    while(rows<32 && groups<16 && keys>=int64_t(groups)*256 && size_t(groups)*2*(dim+2)*4<=16640) groups*=2;
+    const size_t shared=(size_t(groups)*(dim+2)*4+15)/16*16;
+    run(dim<=256?"poly_attention_256":"poly_attention",a,s,{uint32_t(heads),uint32_t(rows),1},uint32_t(32*groups),shared);
 }
 size_t attend_split_floats(int,int,int,int) { return 0; } // online softmax has no score workspace
 void attend_batch(void*,const float* q,const uint16_t* k,const uint16_t* v,int64_t pos,int rows,float* score,

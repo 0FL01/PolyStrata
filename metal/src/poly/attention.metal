@@ -45,18 +45,28 @@ kernel void poly_rope(constant Args& a [[buffer(0)]],uint head [[threadgroup_pos
 inline float cache_value(device void* raw,device void* codes,device void* scales,ulong at) {
     return codes?float(static_cast<device char*>(codes)[at])*float(static_cast<device half*>(scales)[at/32]):float(static_cast<device half*>(raw)[at]);
 }
-// One SIMD group per query head. Online softmax bounds scratch independently of context length.
-kernel void poly_attention(constant Args& a [[buffer(0)]],uint2 group [[threadgroup_position_in_grid]],
-                           uint lane [[thread_index_in_threadgroup]],uint2 shape [[threads_per_threadgroup]]) {
+// One threadgroup per query head and token, with an online softmax, so the scratch does not grow with the context.
+// Its SIMD groups take every g-th key (g = the SIMD groups in it), each with a softmax of its own, and the first
+// merges the g of them through threadgroup memory: a long context's keys are read g at a time instead of one by
+// one.  With one SIMD group the keys go in order, as they did before there were more.  PER: a lane's share of a
+// head (head dimension / 32 at most), so a head of up to 256 values keeps 8 floats a lane and not 32.
+template<int PER>
+kernel void poly_attention(constant Args& a [[buffer(0)]],threadgroup float* part [[threadgroup(0)]],
+                           uint2 group [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]],
+                           uint sg [[simdgroup_index_in_threadgroup]],uint groups [[simdgroups_per_threadgroup]]) {
     int h=group.x,t=group.y,kh=h/(a.heads/a.kv);
     device const float* q=static_cast<device float*>(a.p[0])+(ulong(t)*a.heads+h)*a.dim;
     device float* out=static_cast<device float*>(a.p[3])+(ulong(t)*a.heads+h)*a.dim;
     long start=a.p[4]?*static_cast<device long*>(a.p[4]):a.pos,own=start+t;
     long lo=a.window>0?max(0L,own-a.window+1):0,hi=a.whole?start+a.rows-1:own;
-    float acc[32]={0},query[32];
+    // the SIMD groups that take keys: one to each 128 of this token's, so that a short context reads its keys in
+    // order in one group and skips the merge, as before (the same for the whole threadgroup: one token)
+    const uint used=uint(clamp((hi-lo+128)/128,1L,long(groups)));
+    if(used==1 && sg) return;
+    float acc[PER]={0},query[PER];
     for(int d=lane;d<a.dim;d+=32) query[d/32]=q[d];
     float maximum=-INFINITY,denom=0;
-    for(long p=lo;p<=hi;++p) {
+    for(long p=lo+long(sg);sg<used && p<=hi;p+=long(used)) {
         ulong offset=(ulong(a.ring?p%a.ring:p)*a.kv+kh)*a.dim;
         float dot=0;
         for(int d=lane;d<a.dim;d+=32) dot+=query[d/32]*cache_value(a.p[1],a.p[5],a.p[6],offset+d);
@@ -65,5 +75,29 @@ kernel void poly_attention(constant Args& a [[buffer(0)]],uint2 group [[threadgr
         denom=denom*keep+weight; maximum=next;
         for(int d=lane;d<a.dim;d+=32) acc[d/32]=acc[d/32]*keep+weight*cache_value(a.p[2],a.p[7],a.p[8],offset+d);
     }
-    for(int d=lane;d<a.dim;d+=32) out[d]=acc[d/32]/denom;
+    if(used==1) {
+        for(int d=lane;d<a.dim;d+=32) out[d]=acc[d/32]/denom;
+        return;
+    }
+    // part: each SIMD group's maximum, its denominator, then its dim sums; a group past `used` writes nothing
+    threadgroup float* m=part;
+    threadgroup float* l=part+groups;
+    threadgroup float* v=part+2*groups;
+    if(sg<used) {
+        if(lane==0) {m[sg]=maximum;l[sg]=denom;}
+        for(int d=lane;d<a.dim;d+=32) v[sg*a.dim+d]=acc[d/32];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if(sg) return;
+    float top=-INFINITY,total=0;
+    for(uint g=0;g<used;++g) top=max(top,m[g]);
+    for(uint g=0;g<used;++g) total+=l[g]*exp(m[g]-top);
+    for(int d=lane;d<a.dim;d+=32) {
+        float sum=0;
+        for(uint g=0;g<used;++g) sum+=v[g*a.dim+d]*exp(m[g]-top);
+        out[d]=sum/total;
+    }
 }
+typedef decltype(poly_attention<32>) poly_attention_t;
+template [[host_name("poly_attention")]] kernel poly_attention_t poly_attention<32>;
+template [[host_name("poly_attention_256")]] kernel poly_attention_t poly_attention<8>;
