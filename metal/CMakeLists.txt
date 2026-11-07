@@ -201,7 +201,8 @@ if(STRATA_METAL_POLY)
   target_include_directories(strata_poly_metal_kernels PRIVATE ${S}/poly ${STRATA_GGML_DIR}/ggml/include)
   target_compile_definitions(strata_poly_metal_kernels PRIVATE
     STRATA_POLY_GGML_SOURCE="${STRATA_GGML_DIR}/ggml/src"
-    STRATA_POLY_QUANT_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/src/poly/quantized.metal")
+    STRATA_POLY_QUANT_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/src/poly/quantized.metal"
+    STRATA_POLY_MM_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/src/poly/mm.metal")
   target_link_libraries(strata_poly_metal_kernels PUBLIC ggml-base)
   add_executable(strata-poly ${S}/poly/main.cpp ${S}/poly/engine.cpp ${S}/poly/qwen35.cpp
     ${S}/poly/gemma4.cpp ${S}/poly/lfm2moe.cpp ${S}/poly/glm5next.cpp ${S}/poly/deepseek4.cpp ${S}/poly/flint.cpp
@@ -220,6 +221,10 @@ if(STRATA_METAL_POLY)
 endif()
 
 if(STRATA_METAL_POLY)
+  # Mmq::mul's time on a prompt batch's shapes, run by hand
+  add_executable(poly_mm_bench poly_tests/mm_bench.cpp)
+  target_include_directories(poly_mm_bench PRIVATE ${S}/poly)
+  target_link_libraries(poly_mm_bench PRIVATE strata_poly_metal_kernels)
   foreach(t attention quantized recurrent operations)
     add_executable(poly_${t}_parity poly_tests/${t}_parity.cpp)
     target_include_directories(poly_${t}_parity PRIVATE ${S}/poly)
