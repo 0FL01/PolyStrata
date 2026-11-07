@@ -9,6 +9,7 @@
 #include <functional>
 #include <new>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -20,7 +21,11 @@
 #else
 #include <fcntl.h>
 #include <sys/mman.h>
+#if defined(__APPLE__)
+#include <sys/mount.h>
+#else
 #include <sys/vfs.h>
+#endif
 #include <unistd.h>
 #endif
 
@@ -85,8 +90,19 @@ intptr_t make_file() {
         struct statfs fs;
         if (!dir || statfs(dir, &fs) != 0 || fs.f_type == 0x01021994 /* tmpfs */ || fs.f_type == 0x858458f6 /* ramfs */)
             continue;
+#if defined(__APPLE__)
+        // no O_TMPFILE: a named file, unlinked at once, is as nameless
+        std::string name = std::string(dir) + "/strata-poly-XXXXXX";
+        const int fd = mkstemp(name.data());
+        if (fd >= 0) {
+            unlink(name.c_str());
+            fcntl(fd, F_SETFD, FD_CLOEXEC);
+            return fd;
+        }
+#else
         const int fd = open(dir, O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);   // nameless
         if (fd >= 0) return fd;
+#endif
     }
     return -1;
 #endif
