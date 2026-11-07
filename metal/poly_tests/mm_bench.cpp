@@ -1,8 +1,7 @@
-// metal/poly_tests/mm_bench.cpp - Mmq::mul's time on the shapes of a prompt batch of LFM2.5-24B-A2B (1,024 tokens,
-// 64 experts of 2,048 x 1,536, 4 a token): the dense projection, the experts' gate|up and down, for each of
-// mm.metal's tiles and for poly_mul.  The dense one takes poly_dq and poly_gemm whatever the tile.  Not a test: run
-// by hand.
-//   poly_mm_bench [reps]
+// metal/poly_tests/mm_bench.cpp - Mmq::mul's time on the shapes of a prompt batch of LFM2.5-24B-A2B (64 experts of
+// 2,048 x 1,536, 4 a token): the dense projection, the experts' gate|up and down, for each of mm.metal's tiles and
+// for poly_mul.  The dense one takes poly_dq and poly_gemm whatever the tile.  Not a test: run by hand.
+//   poly_mm_bench [reps [tokens, default 1,024]]
 #include "test_utils.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 #include "mmq.hpp"
@@ -19,7 +18,7 @@ int main(int argc,char** argv){
     const int reps=argc>1?std::atoi(argv[1]):20;
     g::Stream s;ck(g::stream_create(&s));g::metal::set_optimize(true);
     struct Shape{const char* name;int type,ni,no,n;};
-    const int tokens=1024,used=4;
+    const int tokens=argc>2?std::atoi(argv[2]):1024,used=4;
     for(Shape sh:{Shape{"dense Q3_K 2048->6144",11,2048,6144,1},Shape{"experts gate|up IQ3_XXS 2048->3072",18,2048,3072,64},
                   Shape{"experts down IQ4_XS 1536->2048",23,1536,2048,64}}){
         const int rows=sh.n==1?tokens:tokens*used;
@@ -36,8 +35,7 @@ int main(int argc,char** argv){
         db.put(bounds.data(),bounds.size()*4);
         const double flop=2.0*rows*sh.ni*sh.no;
         // the variants in turn, five rounds, each variant's best round: the Mac may be shared
-        std::vector<const char*> tiles={nullptr,"32,64,128,4","32,64,64,4","32,64,128,8","32,128,64,8","32,64,64,16",
-                                        "64,64,64,16","64,64,64,8","64,64,32,8","64,64,64,4"};
+        std::vector<const char*> tiles={nullptr,"32,64,64,4","64,64,32,4","128,64,64,4"};
         std::vector<double> best(tiles.size()+1,1e30);
         for(int round=0;round<5;++round) for(size_t v=0;v<=tiles.size();++v) {
             const bool units=v<tiles.size();

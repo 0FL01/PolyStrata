@@ -35,11 +35,11 @@ const std::string& mm_source() {
 bool mm_ready() {
     static const bool ready=[] {
         std::string error;
-        return gpu::metal::pipeline("poly_mm",mm_source().c_str(),"poly_mm_q4_K_32_64_64_8",error)!=nullptr;
+        return gpu::metal::pipeline("poly_mm",mm_source().c_str(),"poly_mm_q4_K_64_64_64_4",error)!=nullptr;
     }();
     return ready;
 }
-struct MmTile { int tm=32,tn=64,tk=64,sg=8; };   // mm.metal's tile: rows, outputs, values a step, SIMD groups
+struct MmTile { int tm=64,tn=64,tk=64,sg=4; };   // mm.metal's tile: rows, outputs, values a step, SIMD groups
 struct MArgs {   // mm.metal's MmArgs
     const void* p[5]{};
     uint64_t stride=0,row_bytes=0,ld=0;
