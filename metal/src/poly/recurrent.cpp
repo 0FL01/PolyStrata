@@ -10,12 +10,16 @@ void gdn_step(float* qkv,float* alpha,float* beta,const float* dt,const float* a
         args{{qkv,alpha,beta,dt,a,state,z,norm,out,snap},stride,dim,heads,keys,rows,eps,snaps};
     static_assert(sizeof(Args)==112);
     static const auto source=metal_detail::read_source(STRATA_POLY_RECURRENT_SOURCE);
-    auto run=[&](const char* kernel,uint32_t groups) {
-        metal_detail::dispatch("poly_recurrent",source,kernel,args,s,{groups,1,1},32);
+    auto run=[&](const char* kernel,uint32_t groups,uint32_t threads=32) {
+        metal_detail::dispatch("poly_recurrent",source,kernel,args,s,{groups,1,1},threads);
     };
     run("poly_gdn_norm",rows*keys);
     run("poly_gdn_gates",(rows*heads+31)/32);
-    run("poly_gdn_state",heads*dim);
+    // a prompt batch: a lane to each state column and SIMD groups to its rows (poly_gdn_scan); a few rows: a SIMD
+    // group to each column
+    if(rows>=8 && dim==128) run("poly_gdn_scan_128",heads*dim/32,128);
+    else if(rows>=8 && dim==64) run("poly_gdn_scan_64",heads*dim/32,64);
+    else run("poly_gdn_state",heads*dim);
     run("poly_gdn_out",rows*heads);
 }
 }

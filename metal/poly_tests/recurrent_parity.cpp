@@ -3,8 +3,10 @@
 namespace p=strata::poly;
 int main(){
     int bad=0;g::Stream stream;ck(g::stream_create(&stream));
-    for(int dim:{32,64,128,256}){
-        const int heads=4,keys=2,rows=5;const size_t row_n=(2*keys+heads)*dim,state_n=heads*dim*dim,stride=state_n+17;const unsigned snaps=0x15;
+    // 5 rows: a SIMD group to each state column; 40: a lane to each (poly_gdn_scan, heads of 64 and 128), q and k
+    // staged in blocks the 40 rows cross
+    for(int rows:{5,40})for(int dim:{32,64,128,256}){
+        const int heads=4,keys=2;const size_t row_n=(2*keys+heads)*dim,state_n=heads*dim*dim,stride=state_n+17;const unsigned snaps=0x15;
         auto qkv=values(rows*row_n,.7f),alpha=values(rows*heads,.4f),beta=values(rows*heads,.2f),dt=values(heads,.1f),decay=values(heads,.1f),state=values(state_n,.03f),z=values(rows*heads*dim,.8f),norm=values(dim,.1f);
         for(auto& v:decay)v=-.4f-std::abs(v);for(auto& v:norm)v+=1;
         Buffer dq(qkv),da(alpha),db(beta),dd(dt),ddec(decay),dstate(state),dz(z),dn(norm),out(rows*heads*dim*4),snap(stride*3*4);
@@ -21,7 +23,7 @@ int main(){
                 double ss=0;for(int j=0;j<dim;++j){double v=ref[(r*heads+h)*dim+j];ss+=v*v;}
                 for(int j=0;j<dim;++j){size_t at=(r*heads+h)*dim+j;ref[at]*=norm[j]/std::sqrt(ss/dim+1e-5)*(z[at]/(1+std::exp(-z[at])));}
             }
-            if((snaps>>r)&1u){std::copy(state.begin(),state.end(),snapref.begin()+saved*stride);++saved;}
+            if(r<32 && ((snaps>>r)&1u)){std::copy(state.begin(),state.end(),snapref.begin()+saved*stride);++saved;}
         }
         ck(g::memset_async(snap.ptr,0,stride*3*4,stream));
         p::gdn_step(dq.as(),da.as(),db.as(),dd.as(),ddec.as(),dstate.as(),dz.as(),dn.as(),out.as(),dim,heads,keys,rows,1e-5f,stream,snap.as(),stride,snaps);ck(g::stream_synchronize(stream));
