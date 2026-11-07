@@ -173,6 +173,6 @@ void add_scaled(const ScaledRows& rows,int count,int n,void* s) {
 }
 void likeliest(const float* logits,int n,Likeliest* out,void* s) {
     BasicArgs a{{logits,out}}; a.n=n;
-    launch("poly_likeliest",a,s,{1,1,1},32);
+    launch("poly_likeliest",a,s,{1,1,1},uint32_t(std::clamp((n+31)/32*32,32,1024)));
 }
 } // namespace strata::poly

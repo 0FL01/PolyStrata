@@ -34,6 +34,11 @@ int main(){
     g::graph_exec_destroy(exec);g::graph_destroy(graph);g::free_host(pinned);
     auto logits=values(113,4);logits[7]=8;logits[92]=8;logits[110]=-40;Buffer dl(logits);p::Likeliest* result=nullptr;ck(g::host_alloc_raw(reinterpret_cast<void**>(&result),sizeof(*result),0));
     p::likeliest(dl.as(),logits.size(),result,s);ck(g::stream_synchronize(s));double denom=0;for(float v:logits)if(v>8-20)denom+=std::exp(double(v)-8);
-    bad+=result->token!=7||std::abs(result->prob-1/denom)>1e-6;g::free_host(result);
+    bad+=result->token!=7||std::abs(result->prob-1/denom)>1e-6;
+    // a vocabulary as large as Qwen's, the two largest in different SIMD groups: the first of them
+    auto big=values(248320,4);big[200003]=8;big[100001]=8;Buffer db2(big);
+    p::likeliest(db2.as(),big.size(),result,s);ck(g::stream_synchronize(s));denom=0;for(float v:big)if(v>8-20)denom+=std::exp(double(v)-8);
+    bad+=result->token!=100001||std::abs(result->prob-1/denom)>1e-6;
+    std::printf("likeliest of 248,320: %d, %g against %g\n",result->token,result->prob,1/denom);g::free_host(result);
     ck(g::stream_destroy(s));return bad?1:0;
 }

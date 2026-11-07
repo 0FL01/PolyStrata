@@ -194,11 +194,28 @@ kernel void poly_scaled(constant ScaledArgs& a [[buffer(0)]],uint i [[thread_pos
     if(i>=uint(a.n)) return;
     for(int k=0;k<a.count;++k) a.acc[k][i]+=a.x[k][i]*a.w[k];
 }
-kernel void poly_likeliest(constant BasicArgs& a [[buffer(0)]],uint lane [[thread_index_in_threadgroup]]) {
+// The likeliest token and its probability: one threadgroup (up to 1,024 threads), its SIMD groups' results joined
+// through threadgroup memory; a vocabulary of 248K was 1.8 ms on 32 threads
+kernel void poly_likeliest(constant BasicArgs& a [[buffer(0)]],uint tid [[thread_index_in_threadgroup]],
+                           uint nt [[threads_per_threadgroup]],uint sg [[simdgroup_index_in_threadgroup]],
+                           uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup float tm[32],ts[32];
+    threadgroup int ta[32];
+    const uint groups=(nt+31)/32;
     float m=-INFINITY;
-    for(int i=lane;i<a.n;i+=32) m=max(m,a.p[0][i]);
-    m=simd_max(m); float sum=0; int at=a.n;
-    for(int i=lane;i<a.n;i+=32) { float v=a.p[0][i]; if(v==m) at=min(at,i); if(v>m-20) sum+=exp(v-m); }
+    for(int i=tid;i<a.n;i+=nt) m=max(m,a.p[0][i]);
+    m=simd_max(m);
+    if(!lane) tm[sg]=m;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    m=tm[0];
+    for(uint g=1;g<groups;++g) m=max(m,tm[g]);
+    float sum=0; int at=a.n;
+    for(int i=tid;i<a.n;i+=nt) { float v=a.p[0][i]; if(v==m) at=min(at,i); if(v>m-20) sum+=exp(v-m); }
     sum=simd_sum(sum); at=simd_min(at);
-    if(!lane) { reinterpret_cast<device int*>(a.p[1])[0]=at<a.n?at:0; a.p[1][1]=1.0f/sum; }
+    if(!lane) { ts[sg]=sum; ta[sg]=at; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if(tid) return;
+    sum=0; at=a.n;
+    for(uint g=0;g<groups;++g) { sum+=ts[g]; at=min(at,ta[g]); }
+    reinterpret_cast<device int*>(a.p[1])[0]=at<a.n?at:0; a.p[1][1]=1.0f/sum;
 }
