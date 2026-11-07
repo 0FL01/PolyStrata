@@ -33,5 +33,17 @@ int main(){
     Buffer dx(x),dw(w),ds(state),out(x.size()*4),snap(snapref.size()*4);unsigned mask=0x49;int saved=0;
     for(int r=0;r<rows;++r){for(int c=0;c<channels;++c){float* st=state.data()+c*3;float v=st[0]*w[c*4]+st[1]*w[c*4+1]+st[2]*w[c*4+2]+x[r*channels+c]*w[c*4+3];ref[r*channels+c]=v/(1+std::exp(-v));st[0]=st[1];st[1]=st[2];st[2]=x[r*channels+c];}if((mask>>r)&1){std::copy(state.begin(),state.end(),snapref.begin()+saved*state.size());++saved;}}
     p::conv4_silu(dx.as(),ds.as(),dw.as(),out.as(),channels,rows,stream,snap.as(),state.size(),mask);ck(g::stream_synchronize(stream));bad+=compare(out.read(ref.size()),ref,"conv4 output");bad+=compare(snap.read(snapref.size()),snapref,"conv4 snapshots");
+    bad+=compare(ds.read(state.size()),state,"conv4 state");
+    // LFM2's short convolution (B * x in, C * out, two taps of state), over two calls: 7 rows, then 1 (fewer rows
+    // than the state holds, so part of the old state stays)
+    {
+        int ch=29;auto xs=values(ch*3*8,.7f),ws=values(ch*3,.4f),st=values(ch*2,.2f);auto stref=st;std::vector<float> want(ch*8);
+        for(int r=0;r<8;++r)for(int c=0;c<ch;++c){const float* x=&xs[r*ch*3];float v=x[c]*x[2*ch+c];float* s=&stref[c*2];
+            want[r*ch+c]=(s[0]*ws[c*3]+s[1]*ws[c*3+1]+v*ws[c*3+2])*x[ch+c];s[0]=s[1];s[1]=v;}
+        Buffer dxs(xs),dws(ws),dst(st),o(ch*8*4);
+        p::shortconv(dxs.as(),dst.as(),dws.as(),o.as(),ch,7,stream,nullptr,0,0);
+        p::shortconv(dxs.as()+ch*3*7,dst.as(),dws.as(),o.as()+ch*7,ch,1,stream,nullptr,0,0);ck(g::stream_synchronize(stream));
+        bad+=compare(o.read(want.size()),want,"short conv output");bad+=compare(dst.read(stref.size()),stref,"short conv state");
+    }
     ck(g::stream_destroy(stream));return bad?1:0;
 }

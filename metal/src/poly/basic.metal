@@ -87,31 +87,44 @@ struct ConvArgs {
     int channels, rows, kind;
     uint snaps;
 };
-kernel void poly_conv(constant ConvArgs& a [[buffer(0)]], uint c [[thread_position_in_grid]]) {
+// A channel's input at row r: B * x (kind 0) or x (kind 1); before the call's first row, the state's (it holds the
+// `past` values before row 0, oldest first)
+inline float conv_in(constant ConvArgs& a, uint c, int r, int past) {
+    if (r < 0) return a.state[ulong(c) * past + past + r];
+    device const float* x = a.x + ulong(r) * a.channels * (a.kind ? 1 : 3);
+    return a.kind ? x[c] : x[c] * x[2 * a.channels + c];
+}
+// A thread to each channel of each row: a row reads the inputs of the `past` rows before it, so the rows need not
+// go in order.  poly_conv_state then moves the state on (here a row's thread could still read the old one).
+kernel void poly_conv(constant ConvArgs& a [[buffer(0)]], uint2 tg [[threadgroup_position_in_grid]],
+                      uint tid [[thread_index_in_threadgroup]], uint2 shape [[threads_per_threadgroup]]) {
+    const uint c = tg.x * shape.x + tid;
+    const int row = int(tg.y);
     if (c >= uint(a.channels)) return;
     const int past = a.kind ? 3 : 2;
-    device float* state = a.state + ulong(c) * past;
     device const float* w = a.w + ulong(c) * (past + 1);
-    float s0 = state[0], s1 = state[1], s2 = a.kind ? state[2] : 0;
-    for (int row = 0; row < a.rows; ++row) {
-        device const float* x = a.x + ulong(row) * a.channels * (a.kind ? 1 : 3);
-        float v = a.kind ? x[c] : x[c] * x[2 * a.channels + c];
-        float y;
-        if (a.kind) {
-            y = s0*w[0] + s1*w[1] + s2*w[2] + v*w[3];
-            s0=s1; s1=s2; s2=v;
-            y = y / (1.0f + exp(-y));
-        } else {
-            y = (s0*w[0] + s1*w[1] + v*w[2]) * x[a.channels+c];
-            s0=s1; s1=v;
-        }
-        a.out[ulong(row)*a.channels+c]=y;
-        if (a.snap && row < 32 && ((a.snaps >> row) & 1u)) {
-            device float* dst = a.snap + ulong(popcount(a.snaps & ((1u << row)-1u))) * a.stride + ulong(c)*past;
-            dst[0]=s0; dst[1]=s1; if (a.kind) dst[2]=s2;
-        }
+    const float s0 = conv_in(a, c, row - past, past), s1 = conv_in(a, c, row - past + 1, past);
+    const float s2 = a.kind ? conv_in(a, c, row - 1, past) : 0, v = conv_in(a, c, row, past);
+    float y;
+    if (a.kind) {
+        y = s0*w[0] + s1*w[1] + s2*w[2] + v*w[3];
+        y = y / (1.0f + exp(-y));
+    } else {
+        y = (s0*w[0] + s1*w[1] + v*w[2]) * a.x[ulong(row) * a.channels * 3 + a.channels + c];
     }
-    state[0]=s0; state[1]=s1; if (a.kind) state[2]=s2;
+    a.out[ulong(row)*a.channels+c]=y;
+    if (a.snap && row < 32 && ((a.snaps >> row) & 1u)) {   // the state after this row
+        device float* dst = a.snap + ulong(popcount(a.snaps & ((1u << row)-1u))) * a.stride + ulong(c)*past;
+        if (a.kind) { dst[0]=s1; dst[1]=s2; dst[2]=v; }
+        else { dst[0]=s1; dst[1]=v; }
+    }
+}
+// The state after the call's last row: the last `past` inputs, the old state's where the call has fewer rows (read
+// before they are written over: state[i] takes old state[rows + i])
+kernel void poly_conv_state(constant ConvArgs& a [[buffer(0)]], uint c [[thread_position_in_grid]]) {
+    if (c >= uint(a.channels)) return;
+    const int past = a.kind ? 3 : 2;
+    for (int i = 0; i < past; ++i) a.state[ulong(c) * past + i] = conv_in(a, c, a.rows - past + i, past);
 }
 
 struct RouteArgs {

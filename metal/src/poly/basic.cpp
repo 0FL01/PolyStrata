@@ -103,7 +103,8 @@ void convolution(const float* x, float* state, const float* w, float* out, int c
     if (rows <= 0 || channels <= 0) return;
     ConvArgs a{x,state,w,out,snap,stride,channels,rows,kind,snaps};
     const void* refs[]={x,state,w,out,snap};
-    launch("poly_conv", a, stream, {uint32_t((channels+255)/256),1,1}, 256,{refs,5,true});
+    launch("poly_conv", a, stream, {uint32_t((channels+255)/256),uint32_t(rows),1}, 256,{refs,5,true});
+    launch("poly_conv_state", a, stream, {uint32_t((channels+255)/256),1,1}, 256,{refs,5,true});
 }
 }
 void shortconv(const float* x, float* state, const float* w, float* out, int channels, int rows,
