@@ -91,6 +91,7 @@ if(STRATA_METAL_POLY)
   target_compile_definitions(strata_poly_metal_kernels PRIVATE
     STRATA_POLY_BASIC_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/src/poly/basic.metal"
     STRATA_POLY_ATTENTION_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/src/poly/attention.metal"
+    STRATA_POLY_FLASH_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/src/poly/flash.metal"
     STRATA_POLY_RECURRENT_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/src/poly/recurrent.metal"
     STRATA_POLY_ADVANCED_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/src/poly/advanced.metal")
   target_link_libraries(strata_poly_metal_kernels PUBLIC strata_gpu_metal)

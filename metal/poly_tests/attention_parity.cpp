@@ -6,8 +6,10 @@ int main(){
     int bad=0; g::Stream s;ck(g::stream_create(&s));
     // One attend() call against a CPU reference over the cache as store wrote it: `total` rows, the last `rows` of
     // them the call's tokens.  recorded: captured, with the position on the card and the launch sized for `room` rows.
+    // batch: attend_batch() instead, whose products take the queries and the weights in fp16 (flash.metal): the
+    // reference takes the queries rounded so, and the weights' rounding is within the looser bound.
     auto attention=[&](int dim,bool quant,int window,int ring,bool whole,int heads,int kv,int rows,int total,
-                       bool recorded,int room){
+                       bool recorded,int room,bool batch=false){
         const int pos=total-rows,n=kv*dim;
         auto keys=values(size_t(total)*n),vals=values(size_t(total)*n,.63f),query=values(size_t(rows)*heads*dim,.42f);
         Buffer dk(keys),dv(vals),dq(query),kcache(size_t(total)*n*2),vcache(size_t(total)*n*2),kscale(size_t(total)*n/32*2),
@@ -27,17 +29,22 @@ int main(){
             }return result;
         };
         auto k=decode(kcache,kscale,keys),v=decode(vcache,vscale,vals);
+        auto qr=query;if(batch)for(auto& x:qr)x=float(_Float16(x));
+        if(batch&&quant){for(auto& x:k)x=float(_Float16(x));for(auto& x:v)x=float(_Float16(x));}
         // Ring reads are tested against explicitly wrapped physical cache indices.
         std::vector<float> ref(size_t(rows)*heads*dim);
         for(int t=0;t<rows;++t)for(int h=0;h<heads;++h){
             int lo=window?std::max(0,pos+t-window+1):0,hi=whole?total-1:pos+t;
             std::vector<double> scores;double mx=-1e100;
-            for(int j=lo;j<=hi;++j){int off=((ring?j%ring:j)*kv+h/(heads/kv))*dim;double dot=0;for(int d=0;d<dim;++d)dot+=double(query[(t*heads+h)*dim+d])*k[off+d];scores.push_back(dot*.125);mx=std::max(mx,dot*.125);}
+            for(int j=lo;j<=hi;++j){int off=((ring?j%ring:j)*kv+h/(heads/kv))*dim;double dot=0;for(int d=0;d<dim;++d)dot+=double(qr[(t*heads+h)*dim+d])*k[off+d];scores.push_back(dot*.125);mx=std::max(mx,dot*.125);}
             double denom=0;for(auto& a:scores){a=std::exp(a-mx);denom+=a;}
             for(int d=0;d<dim;++d){double sum=0;for(int j=lo;j<=hi;++j)sum+=scores[j-lo]*v[((ring?j%ring:j)*kv+h/(heads/kv))*dim+d];ref[(t*heads+h)*dim+d]=sum/denom;}
         }
         p::Kvq8 kq{quant?kcache.as<int8_t>():nullptr,kscale.as<uint16_t>()},vq{quant?vcache.as<int8_t>():nullptr,vscale.as<uint16_t>()};
-        if(recorded){
+        if(batch){
+            p::attend_batch(nullptr,dq.as(),kcache.as<uint16_t>(),vcache.as<uint16_t>(),pos,rows,nullptr,0,nullptr,out.as(),dim,heads,kv,.125f,s,window,ring,whole,kq,vq);
+            ck(g::stream_synchronize(s));
+        } else if(recorded){
             position=pos;at.put(&position,8);
             ck(g::begin_capture(s));p::attend(dq.as(),kcache.as<uint16_t>(),vcache.as<uint16_t>(),0,rows,nullptr,2,out.as(),dim,heads,kv,.125f,s,window,ring,whole,at.as<long long>(),room,0,kq,vq);
             g::Graph graph;ck(g::end_capture(s,&graph));g::GraphExec exec;ck(g::graph_instantiate(&exec,graph));ck(g::graph_launch(exec,s));ck(g::stream_synchronize(s));
@@ -47,8 +54,8 @@ int main(){
             ck(g::stream_synchronize(s));
         }
         char label[96];
-        std::snprintf(label,sizeof label,"attention dim %d%s window %d%s, %d keys%s",dim,quant?" q8":"",window,whole?" whole":"",total,recorded?" recorded":"");
-        bad+=compare(out.read(size_t(rows)*heads*dim),ref,label);
+        std::snprintf(label,sizeof label,"%s dim %d%s window %d%s, %d keys%s",batch?"attend_batch":"attention",dim,quant?" q8":"",window,whole?" whole":"",total,recorded?" recorded":"");
+        bad+=compare(out.read(size_t(rows)*heads*dim),ref,label,batch?2e-3f:3e-5f);
     };
     for(int dim:{32,64,128})for(bool quant:{false,true})for(int window:{0,7})for(bool whole:{false,true})
         attention(dim,quant,window,window?11:0,whole,4,2,3,19,true,19);
@@ -58,6 +65,11 @@ int main(){
     // 300 keys: a recorded launch has 16 SIMD groups and gives keys to 3 of them, a direct one has 2
     for(int dim:{128,256})for(bool quant:{false,true})for(bool recorded:{false,true})
         attention(dim,quant,0,0,false,8,2,3,300,recorded,4096);
+    // A prompt batch: 70 tokens (16 a threadgroup, the last 6 alone) after 2,530 keys, and 40 from the first row
+    for(int dim:{64,128,256})for(bool quant:{false,true})for(int window:{0,700})for(bool whole:{false,true}){
+        attention(dim,quant,window,window?1024:0,whole,8,2,70,2600,false,0,true);
+        attention(dim,quant,window?7:0,window?11:0,whole,8,2,40,40,false,0,true);
+    }
     // Per-head RMS, NeoX pairs, frequencies, image axes, and an in-place output.
     for(bool axes:{false,true}){
         int dim=64,heads=2,rows=3,rot=32;auto x=values(dim*heads*rows),w=values(dim,.2f);for(auto& v:w)v+=1;

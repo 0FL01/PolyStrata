@@ -53,9 +53,27 @@ void attend(const float* q,const uint16_t* k,const uint16_t* v,int64_t pos,int r
     run(dim<=256?"poly_attention_256":"poly_attention",a,s,{uint32_t(heads),uint32_t(rows),1},uint32_t(32*groups),shared);
 }
 size_t attend_split_floats(int,int,int,int) { return 0; } // online softmax has no score workspace
+// flash.metal on the matrix units (Metal 4's matmul2d) with --metal-optimize, for heads of 64, 128 and 256 values;
+// else attend()
 void attend_batch(void*,const float* q,const uint16_t* k,const uint16_t* v,int64_t pos,int rows,float* score,
                   size_t score_n,float*,float* out,int dim,int heads,int kv,float scale,void* s,int window,int ring,
                   bool whole,Kvq8 kq,Kvq8 vq,uint16_t*,uint16_t*,size_t,const float* sinks) {
-    attend(q,k,v,pos,rows,score,rows,out,dim,heads,kv,scale,s,window,ring,whole,nullptr,0,score_n,kq,vq,sinks,0);
+    static const std::string source=metal_detail::read_source(STRATA_POLY_FLASH_SOURCE);
+    static const bool ready=[] {
+        std::string error;
+        return gpu::metal::pipeline("poly_flash",source.c_str(),"poly_flash_64",error)!=nullptr;
+    }();
+    const bool flash=(dim==64 || dim==128 || dim==256) && !sinks && kv>0 && heads%kv==0 && gpu::metal::optimize() &&
+                     ready;
+    if(!flash || rows<=0) {
+        attend(q,k,v,pos,rows,score,rows,out,dim,heads,kv,scale,s,window,ring,whole,nullptr,0,score_n,kq,vq,sinks,0);
+        return;
+    }
+    Args a;a.p[0]=q;a.p[1]=k;a.p[2]=v;a.p[3]=out;
+    a.p[5]=kq.codes;a.p[6]=kq.scales;a.p[7]=vq.codes;a.p[8]=vq.scales;
+    a.dim=dim;a.heads=heads;a.kv=kv;a.pos=pos;a.rows=rows;a.scale=scale;a.window=window;a.ring=ring;a.whole=whole;
+    const std::string name="poly_flash_"+std::to_string(dim);
+    metal_detail::dispatch("poly_flash",source,name.c_str(),a,s,{uint32_t(heads),uint32_t((rows+15)/16),1},
+                           uint32_t(32*(dim/64)));
 }
 }
