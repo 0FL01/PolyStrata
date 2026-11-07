@@ -1,15 +1,19 @@
 // src/poly/mmq_tiles_test.cu - the size-class launches of STRATA_POLY_STAGED_TILES (engine.cpp, moe_rows) give the same
-// results to the bit as one launch.  llama.cpp's MMQ takes a launch's tile width from the largest expert in it, so
-// the engine launches the experts of up to N rows apart from the larger ones, each class with bounds in which the
-// other classes' experts have no rows, over rows laid out class after class.  That layout is built here the
-// way the engine builds it, for row counts with many small experts, a few large, empty ones and equal ones.
+// results as one launch: to the bit, except on a card whose MMQ uses stream-k (Mmq::split_exact()), where they are
+// the same products added in another order and must agree within rounding.  llama.cpp's MMQ takes a launch's tile
+// width from the largest expert in it, so the engine launches the experts of up to N rows apart from the larger
+// ones, each class with bounds in which the other classes' experts have no rows, over rows laid out class after
+// class.  That layout is built here the way the engine builds it, for row counts with many small experts, a few
+// large, empty ones and equal ones.
 //
-// usage: poly_mmq_tiles_test   (exit 0: every case bit for bit; 77: no card)
+// usage: poly_mmq_tiles_test   (exit 0: every case agrees; 77: no card)
 #include "mmq.hpp"
 
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <cfloat>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -43,8 +47,10 @@ int tile_of(const std::vector<int>& t, int rows) {
     return k;
 }
 
-// one case: the rows of each expert, the classes' limits; returns the number of rows that differ from one launch
-int run_case(const Quant& q, const std::vector<int>& rows, const std::vector<int>& limits, std::mt19937& rng) {
+// one case: the rows of each expert, the classes' limits; returns the number of rows that differ from one launch,
+// to the bit where `exact`, else by more than 8 float epsilons of the case's largest value
+int run_case(const Quant& q, const std::vector<int>& rows, const std::vector<int>& limits, bool exact,
+             std::mt19937& rng) {
     const int n = (int) rows.size();
     const size_t per = (size_t) kRows * (kCols / 256) * q.block;
     std::vector<uint8_t> w(per * n + 4096, 0);   // zero bytes behind the matrices (kTail)
@@ -107,9 +113,16 @@ int run_case(const Quant& q, const std::vector<int>& rows, const std::vector<int
             std::vector<float> a((size_t) total * kRows), b((size_t) total * kRows);
             cudaMemcpy(a.data(), dref, a.size() * 4, cudaMemcpyDeviceToHost);
             cudaMemcpy(b.data(), dcls, b.size() * 4, cudaMemcpyDeviceToHost);
+            float big = 0;
+            for (float v : a) big = std::max(big, std::fabs(v));
+            const float tol = 8 * FLT_EPSILON * big;
+            const auto near = [tol](float u, float v) { return std::fabs(u - v) <= tol; };
             bad = 0;   // row i of the class layout is row gather_cls[i] of the reference
-            for (int i = 0; i < total; ++i)
-                if (std::memcmp(&b[(size_t) i * kRows], &a[(size_t) gather_cls[(size_t) i] * kRows], kRows * 4) != 0) ++bad;
+            for (int i = 0; i < total; ++i) {
+                const float* c = &b[(size_t) i * kRows];
+                const float* r = &a[(size_t) gather_cls[(size_t) i] * kRows];
+                if (exact ? std::memcmp(c, r, kRows * 4) != 0 : !std::equal(c, c + kRows, r, near)) ++bad;
+            }
         }
     }
     for (void* p : {(void*) dw, (void*) dx, (void*) d_iota, (void*) d_gref, (void*) d_gcls, (void*) d_rb, (void*) d_cb, xq,
@@ -145,16 +158,20 @@ int main() {
     dists.push_back({"one class edge", std::vector<int>{8, 9, 16, 17, 32, 33, 64, 65, 8, 16, 32, 64}});
     const std::vector<std::vector<int>> limits = {{8, 16, 32}, {16}, {4, 8, 12, 16, 24, 32, 48}, {64}};
     int failures = 0, cases = 0;
-    for (const Quant& q : kQuants)
+    for (const Quant& q : kQuants) {
+        const bool exact = Mmq::split_exact(q.type, kRows);
+        if (!exact) std::printf("%s: this card's MMQ uses stream-k, compared within rounding\n", q.name);
         for (const Dist& d : dists)
             for (const auto& l : limits) {
-                const int bad = run_case(q, d.rows, l, rng);
+                const int bad = run_case(q, d.rows, l, exact, rng);
                 ++cases;
                 if (bad != 0) {
                     ++failures;
-                    std::printf("FAIL %s %s, %zu classes: %d rows differ\n", q.name, d.name, l.size() + 1, bad);
+                    std::printf("FAIL %s %s, %zu classes: %d rows differ%s\n", q.name, d.name, l.size() + 1, bad,
+                                exact ? "" : " by more than rounding");
                 }
             }
+    }
     if (failures) {
         std::printf("FAIL: %d of %d cases\n", failures, cases);
         return 1;

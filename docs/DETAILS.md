@@ -2428,8 +2428,13 @@ of the columns it computed held a row.
 numbers are ascending row counts, at most 7 of them. Unset, empty or invalid (a message is printed) keeps the
 single launch. The setting is read when the engine starts, so restart to change it, and it can be set in the
 server model's `env` map. A round's rows lie class after class, and each class has its own bounds in which the
-other classes' experts have no rows, as the cached experts' classes already do; the rows' products do not
-depend on the tile they are in, and `poly_mmq_tiles_test` checks that to the bit. The tables grow by
+other classes' experts have no rows, as the cached experts' classes already do. A row's products are then
+the single launch's to the bit on a card whose MMQ does not use stream-k (AMD RDNA and GCN, NVIDIA Pascal). On
+one that does (NVIDIA from Volta, AMD CDNA) stream-k shares a tile's sum between blocks by the launch's tile
+count, so the class launches add the same parts in another order and agree within rounding: on an RTX PRO 6000
+the rows differed in the last bit or two, and a 256-token Qwen3.6 answer to a 32K prompt (experts frozen)
+left the single launch's at token 180. `poly_mmq_tiles_test` checks the first to the bit and the second within rounding. The
+tables grow by
 `2 x 8 x (2 x experts + 2)` integers (33 KB for 256 experts), allocated whether or not it is set. Experts already in VRAM keep
 their own classes.
 
