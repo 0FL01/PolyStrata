@@ -7,6 +7,11 @@ version of everything below is [INSTALL.md](INSTALL.md).
 
 Work through the steps in order. Tell the user what you are doing in plain words; they may not be technical.
 
+For Apple Silicon, `./setup.sh --list-models` exposes the complete shared catalog and dispatches installation to
+`metal/setup_mac.py`. See [Mac model coverage](MAC.md#model-coverage) before selecting a newly ported path;
+synthetic kernel/engine checks do not establish actual-weight quality or performance. `qwen36-strata` keeps
+its separate `strata-q36` executable and server configuration.
+
 ## 0. Ground rules
 
 - **Never expose the server without an API key.** Keep the default `--host 127.0.0.1`. Only if the user asks for

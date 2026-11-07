@@ -5468,6 +5468,9 @@ def choices_from_config(cfg_path: Path) -> dict:
     family = next((f for f, d in FAMILIES.items() if d["tag"] and tag.startswith(d["tag"])), "qwen")
     model = (tag[len(FAMILIES[family]["tag"]):] if tag.startswith(FAMILIES[family]["tag"]) else tag).upper()
     sizes = FAMILIES[family].get("models", MODELS)     # a family's own sizes, where it has them
+    # Some published quant names are lowercase (MiniCPM-V's mix_q3gud_im).
+    # Match the filename case-insensitively, then return the catalog's canonical key.
+    model = next((m for m in sizes if m.casefold() == model.casefold()), model)
     if model not in sizes:                             # (sizes have no dash except UD-Q4_K_XL: the old rule)
         model = tag.split("-")[-1].upper()
     a = cfg.get("args", [])
@@ -7062,7 +7065,7 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     if not multi and poly_batch(fam, d, vram, ctx):
         args += ["--prompt-batch", "2048"]
         ok("prompts are read 2,048 tokens at a time (--prompt-batch in the config)")
-    # The engine's own count is every logical CPU.  On a hybrid CPU that is the slowest: an efficiency core runs
+    # The engine's own count is 70% of the logical CPUs.  A hybrid CPU gets one of setup's: an efficiency core runs
     # an expert at half the speed, and a layer waits for its slowest part (hybrid_pool_workers()).
     cores = cpu_cores()
     threads = hybrid_pool_workers(cores)

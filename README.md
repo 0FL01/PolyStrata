@@ -97,9 +97,10 @@ model file that are already on the graphics card. On the laptop, Qwen3.6-35B-A3B
 To hold less, add `"--ram-experts-mib", "6144"` to the `"args"` list of `strata-<model>.json`
 ([where](docs/INSTALL.md#where-things-are-stored)) and restart. The engine then holds that many MiB of RAM for the
 experts that stay outside VRAM, while it answers too, and says so when it starts. The others stay in the system's
-file cache, where your other programs can take that memory, and are read from it when a token needs them. It is off
-by default because it writes slower, and we are still working on that. On the laptop (RTX 4070 Laptop 8 GB, 32 GB
-of RAM, Windows 11), Qwen3.6-35B-A3B UD-Q3_K_M:
+file cache, where your other programs can take that memory, and are read from it when a token needs them. Where the
+experts fit in the RAM that is free it is off by default, because it writes slower, and we are still working on
+that; where they do not, the engine turns it on by itself (below). On the laptop (RTX 4070 Laptop 8 GB, 32 GB of
+RAM, Windows 11), Qwen3.6-35B-A3B UD-Q3_K_M:
 
 | | default | `--ram-experts-mib 6144` |
 | --- | ---: | ---: |
@@ -115,6 +116,25 @@ Other programs held part of the card's VRAM in this run, so both columns write s
 two other runs it wrote 6 to 8% slower after the 32K prompt and 8 to 10% slower in the chat after it. Under Linux
 (an RTX PRO 6000 held to about 8 GB) it held 7.0 to 7.7 GiB instead of 12.3 to 14.3 and wrote 7 to 14% slower. With
 the expert cache held still, as a release is checked, the answers are the same token for token.
+
+When the experts outside VRAM do not fit in the RAM that is free, the engine now holds the ones used most in a
+budget of that RAM less 4 GiB, and reads the others from the SSD when a token needs them; it says so when it starts.
+Before, it mapped them all and the system read them back a page fault at a time. A container's memory limit counts
+too. Measured under Linux on an RTX PRO 6000 held to about 8 GB, with the engine held to 12 GB and to 10 GB of RAM,
+what a 16 GB PC has left for it, and the model file out of the file cache at each start: Qwen3.6-35B-A3B
+UD-Q3_K_M, tokens/s in the first short chat, after a 24,000-token prompt and in a short chat after that.
+
+| RAM for the engine | every expert mapped (before) | the budget it takes now |
+| --- | ---: | ---: |
+| 12 GB | 51 / 75-78 / 94-98 | **57-60 / 77-85 / 131-139** |
+| 10 GB | 39 / 48 / 69 | **51 / 64 / 92** |
+
+With no limit the same machine writes 63 / 169 / 203. It was not measured on Windows, where the same code runs.
+`"--ram-experts-mib", "-1"` keeps every expert mapped as before.
+
+The other way round, `"--lock-experts"` locks the experts outside VRAM in RAM, so the system cannot give their
+memory to other programs and have the engine read them from the SSD again later. Under Linux it locks no more than
+`ulimit -l` allows, and the engine says at the start how much it locked.
 
 The engine also needs 350 to 400 MiB less VRAM for reading prompts: the expert cache takes it (Qwen3.6 keeps 2,712
 experts in VRAM instead of 2,444), or `--vram-reserve-mib` leaves it to other programs.
