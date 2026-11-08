@@ -15,6 +15,7 @@
 #pragma once
 
 #include "cpu_experts.hpp"
+#include "strata/poly/kernels.hpp"
 
 #include <atomic>
 #include <condition_variable>
@@ -135,6 +136,7 @@ struct Dev {
     void* p = nullptr;
     uint32_t type = 0;
     int n_in = 0, n_out = 0;
+    float scale = 1.0f;   ///< on the product: an NVFP4 matrix's global scale (Engine::global_scale())
 };
 
 /// What a layer has in every architecture.  Its attention's weights, and a dense FFN's, are the architecture's.
@@ -161,6 +163,10 @@ struct Layer {
     size_t gu2() const { return gu_bytes + u_bytes; }   ///< an expert's gate and up: where its down starts in a slot
     size_t gu_step = 0;   ///< from a staged expert's gate|up to the next one's: gu2(), and in a mixed layer whole
                           ///< blocks of both types, since MMQ takes the stride in blocks (Mmq::mul)
+    // NVFP4 experts converted from NVIDIA's checkpoints: each expert's global scale of gate, up and down (the
+    // GGUF's ffn_*_exps.scale), on the card and here; none in any other file
+    Dev s_gate, s_up, s_down;
+    std::vector<float> h_s_gate, h_s_up, h_s_down;
     std::vector<uint8_t*> slot;        ///< per expert: gate | up | down in VRAM, or null
     size_t slot_bytes = 0;             ///< from a slot of the layer to the one behind it: whole blocks of both types
     std::vector<int32_t> ahead;        ///< experts a full prompt batch stages before it routes
@@ -520,6 +526,9 @@ protected:
     enum Want { kF32, kFloatMat, kAnyMat, kGuessMat };
     Dev upload(const TensorInfo* t, const std::string& name, int64_t n_in, int64_t n_out, Want want,
                float (*fix)(float) = nullptr);
+    Dev upload_as(const TensorInfo* t, const std::string& name, int64_t n_in, int64_t n_out, Want want,
+                  float (*fix)(float));
+    float global_scale(const TensorInfo& t) const;
     const TensorInfo* tensor(int il, const char* name) const;
     const Shards& home(const TensorInfo& t) const;
     const MetaValue* meta_in(const Shards& g, const char* key) const;
@@ -536,6 +545,9 @@ protected:
     const Image* image_at(int64_t row) const;
     bool input(int32_t token, int64_t row, float* dst) const;
     void lin(const Dev& w, const float* x, float* y, int n, const void* xq = nullptr, int rows_per_x = 0);
+    void lin_raw(const Dev& w, const float* x, float* y, int n, const void* xq, int rows_per_x);
+    /// The layer's ExpertScales for rows of the experts ids[r] (on the card), or none.
+    ExpertScales expert_scales(const Layer& L, const int32_t* ids = nullptr) const;
     void fill_expert_cache();
     void ensure_stage();
     void start_swaps();
@@ -835,6 +847,7 @@ protected:
     void* mqx_ = nullptr;                                   ///< lin()'s tokens quantized for a product
     int32_t *tab_ = nullptr, *h_tab_ = nullptr;   ///< a layer's row tables, in VRAM and pinned
     int32_t* iota_ = nullptr;                     ///< 0, 1, 2, ...
+    int32_t *d_ex_ = nullptr, *h_ex_ = nullptr;   ///< a prompt batch's rows' experts (ExpertScales), in VRAM and pinned
     int32_t* d_ids_ = nullptr;                    ///< a batch's experts and weights when it routes on the card
     float* d_wts_ = nullptr;
     int32_t* h_ids_ = nullptr;                    ///< pinned: the experts, back from the card

@@ -1579,6 +1579,25 @@ void Engine::load_moe(int il, bool shared) {
                                      size_t(8));
         L.gu_step = (L.gu_step + unit - 1) / unit * unit;
     }
+    // NVFP4 experts converted from NVIDIA's checkpoints carry each expert's global scale of gate, up and down
+    // (llama.cpp's ffn_*_exps_s).  Gate's and up's go on their products ahead of the activation (ExpertScales),
+    // down's on the expert's weight in its token's sum.  Only NVFP4's: Gemma 4's ffn_down_exps.scale is its own.
+    const bool nv = L.gu_type == GGML_TYPE_NVFP4 || L.u_type == GGML_TYPE_NVFP4 || L.d_type == GGML_TYPE_NVFP4;
+    if (nv && tensor(il, "ffn_gate_up_exps.scale"))
+        throw std::runtime_error(blk(il, "ffn_gate_up_exps.scale: NVFP4 scales of a joined gate and up are not supported"));
+    // A projection of another type in the same layer has none (Qwen3.6 NVFP4-MTP-HQ: some ups are Q4_K).
+    const auto one = [&](const char* n, uint32_t type, Dev& d, std::vector<float>& h) {
+        const TensorInfo* t = tensor(il, n);
+        h.clear();
+        if (type != GGML_TYPE_NVFP4 || !t) return;
+        if (t->type != kTypeF32) throw std::runtime_error(t->name + " is not F32");
+        d = upload(t, blk(il, n), n_expert_, 1, kF32);
+        h.resize((size_t) n_expert_);
+        std::memcpy(h.data(), home(*t).data(*t), h.size() * sizeof(float));
+    };
+    one("ffn_gate_exps.scale", L.gu_type, L.s_gate, L.h_s_gate);
+    one("ffn_up_exps.scale", L.u_type, L.s_up, L.h_s_up);
+    one("ffn_down_exps.scale", L.d_type, L.s_down, L.h_s_down);
     std::string err;
     if (!cpu_expert_types_ok((int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_, err) ||
         !cpu_expert_types_ok((int) L.u_type, (int) L.d_type, n_embd_, n_ff_exp_, err))
@@ -1684,6 +1703,28 @@ const Shards& Engine::home(const TensorInfo& t) const {
 // model's tensors through twice).
 Dev Engine::upload(const TensorInfo* t, const std::string& name, int64_t n_in, int64_t n_out, Want want,
                    float (*fix)(float)) {
+    Dev d = upload_as(t, name, n_in, n_out, want, fix);
+    d.scale = global_scale(*t);
+    return d;
+}
+
+// An NVFP4 matrix converted from NVIDIA's checkpoints has its global scale beside it, "<name>.scale" for
+// "<name>.weight" (llama.cpp's *_s tensors, which multiply the product): about 1e-4, so it cannot go into the
+// blocks' E4M3 scales.  1 for any other matrix.
+float Engine::global_scale(const TensorInfo& t) const {
+    static const std::string w = ".weight";
+    if (t.type != GGML_TYPE_NVFP4 || t.name.size() <= w.size() ||
+        t.name.compare(t.name.size() - w.size(), w.size(), w) != 0)
+        return 1.0f;
+    const TensorInfo* s = home(t).find(t.name.substr(0, t.name.size() - w.size()) + ".scale");
+    if (!s || s->type != kTypeF32 || s->elements() != 1) return 1.0f;
+    float v;
+    std::memcpy(&v, home(*s).data(*s), sizeof v);
+    return v;
+}
+
+Dev Engine::upload_as(const TensorInfo* t, const std::string& name, int64_t n_in, int64_t n_out, Want want,
+                      float (*fix)(float)) {
     if (!t) throw std::runtime_error("the GGUF has no tensor " + name);
     const uint64_t rest = t->elements() / std::max<uint64_t>(t->shape[0], 1);
     if ((int64_t) t->shape[0] != n_in || (int64_t) rest != n_out)
@@ -3082,6 +3123,8 @@ void Engine::alloc() {
         tab_ = (int32_t*) dmalloc(tab, "scratch");
         h_tab_ = (int32_t*) hmalloc(tab, "pinned memory");
         iota_ = (int32_t*) dmalloc(rr * sizeof(int32_t), "scratch");
+        d_ex_ = (int32_t*) dmalloc(rr * sizeof(int32_t), "scratch");
+        h_ex_ = (int32_t*) hmalloc(rr * sizeof(int32_t), "pinned memory");
         std::vector<int32_t> ramp(rr);
         std::iota(ramp.begin(), ramp.end(), 0);
         ck(cudaMemcpy(iota_, ramp.data(), rr * sizeof(int32_t), cudaMemcpyHostToDevice), "scratch");
@@ -3478,6 +3521,20 @@ void Engine::dbg(const char* name, int il, const float* dev, int n) {
 // y = w x for n tokens.  xq is x already in Q8_1, when the caller has it.  rows_per_x below n_out gives each group
 // of rows its own input (see gemv_f32); only the float types take it.
 void Engine::lin(const Dev& w, const float* x, float* y, int n, const void* xq, int rows_per_x) {
+    lin_raw(w, x, y, n, xq, rows_per_x);
+    if (w.scale != 1.0f) axpy(y, w.scale, y, n * w.n_out, false, st_);
+}
+
+ExpertScales Engine::expert_scales(const Layer& L, const int32_t* ids) const {
+    ExpertScales s;
+    if (L.h_s_gate.empty() && L.h_s_up.empty()) return s;
+    s.gate = L.h_s_gate.empty() ? nullptr : fp(L.s_gate);
+    s.up = L.h_s_up.empty() ? nullptr : fp(L.s_up);
+    s.ids = ids;
+    return s;
+}
+
+void Engine::lin_raw(const Dev& w, const float* x, float* y, int n, const void* xq, int rows_per_x) {
     if (w.type == kTypeF32 || w.type == kTypeBF16) {
         const int per = rows_per_x ? rows_per_x : w.n_out;
         const size_t count = (size_t) w.n_in * w.n_out;
@@ -3970,6 +4027,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
             const uint8_t* slot;
             float w;
             int row;
+            int e;
         };
         CpuExpert host[kCpuRows * kMaxUsed];
         Cached cached[kCpuRows * kMaxUsed];
@@ -4002,14 +4060,16 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
                     ++use_[(size_t) il * n_expert_ + e];
                     if (n_swap_ > 0) recent_[(size_t) il * n_expert_ + e] += 1.f;
                 }
+                // NVFP4's down scale goes on the weight (ExpertScales)
+                const float we = L.h_s_down.empty() ? w[k] : w[k] * L.h_s_down[e];
                 if (const uint8_t* s = L.slot[e]) {
-                    cached[n_cached++] = {s, w[k], at + t};
+                    cached[n_cached++] = {s, we, at + t, (int) e};
                     continue;
                 }
                 host_e[n_host] = (int32_t) e;
                 host_k[n_host] = k;
-                host[n_host++] = {L.exp_gate + e * L.gu_stride, L.exp_up + e * L.u_stride,
-                                  L.exp_down + e * L.d_bytes, w[k], t};
+                host[n_host++] = {L.exp_gate + e * L.gu_stride, L.exp_up + e * L.u_stride, L.exp_down + e * L.d_bytes,
+                                  we, t, L.h_s_gate.empty() ? 1.f : L.h_s_gate[e], L.h_s_up.empty() ? 1.f : L.h_s_up[e]};
             }
         }
         // Strata's STRATA_ROUTE_TAIL_SKIP: an expert outside VRAM that every token here ranks at tail_skip or later
@@ -4079,8 +4139,10 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
                     for (int j = 0; j < m && !one_u; ++j)
                         kernels::native_mmvq((int) L.u_type, up.w[j], up.x[j], up.y[j], n_embd_, n_ff_exp_, 1, st_);
                 }
-                if (gelu_) geglu_rows(g_, h_, n_ff_exp_, m, st_);
-                else swiglu_clamp_rows(g_, h_, n_ff_exp_, m, limit, st_);
+                ExpertScales es = expert_scales(L);
+                for (int j = 0; j < m && (es.gate || es.up); ++j) es.e[j] = cached[i0 + j].e;
+                if (gelu_) geglu_rows(g_, h_, n_ff_exp_, m, st_, &es);
+                else swiglu_clamp_rows(g_, h_, n_ff_exp_, m, limit, st_, &es);
                 kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_, m, st_);
                 if (!(m > 1 && kernels::native_mmvq_slots((int) L.d_type, down, m, n_ff_exp_, n_embd_, st_)))
                     for (int j = 0; j < m; ++j)
@@ -4199,8 +4261,10 @@ bool Engine::moe_card(Layer& L, int il, int n) {
         const kernels::MmvqIds up{table, d_ids_, L.gu_bytes, xq_, xq_row, n_used_, g_ + ff, 2 * ff};
         kernels::native_mmvq_ids((int) L.u_type, up, rr, n_embd_, n_ff_exp_, st_);
     }
-    if (gelu_) geglu_rows(g_, h_, n_ff_exp_, rr, st_);
-    else swiglu_clamp_rows(g_, h_, n_ff_exp_, rr, clamp_exp_[(size_t) il], st_);
+    const ExpertScales es = expert_scales(L, d_ids_);
+    if (gelu_) geglu_rows(g_, h_, n_ff_exp_, rr, st_, &es);
+    else swiglu_clamp_rows(g_, h_, n_ff_exp_, rr, clamp_exp_[(size_t) il], st_, &es);
+    if (!L.h_s_down.empty()) expert_weights(d_wts_, fp(L.s_down), d_ids_, rr, st_);
     kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_ * rr, 1, st_);   // the rows back to back, as one vector
     const kernels::MmvqIds down{table, d_ids_, L.gu2(), q8_, kernels::native_q8_1_bytes(n_ff_exp_), 1, d_,
                                 (size_t) n_embd_};
@@ -4453,20 +4517,24 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     }
     const int rg = at;   // the card's rows
     host_.clear();
+    const ExpertScales es = expert_scales(L, d_ex_);
     for (int i = 0; i < rr; ++i) {
         const size_t e = (size_t) ids_[(size_t) i];
+        if (!L.h_s_down.empty()) w[i] *= L.h_s_down[e];   // NVFP4's down scale goes on the weight (ExpertScales)
         if (on_cpu_[e]) {   // by token, as cpu_experts() takes them, and nothing of it in the card's sum
+            const float gs = es.gate ? L.h_s_gate[e] : 1.f, us = es.up ? L.h_s_up[e] : 1.f;
             if (const uint8_t* p = pool_has(il, (int) e))
-                host_.push_back({p, p + L.gu_bytes, p + L.gu2(), w[i], i / n_used_});
+                host_.push_back({p, p + L.gu_bytes, p + L.gu2(), w[i], i / n_used_, gs, us});
             else
                 host_.push_back({L.exp_gate + e * L.gu_stride, L.exp_up + e * L.u_stride, L.exp_down + e * L.d_bytes,
-                                 w[i], i / n_used_});
+                                 w[i], i / n_used_, gs, us});
             w[i] = 0.f;
             continue;
         }
         const int row = first_[e]++;
         tok[row] = i / n_used_;
         place[row] = i;
+        h_ex_[row] = (int32_t) e;
     }
     for (int r = 0; n_tile == 1 && r < n_round; ++r)
         for (int g = round_[(size_t) r]; g <= round_[(size_t) r + 1]; ++g)
@@ -4487,6 +4555,8 @@ void Engine::moe_rows(Layer& L, int il, int n) {
                            sizeof(int32_t),
                        cudaMemcpyHostToDevice, cs(st_)),
        "expert rows");
+    if ((es.gate || es.up) && rg > 0)
+        ck(cudaMemcpyAsync(d_ex_, h_ex_, (size_t) rg * sizeof(int32_t), cudaMemcpyHostToDevice, cs(st_)), "expert rows");
 
     const int rc = bounds[n_cached];   // the rows of the cached experts
     stats_.batch_cached += rc;
@@ -4547,8 +4617,8 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             up_mul(slot_of(r.j), L.slot_bytes, r.m, d_cb + (size_t) r.c * cb_row + r.j, r.most);
         }
         if (rc > 0) {
-            if (gelu_) geglu_rows(gu_, hx_, n_ff_exp_, rc, st_);
-            else swiglu_clamp_rows(gu_, hx_, n_ff_exp_, rc, limit, st_);
+            if (gelu_) geglu_rows(gu_, hx_, n_ff_exp_, rc, st_, &es);
+            else swiglu_clamp_rows(gu_, hx_, n_ff_exp_, rc, limit, st_, &es);
             if (guard) guard_half_sums(hx_, ff, n_ff_exp_, rc, hf_, st_);
             Mmq::quantize(hx_, nullptr, mq2_, dt, ff, ff, rc, st_);
         }
@@ -4597,8 +4667,10 @@ void Engine::moe_rows(Layer& L, int il, int n) {
                 mmq_->mul(stage_, gt, gu_rows, n_embd_, step, m, mq_, b, iota_, rg, top, gu_, ff2, st_);
                 up_mul(stage_, step, m, b, top);
             });
-            if (gelu_) geglu_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, n_ff_exp_, rows, st_);
-            else swiglu_clamp_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, n_ff_exp_, rows, limit, st_);
+            ExpertScales er = es;
+            if (er.ids) er.ids += r0;
+            if (gelu_) geglu_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, n_ff_exp_, rows, st_, &er);
+            else swiglu_clamp_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, n_ff_exp_, rows, limit, st_, &er);
             if (guard) guard_half_sums(hx_ + (size_t) r0 * ff, ff, n_ff_exp_, rows, hf_ + r0, st_);
             Mmq::quantize(hx_ + (size_t) r0 * ff, nullptr, mq2_, dt, ff, ff, rows, st_);
             each_class([&](int k, int top) {
