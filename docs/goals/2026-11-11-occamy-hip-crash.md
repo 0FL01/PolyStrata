@@ -1,6 +1,6 @@
 # Goal: reproduce and fix Occamy HIP/HSA crashes
 
-Status: active
+Status: blocked
 Source: user-approved diagnostic plan of 2026-11-11; subsequent instruction to copy the plan into a goal, reproduce, fix, retest, commit and push. Production `strata` downtime explicitly approved; nobody uses it during this work.
 Last updated: 2026-11-11
 
@@ -44,8 +44,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: user, "потом коммит пуш"; subsequent parent instruction permits publication of checked workaround results with explicit unresolved status, not an unfinished root-cause fix.
   - Acceptance: task changes committed and the intended remote ref contains them, without unrelated worktree edits or accidental publication of unrelated local commits.
   - Primary evidence: commit hashes, push result and remote-ref verification.
-  - Status: in_progress.
-  - Evidence: parent and focused Sol review permit task-only documentation of a checked workaround with explicitly unresolved original reproduction, not publication as a root-cause fix. No commit or push has yet been attempted; protected edits and pre-existing commits remain untouched.
+  - Status: blocked.
+  - Evidence: task-only result commit `50148343b6f0492c58ea79c7b61286937899b9e9` created on the isolated docs branch below. Push using the available environment credential was authenticated as `0FL01` but rejected by GitHub with HTTP 403, permission denied. Remote task ref remains absent; publication is not claimed successful. Protected edits and pre-existing commits remain untouched.
 
 ### Constraints
 
@@ -165,7 +165,15 @@ Commit only this task's artifacts and inspect the complete proposed push range. 
 - Backup: `/home/stfu/.config/strata/strata-qwen36-qwen3.6-35b-a3b-ud-q3_k_s.json.bak.static-queues-20261111T180235` (0600). Rollback is stop `strata`, copy this backup back to the original config path, then restart only if the current driver/error state permits. Rollback code/path was reviewed, not exercised live; original configuration may still have the historical crash risk.
 - Production checks **PASS**: authenticated `/health` and `/v1/models`, unauthenticated `/v1/models` **401**, text **`STRATA_OK`**, image **`Red`**. Actual engine PID **2933357** has Occamy, `--max-context 200000 --kv q8_0 --vram-reserve-mib 3072`, original remaining args, graphs on, and environment flag **0**. Actual vision PID **2933351** remains present after image processing, has the matching projector/model and no GPU option; config remains `gpu:false`, `elastic:false`. Main PID **2933345**, `ActiveState=active`, `SubState=running`.
 - Final guard reasons empty after join/final journal check. `kernel-after-deploy.jsonl` for the full recovery window since 17:40:25 contains **0 entries**. Current ELF SHA remains `523a0cb7...c004`, HIP SHA `b59071cc...c88`. Artifacts: `queue-static/{deployment.log,deployment-smoke.log,production-smoke.json,deployment-actual.json,deployment-stop-reasons.json,deployment-backup-path.txt}`. This is bounded recovery evidence, not a long-term or full-200k-occupancy qualification.
-- Remaining action: final Sol review of deployment and exact docs-only publication tree, then task-only commit/push. No engine/backend source was changed, so backend builds/regression kernels are not applicable to this configuration/documentation-only change; no backend build PASS is claimed. R2/root-fix R3 remain unverified despite successful workaround qualification and R4 recovery.
+- Final Sol review (`ses_e350213e9ffeDjpHsOP3sSbr4q`) confirmed the bounded workaround, actual production recovery and the exact docs-only result tree, with no blocking findings. It explicitly kept R2/root-fix R3 unresolved and did not qualify long-term stability, full-200k occupancy or the old SDMA fault as fixed. No engine/backend source was changed, so backend builds/regression kernels are not applicable to this configuration/documentation-only change; no backend build PASS is claimed.
+
+### Task-only commit and publication blocker
+
+- Isolated worktree: `$D/publish`; branch **`docs/occamy-hip-queue-workaround-20261111`**, based on live verified remote main **`e4ea22a3c5ac6d20f763fb8d73b2b8032db80e9b`**. Only `docs/goals/2026-11-11-occamy-hip-crash.md` differs. Neither pre-existing local commit is an ancestor; no foreign dirty change, core, secret, private prompt, config or test artifact is in the publication tree.
+- Result commit: **`50148343b6f0492c58ea79c7b61286937899b9e9`**, `docs: record bounded Occamy HIP queue workaround`; independently reviewed tree **`6db7ee850ea611eb77b2eefcf8624bdf86c773fb`**. The final checkpoint metadata is retained on the same docs branch, not on main. `git diff --cached --check` passed before commit.
+- Requested command `git push --set-upstream origin HEAD:refs/heads/docs/occamy-hip-queue-workaround-20261111` first failed because no credential helper/usable noninteractive askpass was configured. A command-scoped helper using the already supplied `GITHUB_TOKEN` authenticated as **`0FL01`**, then failed: **`remote: Permission to VecSzn/PolyStrata.git denied to 0FL01`**, **HTTP 403**, exit 128. No credential was written into a file or Git configuration; no force push, main push, issue/PR or alternate-repository publication was attempted.
+- Read-only `git ls-remote origin refs/heads/docs/occamy-hip-queue-workaround-20261111` returned no ref after rejection; remote main remained `e4ea22a3…`. Thus commit exists locally, **push is blocked**, not PASS. The smallest publication unlock is a credential with write permission to the intended origin repository, then a normal push of this already isolated branch and remote-ref verification. Do not repeat the failed write with unchanged permissions.
+- The original reproduce/root-fix finish line separately needs a credible original-workflow reproducer with a newly approved evidence-dependent checkpoint, or explicit user acceptance/waiver making this measured workaround the finish line. Neither can be inferred from successful smoke checks. No further GPU trials or runtime replacement are authorized by this completed checkpoint.
 
 ## Material Decisions
 
@@ -181,7 +189,8 @@ Commit only this task's artifacts and inspect the complete proposed push range. 
 - 2026-11-11: bounded A/B completed 9 baseline requests without the original crash; no-graphs failed on its third request with a new GPU page fault. GPU work stopped; service left stopped. Diagnostic runner safety cleanup corrected and tested offline after a review finding. R2–R5 remain blocked, not complete.
 - 2026-11-11: final Review-Sol-Global (`ses_e350213e9ffeDjpHsOP3sSbr4q`) read the corrected runner, regression tests, final goal and actual experiment/journal evidence. The safety-cleanup finding is resolved; no new blocking findings for the corrected offline code or blocked-checkpoint record. Sol explicitly did not qualify a runtime fix or authorize resuming GPU work.
 - 2026-11-11: parent-authorized static-queue checkpoint passed 3×3 requests and isolated auth/text/image checks; installed parsed flag was 0 in each process. Sol reviewed and recommended the guarded local workaround rollout, which passed production checks and restored `strata`. R4 verified; R2/root-fix R3 remain blocked; R5 starts docs-only publication.
+- 2026-11-11: final Sol review found no blockers for the bounded deployed workaround and exact task-only docs tree. Local result commit created; authenticated origin push rejected with HTTP 403. R5 blocked on repository write access; no remote publication claimed. Full objective remains blocked despite verified R4 recovery.
 
 ## Completion
 
-R1 and R4 verified. The parent-authorized configuration workaround is qualified and deployed, not a root-cause correction; R2 and root-fix R3 remain blocked because the original failure was not reproduced. R5 docs-only publication and final review are in progress. No further GPU exposure or dependency changes are planned under this checkpoint; the full frozen goal cannot be marked complete from these results.
+R1 and R4 verified. The parent-authorized configuration workaround is qualified, independently reviewed and deployed, not a root-cause correction; R2 and root-fix R3 remain blocked because the original failure was not reproduced. The task-only result is committed locally, but R5 is blocked by authenticated origin permission denial and the remote task ref is absent. Closure does not pass the frozen finish line; status is **blocked**, not complete. Preserve the running service/workaround and rollback backup; stop substantive work here pending the explicit reproduction/acceptance and publication unlocks above.
