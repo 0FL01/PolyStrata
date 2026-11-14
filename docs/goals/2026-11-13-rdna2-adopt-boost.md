@@ -1,6 +1,6 @@
 # Goal: RDNA2 boost via adopting fork engine work (0.1.45-poly.9)
 
-Status: active
+Status: complete
 Source: user request of 2026-11-13 ("изучи текущий расклад и надо подумать как ещё буст можно получить"), plan approved same day; RECON of `origin/main` `e4ea22a3` (two Explore reports) and prior cycles' evidence.
 Last updated: 2026-11-14
 
@@ -76,8 +76,10 @@ constraints remain satisfied.
 - R6 — Commit and push: task-only commits on the branch; push to `origin`
   (`git@github.com:0FL01/PolyStrata.git`) — fast-forward `main` if the branch is a clean
    descendant of `e4ea22a3`, otherwise a topic branch; no unrelated local commits published.
-  Status: in_progress. User explicitly authorized finalization/commit/push of the frozen result;
-  no new GPU runs, recovery, deployment or default changes.
+  Status: verified. Final Sol review accepted the task-only range; non-force fast-forward push
+  to `origin/main` succeeded at `2d34733551ecb4fc01176734558960656e6354e3`, independently matched
+  by `git ls-remote`. This publication-status record is a subsequent docs-only task commit.
+  No new GPU runs, recovery, deployment or default changes.
 
 ### Constraints
 
@@ -129,10 +131,8 @@ before reading results.
 
 ## Current Checkpoint
 
-Closes: R6 and the user-revised frozen research cycle.
-Smallest next action: offline checks, task-only commits, final Sol review, then non-force push.
-Check live origin/main before push; use main only if still e4ea22a3, otherwise the topic branch.
-Expected evidence: reviewed commit range, successful push and matching remote SHA.
+Closed: R6 and the user-revised frozen research cycle; no remaining execution checkpoint.
+Evidence: final Sol review, task-only commits and verified non-force main publication below.
 Recovery is cancelled for this cycle. No new GPU run, reset, ROCm change, deployment or service start.
 
 ## Current State
@@ -224,7 +224,15 @@ Recovery is cancelled for this cycle. No new GPU run, reset, ROCm change, deploy
   intervals/A-A, checked speculation argv/acceptance and the actual safety stop. No blocking or
   nonblocking findings for this stopped checkpoint. SDMA1 blocker remains; no recovery,
   publication/main, deployment or qualification approval was implied. The user subsequently
-  authorized publication of the frozen partial result; final publication review is next.
+  authorized publication of the frozen partial result; final publication review passed below.
+- Publication: final Sol review of `e4ea22a3..2d347335` found no findings for publishing frozen
+  research results (not deployment). Range was exactly port `c6b2efccfe94631a7dbc32537c58de477e917c75`
+  and `2d34733551ecb4fc01176734558960656e6354e3` (`bench: record frozen gfx1031 fork adoption results`),
+  ten task-only paths, no private artifacts. Live remote remained e4ea22a3; `git push origin
+  perf/rdna2-adopt-poly9:main` succeeded, and `git ls-remote origin refs/heads/main` matched the
+  full `2d347335` payload SHA. This later metadata-only commit records completion; its final remote
+  ref is verified by the executor after push and returned in the final response. No substantive
+  edit followed review; a separate behavior review/GPU retest is neither needed nor authorized.
 
 ## Material Decisions
 
@@ -306,12 +314,18 @@ Recovery is cancelled for this cycle. No new GPU run, reset, ROCm change, deploy
   explicitly waiving unfinished measurement/GPU gates and authorizing final commit/push only.
   R1 verified, R2–R4 partially verified with remaining scope waived, R5 final report verified;
   R6 publication in progress. No new GPU execution.
+- 2026-11-14: final Sol accepted the committed frozen-result publication tree with no findings.
+  Non-force main push succeeded at `2d34733551ecb4fc01176734558960656e6354e3` and remote SHA matched.
+  R6 verified; revised finish line complete. Publication-status metadata only follows; no
+  additional GPU execution, configuration/default change, recovery or deployment.
 
 ## Completion
 
-Pending R6 publication only under the user-revised finish line. R1 and B/C measurements verified;
-unfinished R2–R4 confirmation/qualification explicitly waived_by_user, not passed. R5 verified.
-After checked publication, this goal may be complete **only as a frozen partial research result**.
+**Complete under the user-revised finish line, only as a frozen partial research result.**
+R1 and B/C measurements verified; unfinished R2–R4 confirmation/qualification explicitly
+waived_by_user, not passed. R5 final report and R6 task-only reviewed publication verified.
+Published payload: origin/main `2d34733551ecb4fc01176734558960656e6354e3`; completion metadata follows
+as a docs-only task commit, not new implementation or qualification evidence.
 F/MTP/joint-config confirmation, needle, forced equivalence, final GPU retest, stability/safety
 resolution and new-model/mmproj config transition remain gates for a separately approved future
 deployment. No defaults, service, installed engine or foreign main-worktree state were changed.
