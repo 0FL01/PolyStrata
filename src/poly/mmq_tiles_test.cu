@@ -25,7 +25,7 @@ using strata::poly::Mmq;
 
 namespace {
 
-struct Quant { const char* name; int type; size_t block; };   // ggml_type, bytes of a block of 256 values
+struct Quant { const char* name; int type; size_t block; int qk = 256; };   // ggml_type, block bytes and values
 constexpr Quant kQuants[] = {{"Q4_K", 12, 144}, {"Q5_K", 13, 176}, {"Q6_K", 14, 210}};
 constexpr int kRows = 256, kCols = 512;   // a matrix of the shapes the experts have, 256 rows a multiple of 128
 
@@ -50,18 +50,21 @@ int tile_of(const std::vector<int>& t, int rows) {
 // one case: the rows of each expert, the classes' limits; returns the number of rows that differ from one launch,
 // to the bit where `exact`, else by more than 8 float epsilons of the case's largest value
 int run_case(const Quant& q, const std::vector<int>& rows, const std::vector<int>& limits, bool exact,
-             std::mt19937& rng) {
+             std::mt19937& rng, int out_rows = kRows, int cols = kCols) {
     const int n = (int) rows.size();
-    const size_t per = (size_t) kRows * (kCols / 256) * q.block;
+    const size_t per = (size_t) out_rows * (cols / q.qk) * q.block;
     std::vector<uint8_t> w(per * n + 4096, 0);   // zero bytes behind the matrices (kTail)
     for (size_t i = 0; i < per * n; ++i) w[i] = (uint8_t) rng();
     for (size_t b = 0; b < per * n / q.block; ++b) {   // finite block scales: a half of 2^-3 where each type keeps its d
         uint8_t* p = &w[b * q.block];
-        if (q.type == 14) { p[q.block - 2] = 0; p[q.block - 1] = 0x30; }
-        else { p[0] = 0; p[1] = 0x30; p[2] = 0; p[3] = 0x30; }
+        if (q.type == 11 || q.type == 14) { p[q.block - 2] = 0; p[q.block - 1] = 0x30; }
+        else {
+            p[0] = 0; p[1] = 0x30;
+            if (q.type == 12 || q.type == 13) { p[2] = 0; p[3] = 0x30; }
+        }
     }
     const int total = std::accumulate(rows.begin(), rows.end(), 0);
-    std::vector<float> x((size_t) total * kCols);
+    std::vector<float> x((size_t) total * cols);
     for (auto& v : x) v = (float) ((rng() & 0xffff) / 32768.0 - 1.0);
     std::vector<int32_t> start(n + 1, 0);
     for (int e = 0; e < n; ++e) start[(size_t) e + 1] = start[(size_t) e] + rows[(size_t) e];
@@ -94,23 +97,23 @@ int run_case(const Quant& q, const std::vector<int>& rows, const std::vector<int
     void* xq = nullptr;
     float *dref = nullptr, *dcls = nullptr;
     bool good = dw && dx && d_iota && d_gref && d_gcls && d_rb && d_cb;
-    good = good && ok(cudaMalloc(&xq, Mmq::q8_bytes(total, kCols)), "xq") &&
-           ok(cudaMalloc((void**) &dref, (size_t) total * kRows * 4), "ref") &&
-           ok(cudaMalloc((void**) &dcls, (size_t) total * kRows * 4), "cls");
+    good = good && ok(cudaMalloc(&xq, Mmq::q8_bytes(total, cols)), "xq") &&
+           ok(cudaMalloc((void**) &dref, (size_t) total * out_rows * 4), "ref") &&
+           ok(cudaMalloc((void**) &dcls, (size_t) total * out_rows * 4), "cls");
     int bad = -1;
     if (good) {
-        cudaMemset(dref, 0, (size_t) total * kRows * 4);
-        cudaMemset(dcls, 0, (size_t) total * kRows * 4);
+        cudaMemset(dref, 0, (size_t) total * out_rows * 4);
+        cudaMemset(dcls, 0, (size_t) total * out_rows * 4);
         const int maxrows = *std::max_element(rows.begin(), rows.end());
-        mmq.quantize(dx, d_gref, xq, q.type, kCols, kCols, total, nullptr);
-        mmq.mul(dw, q.type, kRows, kCols, per, n, xq, d_rb, d_iota, total, maxrows, dref, kRows, nullptr);
-        mmq.quantize(dx, d_gcls, xq, q.type, kCols, kCols, total, nullptr);
+        mmq.quantize(dx, d_gref, xq, q.type, cols, cols, total, nullptr);
+        mmq.mul(dw, q.type, out_rows, cols, per, n, xq, d_rb, d_iota, total, maxrows, dref, out_rows, nullptr);
+        mmq.quantize(dx, d_gcls, xq, q.type, cols, cols, total, nullptr);
         for (int k = 0; k < nclass; ++k)
             if (most[(size_t) k] > 0)
-                mmq.mul(dw, q.type, kRows, kCols, per, n, xq, d_cb + (size_t) k * (n + 1), d_iota, total, most[(size_t) k],
-                        dcls, kRows, nullptr);
+                mmq.mul(dw, q.type, out_rows, cols, per, n, xq, d_cb + (size_t) k * (n + 1), d_iota, total, most[(size_t) k],
+                        dcls, out_rows, nullptr);
         if (ok(cudaDeviceSynchronize(), "run")) {
-            std::vector<float> a((size_t) total * kRows), b((size_t) total * kRows);
+            std::vector<float> a((size_t) total * out_rows), b((size_t) total * out_rows);
             cudaMemcpy(a.data(), dref, a.size() * 4, cudaMemcpyDeviceToHost);
             cudaMemcpy(b.data(), dcls, b.size() * 4, cudaMemcpyDeviceToHost);
             float big = 0;
@@ -119,9 +122,11 @@ int run_case(const Quant& q, const std::vector<int>& rows, const std::vector<int
             const auto near = [tol](float u, float v) { return std::fabs(u - v) <= tol; };
             bad = 0;   // row i of the class layout is row gather_cls[i] of the reference
             for (int i = 0; i < total; ++i) {
-                const float* c = &b[(size_t) i * kRows];
-                const float* r = &a[(size_t) gather_cls[(size_t) i] * kRows];
-                if (exact ? std::memcmp(c, r, kRows * 4) != 0 : !std::equal(c, c + kRows, r, near)) ++bad;
+                const float* c = &b[(size_t) i * out_rows];
+                const float* r = &a[(size_t) gather_cls[(size_t) i] * out_rows];
+                const auto finite = [](float v) { return std::isfinite(v); };
+                if (!std::all_of(c, c + out_rows, finite) || !std::all_of(r, r + out_rows, finite) ||
+                    (exact ? std::memcmp(c, r, out_rows * 4) != 0 : !std::equal(c, c + out_rows, r, near))) ++bad;
             }
         }
     }
@@ -171,6 +176,26 @@ int main() {
                                 exact ? "" : " by more than rounding");
                 }
             }
+    }
+    // The selected Qwen3.6 UD GGUF: separate/combined gate-up and down shapes, including its
+    // last layer and Q6_K down experts. One fixed row distribution crosses all 8/16/32 classes.
+    struct Actual { Quant q; int rows, cols; };
+    const Actual actual[] = {
+        {{"IQ3_S", 21, 110}, 512, 2048}, {{"IQ3_S", 21, 110}, 1024, 2048},
+        {{"IQ4_NL", 20, 18, 32}, 512, 2048}, {{"IQ4_NL", 20, 18, 32}, 1024, 2048},
+        {{"IQ4_NL", 20, 18, 32}, 2048, 512},
+        {{"Q3_K", 11, 110}, 512, 2048}, {{"Q3_K", 11, 110}, 1024, 2048},
+        {{"Q4_K", 12, 144}, 2048, 512}, {{"Q6_K", 14, 210}, 2048, 512},
+    };
+    for (const auto& c : actual) {
+        const bool fits = Mmq::fits(c.q.type, c.rows, c.cols);
+        const bool exact = Mmq::split_exact(c.q.type, c.rows);
+        const int bad = fits ? run_case(c.q, {0, 1, 7, 8, 9, 16, 17, 32, 33, 199, 8, 0},
+                                       {8, 16, 32}, exact, rng, c.rows, c.cols) : -1;
+        ++cases;
+        failures += bad != 0;
+        std::printf("%s actual %s %d x %d fits=%d split_exact=%d differing_rows=%d\n",
+                    bad == 0 ? "PASS" : "FAIL", c.q.name, c.rows, c.cols, fits, exact, bad);
     }
     if (failures) {
         std::printf("FAIL: %d of %d cases\n", failures, cases);
