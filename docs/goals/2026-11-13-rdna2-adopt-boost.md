@@ -85,6 +85,7 @@ constraints remain satisfied.
 
 - C1: The user service stays untouched: `strata.service` remains inactive; no restart, no config
   write, no binary replacement under `engine-poly/`. Deployment is out of scope for this cycle.
+  Superseded for R7 only by the explicit deployment approval below; R1–R6 remain historical.
 - C2: Every engine process runs with `DEBUG_HIP_DYNAMIC_QUEUES=0` and graphs enabled;
   `--no-graphs` is forbidden (fresh SDMA fault on 2026-11-11). Stop the series on any new
   amdgpu/KWin fault or sampled free VRAM below 1536 MiB; report minimum sampled headroom.
@@ -117,6 +118,7 @@ constraints remain satisfied.
   Engine source changes beyond the port only if a fork defect blocks a required outcome, with
   evidence and minimal diff.
 - Forbidden: serve/protocol rewrites, dependency pin changes, public API changes, service files.
+  R7 adds the local deployment/config/backup envelope below, not engine/server source changes.
 - Budget: iterative; GPU series bounded (screening ≤ 1 pass per arm; confirmation ≤ 5 pairs per
   winner + 1 A/A; stop earlier on gates/faults).
 
@@ -131,12 +133,22 @@ before reading results.
 
 ## Current Checkpoint
 
-Closed: R6 and the user-revised frozen research cycle; no remaining execution checkpoint.
-Evidence: final Sol review, task-only commits and verified non-force main publication below.
-Recovery is cancelled for this cycle. No new GPU run, reset, ROCm change, deployment or service start.
+Closed: R7 corrected-owner deployment and final Sol review; no substantive checkpoint remains.
+Evidence: service active/running, exact child identity/argv/env, authenticated health/models,
+unauthenticated401, arithmetic/image smokes and clean bounded safety window; Sol found no issues.
+Final administrative step: sanitized goal-only commit and non-force publication, with commit/ref
+SHA returned by the executor. Detailed report stays private/ignored. No further GPU validation,
+benchmark, operational change or fault-recovery work is authorized by this closure.
 
 ## Current State
 
+- R7 latest (2026-11-14 09:41 CET): corrected-owner service started successfully after the
+  interrupted switch; main PID828999, engine829056, CPU vision829002. Both opt-ins1, staticqueues0,
+  window8/draft enabled/lookup0 and IQ4_ROWS absence verified through `/proc`. All required
+  smokes passed;0.5s sysfs load minimum3071.4375MiB, whole start+smoke minimum2973.1484375MiB.
+  Guard reasons[]; no new amdgpu/KWin fault. Detailed private report records rollback/evidence.
+- The R1–R6 research observations and stopped-service statements below are historical, not
+  the current deployed service state. Earlier fault/stability risks remain unresolved.
 - Original RECON: plan approved; two reports found dispatch conditions on our shape pass for
   SPLIT_ATTEND (single-sequence decode only), PREFILL_FP32 (attend_batch path), STAGED_TILES
   (IQ4_XS allowed, runtime `Mmq::fits` unproven); all published numbers are gfx1010/Windows).
@@ -236,6 +248,19 @@ Recovery is cancelled for this cycle. No new GPU run, reset, ROCm change, deploy
 
 ## Material Decisions
 
+- 2026-11-14: parent explicitly authorized continuing R7 on real service-selected
+  `strata-qwen36-qwen3.6-35b-a3b-ud-iq4_nl.json` after the first rollback. Preserve every actual
+  arg/alias/key/sampling/profile and IQ4_ROWS absence; add only SPLIT_ATTEND=1/PREFILL_FP32=1,
+  plus staticqueues0 only if missing. It is already0, so exactly two env deltas apply.
+  Material actual args window8/no --no-draft/lookup0 require one fresh guarded needle before
+  switch. server.env must stay unchanged; this is a newly authorized corrected-owner attempt,
+  not a blind retry of the failed old-target rollout or a resumed benchmark matrix.
+
+- 2026-11-14: user approved **deployment with validation** ("делай деплой-шап с валидацией").
+  R7 below reopens this goal after the completed frozen R1–R6 publication. The service may be
+  started and its configuration/binary changed only inside R7's envelope. Prior measurement
+  waivers stay waived; this is not authorization to resume performance matrices or fix ROCm.
+
 - 2026-11-13: user approved this cycle ("делай копию плана в цель и начинай итеративную
   реализацию, жду результат, потом коммит пуш"). Commit and push are in scope; service deployment
   is not (the service stays inactive; a later user request deploys the winning config).
@@ -319,13 +344,137 @@ Recovery is cancelled for this cycle. No new GPU run, reset, ROCm change, deploy
   R6 verified; revised finish line complete. Publication-status metadata only follows; no
   additional GPU execution, configuration/default change, recovery or deployment.
 
+- 2026-11-14: R7 supplied-input backups, unchanged-SHA build, fresh7/7 tests/IQ4 parity and
+  exact44607-input both-flags needle passed. Prepared rollout reviewed by Sol without findings.
+- 2026-11-14: one R7 switch failed health identity validation because unchanged server.env selects
+  a different, already-new-model config. Binary/BUILD/supplied config restored by SHA, unit stopped,
+  no fresh fault. Real active config was never written and was not part of the supplied-input
+  backup; correct it as the owner in a parent-approved next checkpoint, not via server.env change.
+- 2026-11-14: parent-authorized corrected-owner actual-args needle passed44607/49 exact JSON;
+  exactly two env additions preserve the real config bytewise after reverse removal. Resumed
+  executor verified the already-installed binary/BUILD/config and backup SHAs, then started
+  strata.service at09:41:33 CET without another needle/test/benchmark or operational rewrite.
+  Auth health/models, unauth401,19+23→{"result":42}, red PNG→{"color":"red"} all passed;
+  actual engine SHA/argv/env and post-image resident CPU vision verified.19 half-second VRAM
+  samples: load min3071.4375MiB, whole-window min2973.1484375MiB; final reasons[], no new fault.
+  Service left active/running; R7 runtime verified.
+- 2026-11-14: final Sol review `ses_e26c4afceffeJK8R8tIVtCSqPc` passed with no findings after
+  reading the actual diff, script/runtime owners and private evidence. Reviewer independently
+  verified backup/config reverse equality, child identity/smokes and all19 half-second VRAM
+  samples; no GPU/HTTP/service operations were performed by review. Closure metadata only
+  follows; sanitized goal-only commit/ref SHA is returned after publication by the executor.
+
+## R7 — Deployment with validation (added 2026-11-14, user-approved)
+
+- Source: user, 2026-11-14 ("делай деплой-шап с валидацией").
+- Acceptance: the user service runs the engine built from `cc226a4a` with the confirmed opt-ins
+  `STRATA_HIP_SPLIT_ATTEND=1` + `STRATA_HIP_PREFILL_FP32=1` on the UD-IQ4_NL model at
+  200000/q8_0/3072 reserve; pre-switch validation (needle ≥44k with both flags on, guarded) and
+  post-start authenticated smokes (health, models, text, image with the new projector) pass;
+  actual child args/env verified; versioned rollback artifacts preserved; a fresh amdgpu fault
+  stops the deployment instead of forcing it through.
+- Primary evidence: deployment report with backup paths, validation outputs, actual `/proc`
+  child args/env hashes, service state.
+- Status: verified.
+- Evidence: exclusive temporary and durable backups verified before operational changes;
+  old engine SHA `523a0cb7f4c4cd964c7b9f577ef8d22228047da2734ff8cbfffafa457635c004`.
+  Rollback directory `~/.local/state/strata/backups/deploy-20261114-9n67_1z2/` also preserves
+  BUILD.json, config, launcher and server.env with verified hashes in a private manifest.
+  Incremental cc226a4a build needed no work; SHA remains `d0d08867…`.
+  Fresh mandatory CTests7/7 PASS (34.77s), IQ4_ROWS=1 zero failures/eight graph checks.
+  Guarded pre-switch needle with both flags and preserved IQ4_ROWS=1 passed exact JSON at
+  **44607 input /49 output tokens**, using the unchanged main317912bb server and new model.
+  Min sampled free2991.6875MiB; final guard reasons empty; service still inactive before switch.
+  Prepared rollout Sol review passed (script SHA `a6bb3053…`). One rollout attempted, then
+  failed `/health` identity check and rolled back binary/BUILD/config byte-for-byte; at that
+  checkpoint the unit was inactive/dead/PID0, with no children. No fresh fault; guard reasons[].
+  Actual backed-up server.env selects `~/.config/strata/strata-qwen36-qwen3.6-35b-a3b-ud-iq4_nl.json`,
+  not the supplied old `…ud-q3_k_s.json`. Loaded model/API identity was therefore
+  `qwen3.6-35b-a3b-ud-iq4_nl`, not expected `occamy-1.0-iq4_xs`. The real active config was not
+  modified by attempt1; its original SHA was
+  `c8294097a7cab5dcd3079bb6ca8b88d860a32ff9bbedb88b5bd2f5dd3e5a30a4`.
+  It already had the new model/projector and a different service-owned expert-profile path;
+  IQ4_ROWS and both new flags were absent. The corrected owner was this real active config,
+  not server.env. The config backup covered only the supplied old path. Parent then
+  authorized the corrected owner; actual config was exclusively backed up with SHA c8294097…
+  in both temporary and durable locations, followed by a canonical complete five-file backup
+  under `~/.local/state/strata/backups/deploy-20261114-9n67_1z2-attempt2/`.
+  Full args/env/identity audit is private, with API key omitted. Actual window8/draft-enabled/
+  lookup0 differs from the first needle; the one required new guarded needle passed exact JSON,
+  44607 input/49 output,10496 routed experts, min3067.609375MiB (31 samples), final reasons[].
+  Prepared real config SHA `0474a6efd49efb2f9ece23b5d9fe8fb358f1c273bbd1e5c8f809478254860042`;
+  removing exactly the two inserted env-member byte sequences recovers originalc8294097…
+  and reverse-object comparison matches every other field. Staticqueues0 already present,
+  IQ4_ROWS stays absent. Corrected-target deploy.py SHA `0f4d3182…`; its interrupted execution
+  left the prepared artifacts installed and the unit inactive. Resumption independently
+  verified installed/backup SHAs and reverse-object config equality, then started only the unit.
+  Authenticated health/models and preserved model ID/two aliases passed; unauth models401.
+  Text arithmetic19+23 returned exact {"result":42}; red128×128 PNG returned {"color":"red"};
+  CPU vision remained live with the configured new projector. Engine PID829056 `/proc/exe` SHA
+  `d0d08867bf0a684949a85ed5e480a40a6832f2430645fd1cd86ba621356acc90`; actual args200000/q8_0/
+  reserve3072/threads8/window8/lookup0/draft enabled/graphs on, both flags1/staticqueues0,
+  FREEZE_EXPERTS and IQ4_ROWS absent. Unit active/running/MainPID828999 at09:41 CET.
+  Half-second sysfs sampling19 samples: load min3071.4375MiB, whole start+smoke min2973.1484375
+  MiB. Final guard reasons[]; kernel window0 entries and no fresh KWin fault. Separate private
+  `attempt2/resumed-production/` evidence preserves earlier artifacts. No repeat GPU series.
+
+### R7 deployment envelope
+
+- Backup first: current `engine-poly/strata-poly` (SHA `523a0cb7…`), `BUILD.json`, active config
+  and launcher to a versioned private directory; old `rdna2-rnd/backup/` copies no longer exist.
+- Engine: build from pushed `cc226a4a` (incremental in `PolyStrata-boost`; engine sources
+  unchanged since `c6b2efcc`, expected binary SHA `d0d08867…`), install with matching BUILD.json
+  provenance so setup recognizes the build.
+- Config deltas (only these): model path → `Qwen3.6-35B-A3B-UD-IQ4_NL.gguf`; vision mmproj → the
+  new `mmproj-F16.gguf`; env += `STRATA_HIP_SPLIT_ATTEND=1`, `STRATA_HIP_PREFILL_FP32=1`.
+  Everything else (200000, q8_0, 3072, threads 8, graphs, `DEBUG_HIP_DYNAMIC_QUEUES=0`,
+  `STRATA_HIP_VALUE_SPLIT=1`, `STRATA_ROUTE_TAIL_SKIP=0`, `STRATA_RDNA2_IQ4_ROWS=1`, keys,
+  aliases, port) unchanged. The stale expert-profile path stays (service-owned state; adaptive).
+- Validation before switch: guarded needle/retrieval ≥44k input with both flags on, on the new
+  binary; VRAM guard ≥1536 MiB; stop on any amdgpu/KWin fault.
+- After switch: start service, authenticated `/health`, `/v1/models`, text smoke, image smoke
+  (new projector), verify actual child argv/env via `/proc`, check kernel journal window; leave
+  the service active unless a fault or explicit user stop.
+- Record: `rdna2-rnd/deploy-2026-11-14.md` (private, ignored), goal update, optional docs-only
+  commit+push of the goal record.
+
+Execution details from the user's accompanying instruction: preserve `server.env` as well;
+use an exclusive private temporary backup plus a durable copy under `~/.local/state/strata/backups/`.
+Mandatory pre-switch checks are seven named CTests plus IQ4_ROWS=1 graph parity. Engine/server
+source and defaults stay unchanged. Any ordinary switch/smoke failure restores saved binary,
+BUILD.json and config and leaves the service inactive; never call that a successful deployment.
+This R7 source explicitly keeps the detailed deployment report private/ignored; publish only
+sanitized goal/status documentation, not the private report or credentials.
+
+Latest corrected-owner envelope supersedes the old config assumptions above: real model/mmproj
+were already correct and were not rewritten; exactly two env additions were applied. Preserve
+window8, lookup0, draft enabled, current aliases/profile/sampling and absence of IQ4_ROWS. Static
+queues already0 remains unchanged; parent allows a third explicit0 delta only if it were missing.
+
+R7 code-derived clarifications: the single semantic model-path delta updates both `args --model`
+and `vision.model`, because the separate CPU encoder opens the latter directly; leaving the
+deleted Occamy path would break image validation. The truthful cc226a4a source fingerprint is
+`243397a002e29eee`. Old main317912bb setup expects `65875c3632643a93` and would rebuild on an
+explicit setup invocation; the unchanged service launcher directly execs server.py and never
+invokes setup. Do not falsify provenance or claim old-checkout setup recognition. Preserve the
+existing CPU encoder's vision stamp; no encoder rebuild, launcher or server.env change.
+
 ## Completion
 
-**Complete under the user-revised finish line, only as a frozen partial research result.**
+**R1–R6 complete under the user-revised finish line, only as a frozen partial research result;
+R7 corrected-owner deployment verified and final Sol review passed without findings.**
 R1 and B/C measurements verified; unfinished R2–R4 confirmation/qualification explicitly
 waived_by_user, not passed. R5 final report and R6 task-only reviewed publication verified.
-Published payload: origin/main `2d34733551ecb4fc01176734558960656e6354e3`; completion metadata follows
-as a docs-only task commit, not new implementation or qualification evidence.
-F/MTP/joint-config confirmation, needle, forced equivalence, final GPU retest, stability/safety
-resolution and new-model/mmproj config transition remain gates for a separately approved future
-deployment. No defaults, service, installed engine or foreign main-worktree state were changed.
+R6 published payload: origin/main `2d34733551ecb4fc01176734558960656e6354e3`; its historical
+completion metadata and later R7 documentation are not new research-qualification evidence.
+R7 adds explicit deployment evidence: fresh mandatory HIP gates and both-flags actual-args
+44607-token needle passed before switch; final service identity, auth and text/image smokes passed.
+Only the two approved env opt-ins were added to the real active config; installed binary/BUILD
+were replaced under the approved envelope. Service remains active; rollback backups preserved.
+No engine/server source, defaults, launcher/server.env or foreign main-worktree dirty state changed.
+Closure check: required outcomes resolved under their recorded waivers, affected constraints
+preserved, publication payload restricted to this sanitized goal. Final commit/remote SHA is
+reported by the executor, without adding the private deployment report to Git.
+Long-term stability and the prior SDMA fault's resolution remain unverified, as do F/MTP/joint
+performance confirmation, strict model-level forced equivalence and CUDA/SYCL. These are not
+claimed passed or reopened by the successful bounded deployment validation.
