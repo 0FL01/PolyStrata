@@ -59,7 +59,8 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
-from serve.frontend import (THINK_END, ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
+from serve.frontend import (INKLING_MODEL, INKLING_STOP, THINK_END, ChatTemplate, Event,  # noqa: E402
+                            InklingOutputParser, OutputParser, anthropic_to_messages,
                             forced_call, gemma_model_turn, images_of, literal_tags, mark_think_literals,
                             openai_to_messages, tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
@@ -152,7 +153,8 @@ VISION_START = "<|vision_start|>"
 # ends the first turn: the system prompt with the tools, which "warm_start" keeps.
 TURN_OPENERS = {"function": ("<|im_start|>",), "gemma": ("<|turn>",),
                 "glm": ("<|system|>", "<|developer|>", "<|user|>", "<|assistant|>", "<|observation|>"),
-                "dsml": ("<｜User｜>", "<｜Assistant｜>"), "lfm2": ("<|im_start|>",)}
+                "dsml": ("<｜User｜>", "<｜Assistant｜>"), "lfm2": ("<|im_start|>",),
+                "inkling": ("<|message_system|>", "<|message_user|>", INKLING_MODEL, "<|message_tool|>")}
 WARM_MIN_TOKENS = 2048           # a shorter prompt start is quick to read again: not kept
 # #606: a reply that repeats one token this many times in a row is ended there ("length"): a model in a loop, or a
 # broken state that answers one token forever (an issue saw 36,689 tokens of "!"). The config's "repeat_stop_tokens"
@@ -2656,7 +2658,7 @@ def effort_end_args(cfg: dict, exe: str, tok) -> list[str] | None:
     pos = cfg.get("effort_position", "start")
     if pos not in ("start", "end"):
         raise ValueError(f'"effort_position" must be "start" (the default) or "end", not {pos!r}')
-    if pos == "start":
+    if pos == "start" or getattr(tok, "pre", "") == "inkling2":
         return None
     try:
         with open(engine_binary(exe, cfg), "rb") as f:
@@ -3326,8 +3328,13 @@ class Service:
         """What the model's tokenizer says of the model: the texts that stay text inside a message, the tokens that
         end a reply, and how it writes a tool call."""
         self.literals = literal_tags(getattr(tokenizer, "control_tokens", ()))
+        pre = getattr(tokenizer, "pre", "")
         im_end = tokenizer.encode(IM_END, parse_special=True)
-        if len(im_end) == 1:
+        if pre == "inkling2":
+            # end_message closes one of several blocks in the turn, never the whole reply.
+            stop = tokenizer.encode(INKLING_STOP, parse_special=True)
+            self.stop_ids = set(stop) if len(stop) == 1 else set()
+        elif len(im_end) == 1:
             self.stop_ids = set(im_end + tokenizer.encode("<|endoftext|>", parse_special=True))
         else:   # not a ChatML model (GLM): the ids its GGUF names for the end of the text, the turn and the message
             special = getattr(tokenizer, "special_ids", None) or {}
@@ -3343,9 +3350,9 @@ class Service:
             ("bos_token", "tokenizer.ggml.bos_token_id"), ("eos_token", "tokenizer.ggml.eos_token_id"))
             if key in special}
         # how the model writes a tool call (serve/frontend.py's OutputParser)
-        pre = getattr(tokenizer, "pre", "")
         self.call_format = "glm" if pre in ("glm4", "glm5", "flint") else "gemma" if pre == "gemma4" else \
-            "dsml" if pre in ("joyai-llm", "deepseek-v3") else "lfm2" if pre == "lfm2" else "function"
+            "dsml" if pre in ("joyai-llm", "deepseek-v3") else "lfm2" if pre == "lfm2" else \
+            "inkling" if pre == "inkling2" else "function"
         self.turn_ids = frozenset(t[0] for t in (tokenizer.encode(s, parse_special=True)
                                                  for s in TURN_OPENERS[self.call_format]) if len(t) == 1)
         self.engine.turn_ids = self.turn_ids            # the GEN line's turn_at (StrataEngine.turn_key)
@@ -4368,6 +4375,8 @@ class Service:
                   "enable_thinking": not off}
         if self.call_format in ("gemma", "dsml") and tools:   # their templates read a tool as OpenAI sends it
             tools = [{"type": "function", "function": t} for t in tools]
+        if self.call_format == "inkling":                    # no ChatML effort turn or <think> prefill
+            return self.template.render(messages, tools=tools, **kwargs)
         if not self.effort_end or (not off and effort in (None, "", "xhigh", "high")):
             prompt = self.template.render(messages, tools=tools, **kwargs)
             if self.call_format == "gemma":
@@ -4391,9 +4400,12 @@ class Service:
         the control tokens the template writes are control tokens.  `store=False` (a token count) reuses the kept
         prompts without adding or replacing one."""
         marked, marked_tools, changed = mark_think_literals(messages, tools, self.literals)
+        inkling = self.call_format == "inkling"
+        if inkling:
+            kwargs = {**kwargs, "_strata_json_literals": self.literals}
         prompt = self.render_prompt(marked, marked_tools, kwargs)
         plain = ()
-        if changed:
+        if changed or inkling:                  # Inkling's Jinja JSON filter can also have marked a quoted key
             prompt, plain = unmark_think_literals(prompt, self.literals)
         if self.prompts is not None:            # #567: only what follows the last special shared with a recent prompt
             return self.prompts.encode(prompt, plain, store)
@@ -4651,12 +4663,15 @@ class Service:
             off = kwargs.get("enable_thinking") is False        # render_prompt's rule for #458's effort_end
             kw = ({k: v for k, v in kwargs.items() if k not in ("reasoning_effort", "enable_thinking")}
                   if self.effort_end and (off or effort not in (None, "", "xhigh", "high")) else dict(kwargs))
+            inkling = self.call_format == "inkling"
+            if inkling:
+                kw["_strata_json_literals"] = self.literals
             kw["add_generation_prompt"] = False
             text = self.template.render(marked, tools=marked_tools, **kw)
             cut = text.find(self.PREFIX_END)
             if cut >= 0:
                 text = text[:cut]
-            if changed:
+            if changed or inkling:
                 text, plain = unmark_think_literals(text, self.literals)
                 return self.tok.encode(text, parse_special=True, plain=plain)
             return self.tok.encode(text, parse_special=True)
@@ -4811,8 +4826,9 @@ class Service:
                       f"the answer (budget {budget})", flush=True)
                 budget = max(1, max_new - reserve)
         opened = bool(self.think_open_ids) and ids[-len(self.think_open_ids):] == self.think_open_ids
-        parser = OutputParser(thinking=thinking, tools=tools, stream_tools=True, recover=self.tool_call_recovery,
-                              call_format=self.call_format, opened=opened)
+        parser = InklingOutputParser(tools, stream_tools=True) if self.call_format == "inkling" else \
+            OutputParser(thinking=thinking, tools=tools, stream_tools=True, recover=self.tool_call_recovery,
+                         call_format=self.call_format, opened=opened)
         detok, n, finish = Detokenizer(self.tok), 0, "length"
         run_tok, run_len, repeated = None, 0, False     # #606: the current run of one repeated token
         thinking_n = 0                                  # tokens written while thinking (Responses' reasoning_tokens)
@@ -6607,9 +6623,10 @@ def make_handler(svc: Service):
             bias_api.normalize(req.get("logit_bias"), len(getattr(svc.tok, "tokens", ())) or None)
             messages, tools, kw = openai_to_messages(req)
             self._no_local_images(messages)
-            if tool_choice_of(req.get("tool_choice"))[0] == "none":   # as the Responses route: no tools are offered
+            no_tools = tool_choice_of(req.get("tool_choice"))[0] == "none"
+            if no_tools:                                              # as the Responses route: no tools are offered
                 tools = None
-            force = forced_call(req.get("tool_choice"), tools)      # a bad value is a 400 before anything is sent
+            force = forced_call(req.get("tool_choice"), tools, svc.call_format)
             messages, validator = prepare_format(req.get("response_format"), messages)
             if validator is not None and (tools or req.get("strata_mcp")):
                 raise ValueError("structured response_format with tools/MCP is not supported")
@@ -6617,6 +6634,8 @@ def make_handler(svc: Service):
             max_req = max_new = int(req.get("max_completion_tokens") or req.get("max_tokens") or 0)   # 0/-1: the rest
             bias_api.validate_request(req, svc.engine, len(getattr(svc.tok, "tokens", ())) or None)
             use_mcp = req.get("strata_mcp") is True and svc.mcp is not None      # the web app's opt-in (serve/mcp.py)
+            if svc.call_format == "inkling" and no_tools:
+                use_mcp = False
             own = {t.get("name") for t in tools or [] if isinstance(t, dict)}   # #592: a second line of defence
             if use_mcp:
                 if not self._own_page("MCP tools can be used"):   # tools run with the user's rights on this PC
@@ -6778,8 +6797,18 @@ def make_handler(svc: Service):
 
         def _responses_prepare(self, req, cancel=None):
             responses_api.check_request(req)
-            messages = responses_api.input_messages(req)
+            inkling = svc.call_format == "inkling"
+            messages = responses_api.input_messages(req, keep_tool_ids=inkling)
             tools, names, skipped = responses_api.request_tools(req)
+            no_tools = False
+            if inkling:
+                try:
+                    forced_call(req.get("tool_choice"), tools, svc.call_format)
+                except ValueError as e:
+                    raise ResponsesError(str(e), "tool_choice", "unsupported_parameter") from None
+                no_tools = tool_choice_of(req.get("tool_choice"))[0] == "none"
+                if no_tools:
+                    tools = None
             kw = responses_api.template_kwargs(req, {"reasoning_effort": svc.effort_default()})
             try:
                 self._no_local_images(messages)              # as on the chat route: no file read for a foreign page
@@ -6811,7 +6840,7 @@ def make_handler(svc: Service):
             svc.load()
             # #924 (opt-in): a Codex compaction request is rendered with its conversation's tools, so its prompt
             # starts as the cached one did; the parser and the response keep the request's own tools
-            shown = responses_api.prompt_tools(req, tools) if svc.codex_compaction_cache else tools
+            shown = responses_api.prompt_tools(req, tools) if svc.codex_compaction_cache and not no_tools else tools
             try:
                 try:
                     ids, thinking, max_new = svc.prepare(messages, shown, kw, req.get("max_output_tokens") or 0, req=req,
@@ -6832,7 +6861,8 @@ def make_handler(svc: Service):
             _debug_req("responses", req, messages, tools, max_new, thinking, len(ids))
             include = req.get("include") if isinstance(req.get("include"), list) else []
             asm = responses_api.Assembler(req, svc.model_for(req), len(ids), names,
-                                          "reasoning.encrypted_content" in include, validator is not None)
+                                          "reasoning.encrypted_content" in include, validator is not None,
+                                          confirm_tool_calls=inkling)
             # the request is also the sampling dict, as on the chat path (temperature, top_p, top_k, seed, ...)
             return ids, thinking, tools, max_new, asm, validator, req
 
@@ -6842,6 +6872,10 @@ def make_handler(svc: Service):
             counter = svc.counter_for(req.get("model"))     # #38: another installed model's, its engine not started
             req = counter.with_shared(req, "anthropic")
             messages, tools, kw = anthropic_to_messages(req, counter.anthropic_think_unasked)
+            if counter.call_format == "inkling":
+                forced_call(req.get("tool_choice"), tools, counter.call_format)
+                if tool_choice_of(req.get("tool_choice"))[0] == "none":
+                    tools = None
             stop_strings(req)                                 # the same 400 as the request itself would get
             check_request_sampling(req)                       # ... likewise a sampling field of the wrong type
             self._json(200, {"input_tokens": len(counter.encode_prompt(messages, tools, kw, store=False))})
@@ -6853,7 +6887,7 @@ def make_handler(svc: Service):
             self._no_local_images(messages)
             if tool_choice_of(req.get("tool_choice"))[0] == "none":   # Anthropic's {"type": "none"}: no tools offered
                 tools = None
-            force = forced_call(req.get("tool_choice"), tools)        # "any" / {"type": "tool", "name": N}
+            force = forced_call(req.get("tool_choice"), tools, svc.call_format)  # "any" / {"type": "tool", "name": N}
             max_new = int(req.get("max_tokens") or 0)                  # 0/-1: the rest of the context
             svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
             stop_strings(req)                                 # ... and so is a bad stop / stop_sequences

@@ -31,6 +31,13 @@ from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 LOGGER = logging.getLogger(__name__)
 
+INKLING_MODEL = "<|message_model|>"
+INKLING_TEXT = "<|content_text|>"
+INKLING_THINK = "<|content_thinking|>"
+INKLING_INVOKE = "<|content_invoke_tool_json|>"
+INKLING_END = "<|end_message|>"
+INKLING_STOP = "<|content_model_end_sampling|>"
+
 
 # ------------------------------------------------------------------------------------------------ template
 class TemplateRequestError(jinja2.exceptions.TemplateError, ValueError):
@@ -45,14 +52,19 @@ class ChatTemplate:
         def raise_exception(message):
             raise TemplateRequestError(message)
 
-        def tojson(x, ensure_ascii=False, indent=None, separators=None, sort_keys=False):
-            return json.dumps(x, ensure_ascii=ensure_ascii, indent=indent, separators=separators, sort_keys=sort_keys)
+        @jinja2.pass_context
+        def tojson(ctx, x, ensure_ascii=False, indent=None, separators=None, sort_keys=False):
+            text = json.dumps(x, ensure_ascii=ensure_ascii, indent=indent, separators=separators, sort_keys=sort_keys)
+            # Inkling's JSON keys can quote native markers too. Mark after serialization, not before dictsort.
+            tags = ctx.get("_strata_json_literals")
+            return _mark(text, tags) if tags else text
 
         env = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True, extensions=["jinja2.ext.loopcontrols"])
         env.filters["tojson"] = tojson
         env.filters["from_json"] = json.loads           # DeepSeek V4's template reads a call's arguments with it
         env.globals["raise_exception"] = raise_exception
         self.source = Path(path).read_text(encoding="utf-8")
+        self.inkling = all(tag in self.source for tag in (INKLING_MODEL, INKLING_THINK, INKLING_INVOKE))
         # transformers' {% generation %} (LFM2's template) marks the assistant's text for training; here it is a
         # block that always renders
         source = re.sub(r"({%-?\s*)endgeneration(\s*-?%})", r"\1endif\2", self.source)
@@ -67,6 +79,8 @@ class ChatTemplate:
                     if i == len(messages) - 1 or os.environ.get("STRATA_KEEP_EMPTY_TURNS") == "1" or not (isinstance(m, dict) and m.get("role") == "assistant"
                                                       and not _text_of(m.get("content")).strip()
                                                       and not _has_image(m.get("content")) and not m.get("tool_calls"))]
+        if self.inkling and kwargs.get("enable_thinking") is False:
+            kwargs["reasoning_effort"] = "none"   # Inkling's own template uses a numeric effort, not enable_thinking
         return self.template.render(messages=messages, tools=tools, add_generation_prompt=add_generation_prompt,
                                     **kwargs)
 
@@ -92,10 +106,22 @@ class ChatTemplate:
             calls = [{"name": f"strata_caps_call_{i}", "arguments": {"arg": f"strata_caps_arg_{i}"}}
                      for i in range(count)]
             messages = [user, {"role": "assistant", "content": "",
-                               "tool_calls": [{"function": call} for call in calls]}]
+                               "tool_calls": [{"function": call, **({"id": str(i)} if self.inkling else {})}
+                                              for i, call in enumerate(calls)]}]
             replies = [f"strata_caps_result_{i}" for i in range(count)]
-            messages += [{"role": "tool", "content": reply} for reply in replies] + [user]
+            messages += [{"role": "tool", "content": reply, **({"tool_call_id": str(i)} if self.inkling else {})}
+                         for i, reply in enumerate(replies)] + [user]
             prompt = render(messages, tools)
+            if self.inkling:
+                start = prompt.find(INKLING_MODEL)
+                if start < 0:
+                    return False
+                parser = InklingOutputParser(tools)
+                parsed = [e.call for e in parser.feed(prompt[start:].split(INKLING_STOP, 1)[0])
+                          if e.kind == "tool_call"]
+                return [{"name": call.name, "arguments": call.arguments} for call in parsed] == calls and all(
+                    f"<|message_tool|>{call['name']}{INKLING_TEXT}{reply}{INKLING_END}" in prompt
+                    for call, reply in zip(calls, replies))
             # Instructions include example XML and literal tag names, which are not model output. Parse only
             # complete calls to our probe functions, using the same body parser as OutputParser.
             bodies = re.findall(r"<tool_call>\s*(<function=strata_caps_call_\d+>.*?</function>)\s*</tool_call>",
@@ -109,8 +135,9 @@ class ChatTemplate:
 
         history = [user, {"role": "assistant", "content": "strata_caps_answer",
                           "reasoning_content": "strata_caps_reasoning"}, user]
+        tool_markers = ("tool_declare<|content_xml|>",) if self.inkling else ("<tool_call>", "<function=")
         return {"supports_tools": all(s in tool_prompt for s in
-                                      ("strata_caps_call_0", "strata_caps_description", "<tool_call>", "<function=")),
+                                      ("strata_caps_call_0", "strata_caps_description", *tool_markers)),
                 "supports_tool_calls": calls_supported(1),
                 "supports_system_role": "strata_caps_system" in render(
                     [{"role": "system", "content": "strata_caps_system"}, user]),
@@ -795,16 +822,18 @@ def tool_choice_of(tool_choice) -> tuple[str, str | None]:
     return "unknown", None
 
 
-def forced_call(tool_choice, tools: list[dict] | None) -> str | None:
+def forced_call(tool_choice, tools: list[dict] | None, call_format: str = "function") -> str | None:
     """`tool_choice` -> the text that opens the call the reply must make, or None (the model decides).
     There is no grammar here: the server writes this opening itself, so the model can only go on with a call.
     "required" / Anthropic "any": any of the tools; a named function: that one.  A value it cannot honour (an
     unknown shape, a name that is not one of the tools, "required" with no tools) is logged and acts as "auto",
     not a 400: a client's odd choice must not stop its request.  "none" is handled by the caller (no tools)."""
     kind, name = tool_choice_of(tool_choice)
-    names = {t.get("name") for t in tools or [] if isinstance(t, dict)}
     if kind in ("auto", "none"):
         return None
+    if call_format == "inkling":
+        raise ValueError("Inkling supports only 'auto' or 'none' for tool_choice")
+    names = {t.get("name") for t in tools or [] if isinstance(t, dict)}
     if kind == "required" and len(names) == 1:     # one tool to call: name it, the model cannot invent another
         kind, name = "named", next(iter(names))
     if kind == "required" and names:
@@ -1484,7 +1513,8 @@ class OutputParser:
         self.ss = "done"
         return out
 
-    def _hold(self, text: str, tags: tuple[str, ...]) -> int:
+    @staticmethod
+    def _hold(text: str, tags: tuple[str, ...]) -> int:
         """Length of the longest suffix of `text` that is a proper prefix of one of `tags`."""
         best = 0
         size = len(text)
@@ -1815,3 +1845,154 @@ class OutputParser:
         self._reset_scan()
         self.state, self.lead = "content", True
         return [Event("tool_call", call=call)]
+
+
+_INKLING_CALL_PREFIX = re.compile(r'\s*\{\s*"name"\s*:\s*("(?:[^"\\]|\\.)*")\s*,\s*"args"\s*:\s*(?=\{)')
+
+
+class InklingOutputParser:
+    """Inkling 2 emits its own model header for each thinking, text or named JSON call block (llama.cpp #32381)."""
+
+    think_end = INKLING_END
+    pending = ()
+    rescued = refused = 0
+
+    def __init__(self, tools: list[dict] | None = None, stream_tools: bool = False):
+        self.names = {t.get("name") for t in tools or []}
+        self.stream_tools = stream_tools
+        self.state, self.buf = "block", ""
+        self.name = ""
+        self.call = None
+        self.parts = []
+        self.depth = 0
+        self.quoted = self.escaped = False
+
+    def _scan_args(self) -> int:
+        """Consume JSON up to its closing brace or an early block boundary; ignore both inside strings."""
+        for i, c in enumerate(self.buf):
+            if self.quoted:
+                if self.escaped:
+                    self.escaped = False
+                elif c == "\\":
+                    self.escaped = True
+                elif c == '"':
+                    self.quoted = False
+            elif c == '"':
+                self.quoted = True
+            elif c == "<":
+                if self.buf.startswith(INKLING_END, i):
+                    self.state = "skip"
+                    return i
+                if INKLING_END.startswith(self.buf[i:]):
+                    return i                 # an unquoted delimiter can be split across deltas
+            elif c == "{":
+                self.depth += 1
+            elif c == "}":
+                self.depth -= 1
+                if self.depth == 0:
+                    self.state = "tool_end"
+                    return i + 1
+        return len(self.buf)
+
+    def _reset_call(self):
+        self.call, self.parts = None, []
+        self.depth = 0
+        self.quoted = self.escaped = False
+
+    def feed(self, delta: str) -> list[Event]:
+        self.buf += delta
+        out = []
+        while self.buf:
+            if self.state == "block":
+                self.buf = self.buf.lstrip()
+                if self.buf.startswith(INKLING_MODEL):
+                    self.buf, self.state = self.buf[len(INKLING_MODEL):], "kind"
+                elif INKLING_MODEL.startswith(self.buf):
+                    break
+                else:
+                    self.state = "plain"
+            elif self.state == "kind":
+                i = self.buf.find("<")
+                if i < 0:
+                    if len(self.buf) <= RCALL_MAX:
+                        break
+                    self.state = "skip"
+                    continue
+                name, marker = self.buf[:i], self.buf[i:]
+                types = [(INKLING_INVOKE, "tool_prefix")] if name else [
+                    (INKLING_TEXT, "content"), (INKLING_THINK, "reasoning")]
+                for tag, state in types:
+                    if marker.startswith(tag):
+                        self.buf, self.state, self.name = marker[len(tag):], state, name
+                        break
+                else:
+                    if any(tag.startswith(marker) for tag, _ in types):
+                        break
+                    self.state = "skip"
+            elif self.state == "tool_prefix":
+                match = _INKLING_CALL_PREFIX.match(self.buf)
+                if match is None:
+                    if INKLING_END not in self.buf and len(self.buf) <= RCALL_MAX:
+                        break
+                    self.state = "skip"
+                    continue
+                try:
+                    name = json.loads(match[1])
+                except ValueError:
+                    name = None
+                if name == self.name and name in self.names:
+                    self.call = ToolCall(name, {})
+                    if self.stream_tools:
+                        out.append(Event("tool_start", call=self.call))
+                self.buf, self.state = self.buf[match.end():], "tool_args"
+            elif self.state == "tool_args":
+                n = self._scan_args()
+                if not n and self.state != "skip":
+                    break
+                # Do not advertise valid JSON until the outer object and native terminator both arrive.
+                end = n - 1 if self.state == "tool_end" else n
+                part, self.buf = self.buf[:end], self.buf[n:]
+                if self.call is not None and part:
+                    self.parts.append(part)
+                    if self.stream_tools:
+                        out.append(Event("tool_args", part, call=self.call))
+                if self.state == "skip":
+                    self._reset_call()
+            elif self.state == "tool_end":
+                tail = self.buf.lstrip()
+                after = tail[1:].lstrip() if tail.startswith("}") else None
+                if after is not None and after.startswith(INKLING_END):
+                    if self.call is not None:
+                        try:
+                            self.call.arguments = json.loads("".join(self.parts) + "}")
+                        except (ValueError, RecursionError):
+                            pass             # an announced partial/malformed call does not get a completion event
+                        else:
+                            if self.stream_tools:
+                                out.append(Event("tool_args", "}", call=self.call))
+                            out.append(Event("tool_call", call=self.call))
+                    self.buf, self.state = after[len(INKLING_END):], "block"
+                elif not tail or (after is not None and INKLING_END.startswith(after)):
+                    break
+                else:
+                    self.state = "skip"
+                self._reset_call()
+            elif self.state == "plain":
+                out.append(Event("content", self.buf))
+                self.buf = ""
+            else:   # reasoning, content or a skipped block: only the native block terminator changes state
+                i = self.buf.find(INKLING_END)
+                n = i if i >= 0 else len(self.buf) - OutputParser._hold(self.buf, (INKLING_END,))
+                if n and self.state != "skip":
+                    out.append(Event(self.state, self.buf[:n]))
+                if i < 0:
+                    self.buf = self.buf[n:]
+                    break
+                self.buf, self.state = self.buf[i + len(INKLING_END):], "block"
+        return out
+
+    def finish(self, reason: str | None = None) -> list[Event]:
+        # feed() has already emitted all text except prefixes of control markers. Never finish a cut-off call.
+        self.buf = ""
+        self._reset_call()
+        return []

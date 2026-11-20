@@ -130,8 +130,15 @@ QWEN2_PATTERN = (
     r"|\s+"
 )
 
+# Inkling 2 uses the original GPT-4o regex (o200k_base). Python regex supports the Unicode case classes directly.
+GPT4O_PATTERN = (
+    r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?"
+    r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?"
+    r"|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+"
+)
+
 PRE_PATTERNS = {"glm4": GLM4_PATTERN, "glm5": GLM4_PATTERN,   # every other name: QWEN35_PATTERN, as before
-                "gemma4": GEMMA4_PATTERN, "lfm2": GLM4_PATTERN, "kolibri1": QWEN2_PATTERN}
+                "gemma4": GEMMA4_PATTERN, "lfm2": GLM4_PATTERN, "kolibri1": QWEN2_PATTERN, "inkling2": GPT4O_PATTERN}
 PRE_SEQUENCES = {"joyai-llm": DEEPSEEK3_SEQUENCE, "deepseek-v3": DEEPSEEK3_SEQUENCE, "flint": FLINT_SEQUENCE}
 IGNORE_MERGES = ("glm4", "glm5", "lfm2")
 RAW = ("gemma4",)                      # vocabularies of UTF-8 pieces
@@ -600,6 +607,7 @@ def extract(gguf_path, out_dir) -> dict:
                               else "llama.cpp src/llama-vocab.cpp (LLAMA_VOCAB_PRE_TYPE_CHATGLM4)" if tk.ignore_merges
                               else "llama.cpp src/llama-vocab.cpp (LLAMA_VOCAB_PRE_TYPE_QWEN2)"
                               if tk.pre_pattern == QWEN2_PATTERN
+                              else "tiktoken_ext/openai_public.py (o200k_base)" if tk.pre_pattern == GPT4O_PATTERN
                               else ".ref/llama.cpp src/llama-vocab.cpp L396 (LLAMA_VOCAB_PRE_TYPE_QWEN35)",
         "ignore_merges": tk.ignore_merges,
     }
