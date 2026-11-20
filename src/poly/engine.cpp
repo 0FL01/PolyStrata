@@ -3151,12 +3151,14 @@ void Engine::alloc() {
         d_slots_ = (void**) dmalloc((size_t) n_layer_ * n_expert_ * sizeof(void*), "scratch");
         tab_ = (int32_t*) dmalloc(tab, "scratch");
         h_tab_ = (int32_t*) hmalloc(tab, "pinned memory");
-        iota_ = (int32_t*) dmalloc(rr * sizeof(int32_t), "scratch");
+        // ggml's MMQ loads the destination IDs for a full tile before masking its final writes.
+        constexpr size_t id_tail = 128;
+        iota_ = (int32_t*) dmalloc((rr + id_tail) * sizeof(int32_t), "scratch");
         d_ex_ = (int32_t*) dmalloc(rr * sizeof(int32_t), "scratch");
         h_ex_ = (int32_t*) hmalloc(rr * sizeof(int32_t), "pinned memory");
-        std::vector<int32_t> ramp(rr);
-        std::iota(ramp.begin(), ramp.end(), 0);
-        ck(cudaMemcpy(iota_, ramp.data(), rr * sizeof(int32_t), cudaMemcpyHostToDevice), "scratch");
+        std::vector<int32_t> ramp(rr + id_tail);
+        std::iota(ramp.begin(), ramp.begin() + (ptrdiff_t) rr, 0);
+        ck(cudaMemcpy(iota_, ramp.data(), ramp.size() * sizeof(int32_t), cudaMemcpyHostToDevice), "scratch");
 
         // One layer's experts pass through it at a time, so it never holds more than a layer has.  A model of
         // small experts has a few hundred MiB a layer, and the rest of the default would be VRAM that the

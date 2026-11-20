@@ -6,13 +6,14 @@
 #include "mmq.cuh"
 #include "quantize.cuh"
 
+#include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
 
 namespace strata::poly {
 
-#if STRATA_POLY_NVFP4
+#if STRATA_POLY_NVFP4 || STRATA_POLY_HIP_NVFP4
 // mmq_nvfp4.cu
 void nvfp4_w4a8(ggml_backend_cuda_context& ctx, const mmq_args& a, cudaStream_t s);
 bool nvfp4_w4a8_fits(int64_t w_rows, int cc, size_t smpbo);
@@ -46,6 +47,20 @@ float* fp4_scales(void* xq, int64_t rows, int64_t cols) {
                      128 * sizeof(block_q8_1_mmq));
 }
 
+#if STRATA_POLY_HIP_NVFP4
+bool hip_nvfp4_fits(int64_t w_rows, int64_t w_cols, const ggml_cuda_device_info::cuda_device_info& dev) {
+    // gfx1031 in ggml_cuda_info() is RDNA2's base gfx1030 plus one. Limit this experiment to Inkling's
+    // fused gate/up and down shapes; RDNA2 uses wave32 DP4A tiles, with no stream-k.
+    if (dev.cc != GGML_CUDA_CC_RDNA2 + 1 || dev.warp_size != 32 || w_rows != 2304 ||
+        (w_cols != 2304 && w_cols != 1152)) return false;
+    static const bool asked = [] {
+        const char* v = std::getenv("STRATA_HIP_NVFP4_MMQ");
+        return v && v[0] == '1' && v[1] == '\0';
+    }();
+    return asked && nvfp4_w4a8_fits(w_rows, dev.cc, dev.smpbo);
+}
+#endif
+
 void ck(const char* what) {
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(e));
@@ -77,6 +92,8 @@ bool Mmq::fits(int type, int64_t w_rows, int64_t w_cols) {
             if (w_cols % QK_NVFP4 != 0) return false;
             if (!nvfp4_fp4(dev.cc)) return nvfp4_w4a8_fits(w_rows, dev.cc, dev.smpbo);
             break;
+#elif STRATA_POLY_HIP_NVFP4
+        case GGML_TYPE_NVFP4: return hip_nvfp4_fits(w_rows, w_cols, dev);
 #endif
         default: return false;
     }
@@ -178,6 +195,18 @@ void Mmq::mul(const void* w, int type, int64_t w_rows, int64_t w_cols, size_t st
                 nvfp4_w4a8(ctx, a, s);
             }
             break;
+#elif STRATA_POLY_HIP_NVFP4
+        case GGML_TYPE_NVFP4: {
+            const auto& dev = ggml_cuda_info().devices[ggml_cuda_get_device()];
+            if (!hip_nvfp4_fits(w_rows, w_cols, dev))
+                throw std::runtime_error("mmq: HIP NVFP4 W4A8 not enabled or unsupported");
+            nvfp4_w4a8(ctx, a, s);   // Q8_1 activation scales live in xq, not in a.y_scale
+            ck("mmq product");
+            static const int logged = std::fputs(
+                "strata-poly: STRATA_HIP_NVFP4_MMQ=1: using NVFP4 W4A8 MMQ on gfx1031\n", stderr);
+            (void) logged;
+            return;
+        }
 #endif
         default: throw std::runtime_error("mmq: tensor type " + std::to_string(type) + " is not built");
     }

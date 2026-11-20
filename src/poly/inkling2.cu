@@ -422,9 +422,13 @@ void Inkling2::assign_scratch() {
     rel_ = fbuf(n * kHeads * kRelative);
     sink_ = fbuf(n * kHeads);
     taps_ = fbuf(n * kKv * kTaps);
-    attend_rows_ = std::clamp((1 << 20) / ((int64_t) kHeads * opt_.max_context), int64_t{1}, (int64_t) rows_);
-    scores_ = fbuf((size_t) attend_rows_ * kHeads * opt_.max_context);
-    partial_ = fbuf((size_t) attend_rows_ * kQuery * div_up(opt_.max_context, kValueTile));
+    // A tile takes kValueTile scores and one kHead-wide partial value vector per query head. Keep room
+    // for a single query at the configured limit, but share that room across queries on shorter prefixes.
+    constexpr int target_tiles = (1 << 20) / (kHeads * kValueTile);
+    attend_tiles_ = std::max(div_up(opt_.max_context, kValueTile),
+                             std::min(target_tiles, rows_ * div_up(opt_.max_context, kValueTile)));
+    scores_ = fbuf((size_t) attend_tiles_ * kHeads * kValueTile);
+    partial_ = fbuf((size_t) attend_tiles_ * kQuery);
     for (auto& x : input_) x = fbuf(width);
     for (auto& x : depth_) x = fbuf(width);
     prelude_ = fbuf(width);
@@ -460,8 +464,10 @@ void Inkling2::attention(const Block& b, int n) {
     const int window = swa ? kWindow : 0, ring = swa ? ring_ : 0;
     const KvRead k{c.planes[0].data, (const uint16_t*) c.planes[1].data};
     const KvRead v{c.planes[2].data, (const uint16_t*) c.planes[3].data};
-    for (int at = 0; at < n; at += attend_rows_) {
-        const int m = std::min(n - at, attend_rows_);
+    const int max_span = (int) (swa ? std::min<int64_t>(window, pos_ + n) : pos_ + n);
+    const int attend_rows = attend_tiles_ / div_up(max_span, kValueTile);
+    for (int at = 0; at < n; at += attend_rows) {
+        const int m = std::min(n - at, attend_rows);
         const int64_t pos = pos_ + at;
         const int span = (int) (swa ? std::min<int64_t>(window, pos + m) : pos + m);
         const int parts = div_up(span, kValueTile);
@@ -531,12 +537,17 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
     const float* xq = input_[0];
     const float* xk = streams == 1 ? xq : input_[1];
     const float* xv = streams == 1 ? xq : input_[2];
-    lin(b.q, xq, q_, n);
-    lin(b.k, xk, k_, n);
-    lin(b.v, xv, v_, n);
-    lin(b.rel, xq, rel_, n);
+    // MMVQ uses the same Q8_1 input for Q, relative bias and the attention gate (also K and V when
+    // they share the input). The matrix-matrix prompt path uses its own layout instead.
+    const bool mmv = n < kStageRows;
+    if (mmv) kernels::native_quantize_q8_1(xq, xq_, kWidth * n, 1, st_);
+    const void* shared = mmv ? xq_ : nullptr;
+    lin(b.q, xq, q_, n, shared);
+    lin(b.k, xk, k_, n, streams == 1 ? shared : nullptr);
+    lin(b.v, xv, v_, n, streams == 1 ? shared : nullptr);
+    lin(b.rel, xq, rel_, n, shared);
     lin(b.sink, xq, sink_, n);
-    lin(b.gate, xq, gate_, n);
+    lin(b.gate, xq, gate_, n, shared);
 
     float* hist = state_ + (size_t) visit_ * kConvFloats;
     const auto conv = [&](float* x, float* state, const Dev& w, const Dev& dyn, const float* input) {

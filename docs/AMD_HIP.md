@@ -729,6 +729,17 @@ run it; the report below is from a community machine: an RX 6900 XT 16 GB (gfx10
   `gfx103X-all` wheels on gfx1030, images, answer-quality benchmarks. RDNA1 (gfx1012, RX 5500 XT) builds by hand:
   [OLDER_GPUS.md](OLDER_GPUS.md#amd-building-gfx906-and-gfx1012).
 
+### Inkling-2-Mini prompt MMQ on gfx1031
+
+`STRATA_HIP_NVFP4_MMQ=1` enables the wave32 DP4A expert prompt path for Inkling-2-Mini's NVFP4 matrices on an RX 6700 XT
+build (`gfx1031`). It keeps 8-bit activations (W4A8), does not change the KV format, and does not switch single-token
+decode to MMQ. It is off by default. Batched GPU products and the CPU fallback can differ in rounding.
+
+With Inkling-2-Mini-UD-Q4_K_XL, Q8_0 KV growing to 200,000 tokens, and a Ryzen 7 5700X, a cold 2,048-token prompt
+read at 48.5 tok/s with the switch off and 159.3 with it on at `--prompt-batch 256`; batch 512 reached 208.7 tok/s.
+These are same-host single-run measurements. Growing KV leaves more experts resident on short prefixes than
+`--kv-whole`, but that advantage shrinks as live context grows.
+
 ## gfx906 (Instinct MI50 / MI60, Radeon VII): wave64, built from source
 
 gfx906 is wave64 and has no WMMA and no packed byte arithmetic, so the wave32 backend above refuses it. A separate opt-in build compiles the CUDA sources as HIP through a small compat layer

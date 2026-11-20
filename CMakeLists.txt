@@ -2047,10 +2047,14 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
   # arch-specific target, so on CUDA their instances alone are built with 12x -> 12xa, as Strata's W4A4 unit is.  A
   # Blackwell other than 12.0 has no image of them, and Mmq::fits() leaves MXFP4 out there.  NVFP4 takes this
   # instance only on a 12.0 card with STRATA_PREFILL_NVFP4=w4a4; otherwise its tiles are mmq_nvfp4.cu's int8 ones,
-  # built for the architectures as given.  On HIP there is no NVFP4 prompt product.
+  # built for the architectures as given.  HIP builds for gfx1031 also take that W4A8 instance, opt-in at run time.
   set(_strata_poly_mxfp4 ${_strata_mmq}/template-instances/mmq-instance-mxfp4.cu)
   if(STRATA_ENABLE_HIP)
     list(APPEND _strata_poly_mmq_instances ${_strata_poly_mxfp4})
+    if("gfx1031" IN_LIST STRATA_HIP_ARCH_LIST)
+      list(APPEND _strata_poly_mmq_instances src/poly/mmq_nvfp4.cu)
+      set_property(SOURCE src/poly/mmq.cu APPEND PROPERTY COMPILE_DEFINITIONS STRATA_POLY_HIP_NVFP4=1)
+    endif()
   else()
     list(APPEND _strata_poly_mxfp4 ${_strata_mmq}/template-instances/mmq-instance-nvfp4.cu)
     list(APPEND _strata_poly_mmq_instances src/poly/mmq_nvfp4.cu)

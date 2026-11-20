@@ -60,7 +60,7 @@ private:
     std::array<Cache, kVisits> caches_;
     Dev token_norm_, output_query_, loop_query_, loop_kv_query_;
     float qk_clip_ = 0, r_clip_ = 0, alpha_ = 0, cap_ = 0, expert_scale_ = 0;
-    int floor_ = 0, ring_ = 0, visit_ = 0, depth_n_ = 0, attend_rows_ = 0;
+    int floor_ = 0, ring_ = 0, visit_ = 0, depth_n_ = 0, attend_tiles_ = 0;
 
     float *q_ = nullptr, *k_ = nullptr, *v_ = nullptr, *att_ = nullptr, *gate_ = nullptr, *rel_ = nullptr,
           *sink_ = nullptr, *taps_ = nullptr, *scores_ = nullptr, *partial_ = nullptr;
