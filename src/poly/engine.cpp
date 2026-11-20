@@ -9,6 +9,9 @@
 #include "kolibri1.hpp"
 #include "lfm2moe.hpp"
 #include "flint.hpp"
+#if defined(STRATA_USE_HIP)
+#include "inkling2.hpp"
+#endif
 #include "mmq.hpp"
 #include "qwen35.hpp"
 #include "runtime.hpp"
@@ -1582,9 +1585,6 @@ void Engine::load_moe(int il, bool shared) {
     // NVFP4 experts converted from NVIDIA's checkpoints carry each expert's global scale of gate, up and down
     // (llama.cpp's ffn_*_exps_s).  Gate's and up's go on their products ahead of the activation (ExpertScales),
     // down's on the expert's weight in its token's sum.  Only NVFP4's: Gemma 4's ffn_down_exps.scale is its own.
-    const bool nv = L.gu_type == GGML_TYPE_NVFP4 || L.u_type == GGML_TYPE_NVFP4 || L.d_type == GGML_TYPE_NVFP4;
-    if (nv && tensor(il, "ffn_gate_up_exps.scale"))
-        throw std::runtime_error(blk(il, "ffn_gate_up_exps.scale: NVFP4 scales of a joined gate and up are not supported"));
     // A projection of another type in the same layer has none (Qwen3.6 NVFP4-MTP-HQ: some ups are Q4_K).
     const auto one = [&](const char* n, uint32_t type, Dev& d, std::vector<float>& h) {
         const TensorInfo* t = tensor(il, n);
@@ -1595,8 +1595,18 @@ void Engine::load_moe(int il, bool shared) {
         h.resize((size_t) n_expert_);
         std::memcpy(h.data(), home(*t).data(*t), h.size() * sizeof(float));
     };
-    one("ffn_gate_exps.scale", L.gu_type, L.s_gate, L.h_s_gate);
-    one("ffn_up_exps.scale", L.u_type, L.s_up, L.h_s_up);
+    const bool nv = L.gu_type == GGML_TYPE_NVFP4 || L.u_type == GGML_TYPE_NVFP4 || L.d_type == GGML_TYPE_NVFP4;
+    if (nv && tensor(il, "ffn_gate_up_exps.scale")) {
+        if (situ_.beta <= 0.f || L.gu_type != GGML_TYPE_NVFP4 || !tensor(il, "ffn_gate_up_exps.weight") ||
+            tensor(il, "ffn_gate_exps.scale") || tensor(il, "ffn_up_exps.scale"))
+            throw std::runtime_error(blk(il, "ffn_gate_up_exps.scale: unsupported joined gate/up scales"));
+        one("ffn_gate_up_exps.scale", L.gu_type, L.s_gate, L.h_s_gate);
+        L.s_up = L.s_gate;
+        L.h_s_up = L.h_s_gate;
+    } else {
+        one("ffn_gate_exps.scale", L.gu_type, L.s_gate, L.h_s_gate);
+        one("ffn_up_exps.scale", L.u_type, L.s_up, L.h_s_up);
+    }
     one("ffn_down_exps.scale", L.d_type, L.s_down, L.h_s_down);
     std::string err;
     if (!cpu_expert_types_ok((int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_, err) ||
@@ -1613,8 +1623,9 @@ std::unique_ptr<Engine> Engine::open(const Options& o) {
     const std::string name = arch ? arch->s : std::string();
     // Clover is a qwen35moe model trained to also guess a block of tokens at once (Qwen35)
     const bool qwen35 = name == "qwen35moe" || name == "clover_moe";
-    if (o.kv_format == KvFmt::kQ8_0 && !qwen35 && name != "kolibri1" && name != "flint" && name != "lfm2moe")
-        throw std::runtime_error("--kv q8_0 is supported for qwen35moe, kolibri1, flint and lfm2moe models in v1; "
+    if (o.kv_format == KvFmt::kQ8_0 && !qwen35 && name != "kolibri1" && name != "flint" && name != "lfm2moe" &&
+        name != "inkling2")
+        throw std::runtime_error("--kv q8_0 is supported for qwen35moe, kolibri1, flint, lfm2moe and Inkling-2-Mini; "
                                  "this is a '" + name + "' model");
     // int8 and int8k are Gemma 4's: their readers are not the arithmetic q8_0's are, so a model takes one
     // family or the other rather than a choice between them.
@@ -1624,6 +1635,15 @@ std::unique_ptr<Engine> Engine::open(const Options& o) {
     // moe() weighs the picks as a softmax of their scores, which is how only this architecture's router does
     if (o.cache_bias > 0.f && !qwen35)
         throw std::runtime_error("--cache-bias is supported for qwen35moe models; this is a '" + name + "' model");
+    if (name == "inkling2") {
+#if defined(STRATA_USE_HIP)
+        auto engine = std::make_unique<Inkling2>();
+        engine->load(o);
+        return engine;
+#else
+        throw std::runtime_error("Inkling-2-Mini requires a HIP build on RDNA2");
+#endif
+    }
     const auto make = [&]() -> std::unique_ptr<Engine> {
         if (name == "glm5-next" || name == "glm5next") return std::make_unique<Glm5Next>();   // Unsloth: no hyphen
         if (qwen35) return std::make_unique<Qwen35>();
@@ -2628,6 +2648,11 @@ void Engine::load(const Options& o) {
                          key && key->u > 0 && key->u % 32 == 0 && value && value->u == key->u
                              ? KvFmt::kQ8_0 : KvFmt::kFp16;
     }
+#elif defined(STRATA_USE_HIP)
+    if (opt_.kv_format == KvFmt::kAuto) {
+        const MetaValue* arch = gg_->get("general.architecture");
+        opt_.kv_format = arch && arch->s == "inkling2" ? KvFmt::kQ8_0 : KvFmt::kFp16;
+    }
 #endif
     load_geometry();
 #if defined(STRATA_GPU_METAL)
@@ -2709,12 +2734,13 @@ void Engine::load(const Options& o) {
     // the token table stays in the file, a row a token, and embed() reads a row in whatever type it has
     const TensorInfo* te = gg_->find("token_embd.weight");
     const ggml_type_traits* tt = te ? ggml_get_type_traits((ggml_type) te->type) : nullptr;
-    if (!te || te->shape.size() != 2 || (int64_t) te->shape[0] != n_embd_ || (int64_t) te->shape[1] != n_vocab_ ||
+    const int file_vocab = padded_vocab_ ? padded_vocab_ : n_vocab_;
+    if (!te || te->shape.size() != 2 || (int64_t) te->shape[0] != n_embd_ || (int64_t) te->shape[1] != file_vocab ||
         !tt || tt->blck_size <= 0 || n_embd_ % tt->blck_size != 0 || (te->type != kTypeF32 && !tt->to_float))
         throw std::runtime_error("token_embd.weight must be [" + std::to_string(n_embd_) + ", " +
-                                 std::to_string(n_vocab_) + "] in a type ggml converts to floats, it is " +
+                                 std::to_string(file_vocab) + "] in a type ggml converts to floats, it is " +
                                  (te ? shape_of(*te) : "missing"));
-    tok_row_ = gg_->payload(*te) / (size_t) n_vocab_;
+    tok_row_ = gg_->payload(*te) / (size_t) file_vocab;
     tok_type_ = te->type;
     tok_embd_ = gg_->data(*te);
 
@@ -2735,8 +2761,9 @@ void Engine::load(const Options& o) {
             out_norm_ = upload(norm, "output_norm.weight", n_embd_, 1, kF32);
             // a file without an output matrix ties the output to the token table
             const TensorInfo* head = gg_->find("output.weight");
-            output_ = upload(head ? head : gg_->find("token_embd.weight"), "output.weight", n_embd_, n_vocab_,
+            output_ = upload(head ? head : gg_->find("token_embd.weight"), "output.weight", n_embd_, file_vocab,
                              kAnyMat);
+            output_.n_out = n_vocab_;  // padded rows are not tokens and never enter logits or sampling
         }
         if (draft_) load_drafter();
         if (pass == 0) {
@@ -2880,10 +2907,12 @@ void Engine::load(const Options& o) {
         pool_state_.reset(new std::atomic<uint8_t>[slots]);
         for (size_t s = 0; s < slots; ++s) pool_state_[s].store(0);
         // the next layer's top 8: the best of 0, 8, 12 and 16, and of 8 with the layer after's top 8 as well
-        prefetch_k_ = 8;
-        const size_t part = 16 * (size_t) n_expert_;   // a part's rows: up to 16
-        ahead_dev_ = (float*) dmalloc(8 * part * sizeof(float), "scratch");
-        h_ahead_ = (float*) hmalloc(8 * part * sizeof(float), "pinned memory");
+        if (!looped_) {
+            prefetch_k_ = 8;
+            const size_t part = 16 * (size_t) n_expert_;   // a part's rows: up to 16
+            ahead_dev_ = (float*) dmalloc(8 * part * sizeof(float), "scratch");
+            h_ahead_ = (float*) hmalloc(8 * part * sizeof(float), "pinned memory");
+        }
     }
     const std::vector<uint8_t> keep = ram_keep();
     if (opt_.ram_experts_mib >= 0) {
@@ -3534,6 +3563,15 @@ ExpertScales Engine::expert_scales(const Layer& L, const int32_t* ids) const {
     return s;
 }
 
+void Engine::expert_activation(const float* gate_up, float* out, int rows, float limit, const ExpertScales& scales) {
+#if defined(STRATA_USE_HIP)
+    if (situ_.beta > 0.f)
+        return situ_rows(gate_up, out, n_ff_exp_, rows, situ_.beta, situ_.linear_beta, st_, scales);
+#endif
+    if (gelu_) geglu_rows(gate_up, out, n_ff_exp_, rows, st_, &scales);
+    else swiglu_clamp_rows(gate_up, out, n_ff_exp_, rows, limit, st_, &scales);
+}
+
 void Engine::lin_raw(const Dev& w, const float* x, float* y, int n, const void* xq, int rows_per_x) {
     if (w.type == kTypeF32 || w.type == kTypeBF16) {
         const int per = rows_per_x ? rows_per_x : w.n_out;
@@ -4141,8 +4179,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
                 }
                 ExpertScales es = expert_scales(L);
                 for (int j = 0; j < m && (es.gate || es.up); ++j) es.e[j] = cached[i0 + j].e;
-                if (gelu_) geglu_rows(g_, h_, n_ff_exp_, m, st_, &es);
-                else swiglu_clamp_rows(g_, h_, n_ff_exp_, m, limit, st_, &es);
+                expert_activation(g_, h_, m, limit, es);
                 kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_, m, st_);
                 if (!(m > 1 && kernels::native_mmvq_slots((int) L.d_type, down, m, n_ff_exp_, n_embd_, st_)))
                     for (int j = 0; j < m; ++j)
@@ -4205,7 +4242,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
             }
         };
         cpu_experts(*workers_, host, n_host, m, (int) L.gu_type, (int) L.u_type, (int) L.d_type, n_embd_, n_ff_exp_,
-                    h_x_ + (size_t) at * e_row, limit, gelu_, cpu, meanwhile, any_late ? late : nullptr, &wait);
+                    h_x_ + (size_t) at * e_row, limit, gelu_, cpu, meanwhile, any_late ? late : nullptr, &wait, situ_);
         pool_reads_.clear();
         stats_.cpu_ms += ms_since(t0);
     }
@@ -4262,8 +4299,7 @@ bool Engine::moe_card(Layer& L, int il, int n) {
         kernels::native_mmvq_ids((int) L.u_type, up, rr, n_embd_, n_ff_exp_, st_);
     }
     const ExpertScales es = expert_scales(L, d_ids_);
-    if (gelu_) geglu_rows(g_, h_, n_ff_exp_, rr, st_, &es);
-    else swiglu_clamp_rows(g_, h_, n_ff_exp_, rr, clamp_exp_[(size_t) il], st_, &es);
+    expert_activation(g_, h_, rr, clamp_exp_[(size_t) il], es);
     if (!L.h_s_down.empty()) expert_weights(d_wts_, fp(L.s_down), d_ids_, rr, st_);
     kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_ * rr, 1, st_);   // the rows back to back, as one vector
     const kernels::MmvqIds down{table, d_ids_, L.gu2(), q8_, kernels::native_q8_1_bytes(n_ff_exp_), 1, d_,
@@ -4617,8 +4653,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             up_mul(slot_of(r.j), L.slot_bytes, r.m, d_cb + (size_t) r.c * cb_row + r.j, r.most);
         }
         if (rc > 0) {
-            if (gelu_) geglu_rows(gu_, hx_, n_ff_exp_, rc, st_, &es);
-            else swiglu_clamp_rows(gu_, hx_, n_ff_exp_, rc, limit, st_, &es);
+            expert_activation(gu_, hx_, rc, limit, es);
             if (guard) guard_half_sums(hx_, ff, n_ff_exp_, rc, hf_, st_);
             Mmq::quantize(hx_, nullptr, mq2_, dt, ff, ff, rc, st_);
         }
@@ -4669,8 +4704,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             });
             ExpertScales er = es;
             if (er.ids) er.ids += r0;
-            if (gelu_) geglu_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, n_ff_exp_, rows, st_, &er);
-            else swiglu_clamp_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, n_ff_exp_, rows, limit, st_, &er);
+            expert_activation(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, rows, limit, er);
             if (guard) guard_half_sums(hx_ + (size_t) r0 * ff, ff, n_ff_exp_, rows, hf_ + r0, st_);
             Mmq::quantize(hx_ + (size_t) r0 * ff, nullptr, mq2_, dt, ff, ff, rows, st_);
             each_class([&](int k, int top) {
@@ -4697,7 +4731,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             done = Clock::now();
         });
         cpu_experts(*workers_, host_.data(), (int) host_.size(), n, gt, ut, dt, n_embd_, n_ff_exp_, h_x_, limit, gelu_,
-                    h_cpu_, nullptr);
+                    h_cpu_, nullptr, nullptr, nullptr, situ_);
         const double cpu = ms_since(start);
         behind.wait();
         const double gpu = std::chrono::duration<double, std::milli>(done - start).count();
@@ -4787,6 +4821,7 @@ void Engine::run(const int32_t* tokens, int n) {
     }
     if (n < kStageRows) copy2(h_r_, r_, n * (int) r_row, nullptr, nullptr, 0, st_);
     else ck(cudaMemcpyAsync(r_, h_r_, (size_t) n * r_row * sizeof(float), cudaMemcpyHostToDevice, cs(st_)), "embed");
+    if (looped_) return run_visits(n);
 
     // A token alone, or a window of guessed ones, hands the card the same launches every time, some thirty a
     // layer up to the router, and they cost this thread more than the card.  They are recorded once, a graph a
@@ -4977,6 +5012,7 @@ bool Engine::steps_guesses() const {
 }
 
 void Engine::step(const int* seqs, const int32_t* tokens, int n, const int32_t* guesses) {
+    if (looped_) throw std::logic_error("the looped model needs eval(), not multi-sequence step()");
     if (n < 1 || n > std::min(rows_, sequences())) throw std::logic_error("step takes 1 to sequences() tokens");
     if (guesses && !steps_guesses()) throw std::logic_error("step: guesses need --batch-mtp, a draft block and one card");
     if (!step_seqs_.empty()) throw std::logic_error("step: the rows of the step before are not kept yet (keep_step())");
@@ -5418,7 +5454,7 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
         share = [&, to](int done, int of) { return (*asked)(lo_ * of + done * (to - lo_), n_layer_ * of); };
         return (const std::function<bool(int, int)>*) &share;
     };
-    if (n_calls == 1 || !mmq_ || all_cached() || n < opt_.stage_ahead) {
+    if (looped_ || n_calls == 1 || !mmq_ || all_cached() || n < opt_.stage_ahead) {
         turn = share_to(n_layer_);   // eval() takes the calls through the cards after this one
         // On several cards the next one takes a call on a thread of its own, while this one runs the call after
         // it.  Each card runs the calls as eval() does, in the same order.

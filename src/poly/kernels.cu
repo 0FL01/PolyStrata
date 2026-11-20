@@ -991,6 +991,19 @@ __global__ void expert_weights_kernel(float* __restrict__ w, const float* __rest
     if (r < rows) w[r] *= scale[ids[r]];
 }
 
+#if defined(STRATA_USE_HIP)
+__global__ void situ_rows_kernel(const float* __restrict__ gate_up, float* __restrict__ out, int n,
+                                 float beta, float linear_beta, ExpertScales scales) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float* row = gate_up + size_t(blockIdx.y) * 2 * n;
+    const float2 sc = row_scales(scales, blockIdx.y);
+    const float g = row[i] * sc.x, u = row[n + i] * sc.y;
+    out[size_t(blockIdx.y) * n + i] = beta * tanhf(g / beta) / (1.f + expf(-g)) *
+                                      (linear_beta * tanhf(u / linear_beta));
+}
+#endif
+
 __device__ __forceinline__ float gelu(float x) {
     return 0.5f * x * (1.0f + tanhf(0.79788456080286535587989211986876f * x * (1.0f + 0.044715f * x * x)));
 }
@@ -2998,6 +3011,13 @@ void swiglu_clamp_rows(const float* gate_up, float* out, int n, int rows, float 
     swiglu_clamp_rows_kernel<<<dim3(grid(n, 256), rows), 256, 0, cs(stream)>>>(gate_up, out, n, limit,
                                                                                 scales ? *scales : ExpertScales{});
 }
+
+#if defined(STRATA_USE_HIP)
+void situ_rows(const float* gate_up, float* out, int n, int rows, float beta, float linear_beta,
+               void* stream, const ExpertScales& scales) {
+    situ_rows_kernel<<<dim3(grid(n, 256), rows), 256, 0, cs(stream)>>>(gate_up, out, n, beta, linear_beta, scales);
+}
+#endif
 
 void expert_weights(float* w, const float* scale, const int32_t* ids, int rows, void* stream) {
     if (rows > 0) expert_weights_kernel<<<grid(rows, 256), 256, 0, cs(stream)>>>(w, scale, ids, rows);

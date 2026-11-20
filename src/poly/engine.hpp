@@ -46,7 +46,7 @@ struct Likeliest;
 /// deltas in two arrays, which a reader can take four codes to a load, and int8k keeps only the keys' side
 /// quantized.  q8_0 is qwen35moe's; int8 and int8k are Gemma 4's - the two readers are not the same arithmetic,
 /// so a model has one or the other rather than a choice between them.  Auto is resolved from model
-/// geometry before allocation on Metal; other backends default to fp16.
+/// geometry before allocation; on HIP only Inkling defaults to Q8_0.
 enum class KvFmt { kAuto = -1, kFp16 = 0, kQ8_0 = 1, kInt8 = 2, kInt8K = 3 };
 
 struct Options {
@@ -98,6 +98,8 @@ struct Options {
                                   ///< so; false: for the whole context at load, as the expert cache gets the rest
 #if defined(STRATA_GPU_METAL)
     KvFmt kv_format = KvFmt::kAuto;   ///< Q8 for compatible Qwen35MoE geometry, otherwise fp16
+#elif defined(STRATA_USE_HIP)
+    KvFmt kv_format = KvFmt::kAuto;   ///< Q8 for Inkling, otherwise fp16
 #else
     KvFmt kv_format = KvFmt::kFp16;   ///< the K and V caches' format; fp16 by default (byte-identical path)
 #endif
@@ -442,6 +444,8 @@ protected:
     virtual void layer_head(Layer& L, int il, int n) = 0;
     /// The routed experts' sum (fo_) into the layer's output.
     virtual void layer_tail(Layer& L, int il, int n) = 0;
+    /// The looped model visits a physical layer more than once, and keeps token state between those visits.
+    virtual void run_visits(int n) { (void) n; }
     /// The model's output for `rows` tokens from row `first` of the call, normed: what the output matrix takes.
     virtual void output_rows(int first, int rows, float* h) = 0;
     /// A token's experts and their weights from its scores at layer il's router.  `token` is the token the row is
@@ -548,6 +552,7 @@ protected:
     void lin_raw(const Dev& w, const float* x, float* y, int n, const void* xq, int rows_per_x);
     /// The layer's ExpertScales for rows of the experts ids[r] (on the card), or none.
     ExpertScales expert_scales(const Layer& L, const int32_t* ids = nullptr) const;
+    void expert_activation(const float* gate_up, float* out, int rows, float limit, const ExpertScales& scales);
     void fill_expert_cache();
     void ensure_stage();
     void start_swaps();
@@ -694,6 +699,8 @@ protected:
 
     // geometry
     int n_embd_ = 0, n_layer_ = 0, n_vocab_ = 0;
+    int padded_vocab_ = 0;   ///< zero unless the token table and LM head have extra non-token rows
+    bool looped_ = false;    ///< the model owns its visit order; reads go through all visits for each chunk
     int n_ff_ = 0;            ///< a dense FFN's width, in the architectures that have one
     int n_expert_ = 0, n_used_ = 0, n_ff_exp_ = 0, n_ff_shexp_ = 0, n_moe_ = 0;
     int rows_ = 1;            ///< tokens the scratch is sized for
@@ -711,6 +718,7 @@ protected:
     void* ev_out_[2] = {};    ///< marks the card done with a call in each half
     float rms_eps_ = 0;
     bool gelu_ = false;       ///< the routed experts' activation: GELU of the gate, else SiLU within the layer's limits
+    SiTU situ_;               ///< Inkling's two soft clamps, applied to the independently scaled products
     std::vector<float> clamp_exp_, clamp_shexp_;   ///< a layer's SwiGLU limits: the routed experts', the shared one's
     /// a prompt batch's products go through guard_half_sums(): the model's activations can sum past a half's range
     /// in a block.  Off for the models whose sums stay in range: it cost LFM2.5 4% of a 30K prompt's read on a 5090.

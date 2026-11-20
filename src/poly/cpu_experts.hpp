@@ -57,6 +57,10 @@ struct CpuExpert {
     float gate_scale = 1.f, up_scale = 1.f;   ///< NVFP4's global scales (ExpertScales), on the products
 };
 
+struct SiTU {
+    float beta = 0.f, linear_beta = 0.f;  ///< zero beta selects the existing SwiGLU/GEGLU path
+};
+
 /// Checks that ggml-cpu has a dot product for both types.  Call once per layer format at load.
 bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::string& err);
 
@@ -73,6 +77,6 @@ bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::str
 void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, int gu_type, int u_type, int d_type,
                  int n_embd, int n_ff, const float* x, float limit, bool gelu, float* out,
                  const std::function<void()>* meanwhile = nullptr, const uint8_t* late = nullptr,
-                 const std::function<void(int)>* wait = nullptr);
+                 const std::function<void(int)>* wait = nullptr, SiTU situ = {});
 
 }  // namespace strata::poly

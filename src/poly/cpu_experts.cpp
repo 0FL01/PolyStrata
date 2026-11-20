@@ -140,8 +140,9 @@ bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::str
 }
 
 void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, int gu_type, int u_type, int d_type,
-                 int n_embd, int n_ff, const float* x, float limit, bool gelu, float* out,
-                 const std::function<void()>* meanwhile, const uint8_t* late, const std::function<void(int)>* wait) {
+                  int n_embd, int n_ff, const float* x, float limit, bool gelu, float* out,
+                  const std::function<void()>* meanwhile, const uint8_t* late, const std::function<void(int)>* wait,
+                  SiTU situ) {
     init_once();
     const ggml_type_traits_cpu* tg = traits(gu_type);
     const ggml_type_traits_cpu* tu = traits(u_type);
@@ -216,6 +217,11 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
                 tu->vec_dot(n_embd, &u, 0, up, 0, au, 0, 1);
                 g *= e.gate_scale;
                 u *= e.up_scale;
+                if (situ.beta > 0.f) {
+                    hp[(size_t) j * n_ff + r] = situ.beta * std::tanh(g / situ.beta) / (1.f + std::exp(-g)) *
+                                                 (situ.linear_beta * std::tanh(u / situ.linear_beta));
+                    continue;
+                }
                 if (gelu) {
                     hp[(size_t) j * n_ff + r] =
                         0.5f * g * (1.f + std::tanh(0.7978845608f * g * (1.f + 0.044715f * g * g))) * u;

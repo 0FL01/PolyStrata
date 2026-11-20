@@ -184,6 +184,10 @@ struct ExpertScales {
 /// swiglu_clamp for rows that each hold n gate values and then n up values; out has n values a row.
 void swiglu_clamp_rows(const float* gate_up, float* out, int n, int rows, float limit, void* stream,
                        const ExpertScales* scales = nullptr);
+#if defined(STRATA_USE_HIP)
+void situ_rows(const float* gate_up, float* out, int n, int rows, float beta, float linear_beta,
+               void* stream, const ExpertScales& scales);
+#endif
 /// out = gelu(gate) * up, with the tanh form of GELU that ggml's CUDA backend computes.
 void geglu(const float* gate, const float* up, float* out, int n, void* stream);
 /// geglu for rows that each hold n gate values and then n up values; out has n values a row.

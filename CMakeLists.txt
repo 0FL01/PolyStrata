@@ -2137,6 +2137,10 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
                                       src/poly/lfm2moe.cpp src/poly/flint.cpp src/poly/kolibri1.cpp
                                       src/poly/cpu_experts.cpp src/poly/kernels.cu src/poly/kernels_dsv4.cu
                                       src/core/conversation_memory.cpp)
+  if(STRATA_ENABLE_HIP)
+    target_sources(strata-poly PRIVATE src/poly/inkling2.cu)
+    target_sources(poly_draft_race_test PRIVATE src/poly/inkling2.cu)
+  endif()
   target_include_directories(poly_draft_race_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
                                                          ${_strata_gpu_include_directories})
   target_link_libraries(poly_draft_race_test PRIVATE strata_poly_mmq strata_kernels strata_spec ggml-cpu ggml-base
