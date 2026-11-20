@@ -61,7 +61,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
 from serve.frontend import (INKLING_MODEL, INKLING_STOP, THINK_END, ChatTemplate, Event,  # noqa: E402
                             InklingOutputParser, OutputParser, anthropic_to_messages,
-                            forced_call, gemma_model_turn, images_of, literal_tags, mark_think_literals,
+                            forced_call, gemma_model_turn, images_of, inkling_literal_tags, literal_tags, mark_think_literals,
                             openai_to_messages, tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
@@ -4399,14 +4399,17 @@ class Service:
         A control token's text (<|im_start|>, <|im_end|>, <|endoftext|>, ...) inside a message is text as well: only
         the control tokens the template writes are control tokens.  `store=False` (a token count) reuses the kept
         prompts without adding or replacing one."""
-        marked, marked_tools, changed = mark_think_literals(messages, tools, self.literals)
         inkling = self.call_format == "inkling"
+        tags = inkling_literal_tags(messages, tools, self.literals) if inkling else self.literals
+        marked, marked_tools, changed = mark_think_literals(messages, tools, tags)
+        json_literals = None
         if inkling:
-            kwargs = {**kwargs, "_strata_json_literals": self.literals}
+            json_literals = {"tags": tags, "changed": False}
+            kwargs = {**kwargs, "_strata_json_literals": json_literals}
         prompt = self.render_prompt(marked, marked_tools, kwargs)
         plain = ()
-        if changed or inkling:                  # Inkling's Jinja JSON filter can also have marked a quoted key
-            prompt, plain = unmark_think_literals(prompt, self.literals)
+        if changed or (json_literals and json_literals["changed"]):  # Jinja can also have marked a quoted JSON key
+            prompt, plain = unmark_think_literals(prompt, tags)
         if self.prompts is not None:            # #567: only what follows the last special shared with a recent prompt
             return self.prompts.encode(prompt, plain, store)
         return self.tok.encode(prompt, parse_special=True, plain=plain) if plain else \
@@ -4658,21 +4661,24 @@ class Service:
 
         def head_ids(msgs):
             """The ids the rendered `msgs` start with (a message's trailing marker cut at PREFIX_END when it is there)."""
-            marked, marked_tools, changed = mark_think_literals(msgs, tools, self.literals)
+            inkling = self.call_format == "inkling"
+            tags = inkling_literal_tags(msgs, tools, self.literals) if inkling else self.literals
+            marked, marked_tools, changed = mark_think_literals(msgs, tools, tags)
+            json_literals = None
             effort = kwargs.get("reasoning_effort")
             off = kwargs.get("enable_thinking") is False        # render_prompt's rule for #458's effort_end
             kw = ({k: v for k, v in kwargs.items() if k not in ("reasoning_effort", "enable_thinking")}
                   if self.effort_end and (off or effort not in (None, "", "xhigh", "high")) else dict(kwargs))
-            inkling = self.call_format == "inkling"
             if inkling:
-                kw["_strata_json_literals"] = self.literals
+                json_literals = {"tags": tags, "changed": False}
+                kw["_strata_json_literals"] = json_literals
             kw["add_generation_prompt"] = False
             text = self.template.render(marked, tools=marked_tools, **kw)
             cut = text.find(self.PREFIX_END)
             if cut >= 0:
                 text = text[:cut]
-            if changed or inkling:
-                text, plain = unmark_think_literals(text, self.literals)
+            if changed or (json_literals and json_literals["changed"]):
+                text, plain = unmark_think_literals(text, tags)
                 return self.tok.encode(text, parse_special=True, plain=plain)
             return self.tok.encode(text, parse_special=True)
 

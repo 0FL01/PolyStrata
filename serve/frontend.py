@@ -56,8 +56,12 @@ class ChatTemplate:
         def tojson(ctx, x, ensure_ascii=False, indent=None, separators=None, sort_keys=False):
             text = json.dumps(x, ensure_ascii=ensure_ascii, indent=indent, separators=separators, sort_keys=sort_keys)
             # Inkling's JSON keys can quote native markers too. Mark after serialization, not before dictsort.
-            tags = ctx.get("_strata_json_literals")
-            return _mark(text, tags) if tags else text
+            literals = ctx.get("_strata_json_literals")
+            if literals is None:
+                return text
+            marked = _mark(text, literals["tags"])
+            literals["changed"] |= marked != text
+            return marked
 
         env = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True, extensions=["jinja2.ext.loopcontrols"])
         env.filters["tojson"] = tojson
@@ -295,6 +299,29 @@ def literal_tags(controls) -> dict[str, str]:
     tags = {**LITERAL_TAGS, **{c: chr(CONTROL_MARK0 + k) for k, c in enumerate(c for c in controls
                                                                                 if c not in LITERAL_TAGS)}}
     return dict(sorted(tags.items(), key=lambda t: -len(t[0])))
+
+
+def inkling_literal_tags(messages, tools, tags):
+    """A quoted marker's placeholder must not already be text, including inside a JSON key."""
+    def strings(value):
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                yield from strings(key)
+                yield from strings(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from strings(item)
+
+    inputs = list(strings([messages, tools]))
+    marks = re.compile("|".join(map(re.escape, tags.values())))
+    if not any(marks.search(text) for text in inputs):
+        return tags
+    while True:
+        prefix = "\U000F0000" + uuid.uuid4().hex + "\U000F0000"
+        if not any(prefix in text for text in inputs):
+            return {tag: prefix + mark for tag, mark in tags.items()}
 
 
 def _mark(text: str, tags: dict[str, str] = LITERAL_TAGS) -> str:
