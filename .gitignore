@@ -19,6 +19,12 @@ __pycache__/
 # plan v0.3 P1 (repository hygiene, review E1): profiler captures and large diagnostic dumps stay out of git.
 *.nsys-rep
 
+# Local RDNA2 research artifacts
+/rdna2-rnd/upstream/
+/rdna2-rnd/backup/
+/rdna2-rnd/evidence/raw/
+/rdna2-rnd/test-*.json
+
 # Pi harness metadata (local session state, not project source)
 *.sqlite
 *.npz
