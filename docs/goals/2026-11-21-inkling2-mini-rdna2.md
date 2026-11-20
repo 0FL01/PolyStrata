@@ -1,6 +1,6 @@
 # Goal: Inkling-2-Mini on RDNA2
 
-Status: active
+Status: complete
 
 Source: user requests of 2026-11-21: native support in this fork, RDNA2 only, Q8_0 K/V, single-user agent use, commit and push, replace the production model after success.
 
@@ -18,8 +18,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 
 - **R1 — Native inference.** The exact local Unsloth XL GGUF loads and generates correctly on the current machine, with Q8_0 for both K and V. Evidence: guarded HIP gfx1031 build and real forced-token parity against a reference with the correct joined expert scales; compare Q8_0 to FP16, chunked prefill to sequential decode, and check the SWA boundary and checkpoint/resume. **Status: verified for the tested inputs.**
 - **R2 — One agent at a time.** The existing HTTP server provides ordinary text, reasoning and JSON tool calls; the client calls a harmless tool and feeds its result back by the returned ID. Evidence: token ID and template replay parity, streaming tool arguments with a stable ID, and a live streamed tool round trip and cancel-then-fresh request on the exact GGUF, concurrency 1. **Status: verified.**
-- **R3 — Production replacement.** After R1/R2, switch the existing user unit to Inkling only. Evidence: `systemctl --user is-active strata`, the authenticated model listing and one real request on the production port. Keep the current loopback bind and auth; keep old files outside the active configuration for rollback. **Status: pending.**
-- **R4 — Publish.** Commit task-only changes and push them to this fork. Evidence: remote ref matches the checked local commit. **Status: pending.**
+- **R3 — Production replacement.** After R1/R2, switch the existing user unit to Inkling only. Evidence: `systemctl --user is-active strata`, the authenticated model listing and one real request on the production port. Keep the current loopback bind and auth; keep old files outside the active configuration for rollback. **Status: verified.**
+- **R4 — Publish.** Commit task-only changes and push them to this fork. Evidence: remote ref matches the checked local commit. **Status: verified.**
 
 ### Constraints and non-goals
 
@@ -41,14 +41,7 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
 
 Engine review confirmed the physical ownership, stale ring rows on rewind, and CPU/GPU/activation gates. It flagged a possible attention scale mismatch; the exact #32695 overload (`llama-graph.cpp:4481–4514` at `6196d980`) puts `bias − sink` in the mask, not in the scaled QK product. This agrees with vLLM: `QK/√128 + bias` with the projected sink as a separate denominator term. Do not patch a second scaling into that reference. The joined expert scale correction still applies. The normal single-agent path keeps checkpoints, so include the active SWA rows and all convolution histories in each snapshot.
 
-## Current Checkpoint
-
-- Closes: R3 and R4.
-- Next action: publish the tested frontend, isolate the Inkling config from the Qwen configs, and switch the existing unit under the guard.
-- Expected evidence: active service on the same authenticated loopback port, only Inkling in the model list, a real reply, and a matching remote ref.
-- Stop or roll back if: the new service does not become ready or a guard fault appears.
-
-## Current State
+## Verification
 
 - Exact local file: 17,629,759,456 bytes. GGUF directory checked: 734 tensors, 20 NVFP4 joined expert layers and four Q8_0 expert layers. The old installed binary rejects `inkling2` before `READY`.
 - `cmake --build build-poly-hip --target strata-poly -j 4` passed. First guarded run on the RX 6700 XT, default Q8_0, `--max-context 128 --prompt-batch 32 --vram-reserve-mib 3072 --kv-whole --expert-swaps 0 --threads 8 --tokens 70904,16,81554 --max-new 5 --top-probs 5`, generated IDs `91927,68026,198,68052,198`. It held 973/3072 experts in VRAM, observed 29.5% expert hits on GPU and 4.05 generated tokens/s in that single short run. No guard fault. This is execution evidence, not yet oracle parity or an agent workload measurement.
@@ -57,9 +50,10 @@ Engine review confirmed the physical ownership, stale ring rows on rewind, and C
 - Guarded OpenAI Chat Completions SSE run at configured context 32,768, prompt batch 32, reserve 3072 MiB, one sequence: `lookup_card` streamed valid `{"key":"blue"}` with a stable call ID, tool-result replay preserved that ID and returned `cobalt-73`, and a separate arithmetic response had distinct reasoning and text. Closing a long stream after the first text delta logged `disconnect, cancel=True`; the next request returned `MARBLE`. Decode was 14.1–15.9 tokens/s for those five short requests, with 3042 MiB minimum free VRAM and no guard fault. `poly_workers_test` passed.
 - The live tool and disconnect check passed again with hashes of the final engine and Python files recorded at both ends. The model can emit reasoning even with minimum requested effort. `tool_choice` accepts `auto` and `none`; named or required choices are rejected rather than injecting another model's call syntax.
 - After resolving the HIP KV default before model geometry is loaded, the final Inkling binary repeated the original Q8_0 top-5 trace. On the old Qwen3.6 UD-IQ4_NL, default and explicit FP16 produced the same four greedy IDs and printed top-3 probabilities with all experts on CPU. The first comparison with different resident expert counts was not used as evidence.
-- The native commit `ce9e9b28` was pushed and verified on `origin/feat/inkling2-rdna2`; R4 still includes the frontend and goal changes.
-- Base: `8d0a6dea`. `strata.service` was inactive and disabled when checked. No production change made.
+- The HIP build of `poly_draft_race_test` linked; the optional model test itself was not run. CUDA, SYCL and Metal were not built on this host.
 
 ## Completion
 
-Pending R1–R4 and the closure check.
+- `strata.service` is active on `127.0.0.1:8080`. The authenticated model list contains only `inkling-2-mini`, unauthenticated access returns 401, and the production text request returned `MARBLE`. Guard passed with 3057 MiB minimum free VRAM. The unit file and its previously disabled autostart were left unchanged.
+- The active configuration is `~/.config/strata/inkling2-mini/strata-inkling-2-mini.json`. It uses the tested binary and embedded tokenizer export, Q8_0 K/V, context 32,768, one sequence and no replicas. Qwen is not in the active config directory; its files are kept for rollback. The previous `server.env` is saved as `~/.config/strata/inkling2-mini/server.env.rollback`.
+- Native `ce9e9b28` and frontend `23f603f4` were pushed to `origin/feat/inkling2-rdna2`; the remote ref was verified against the tested application commit. No weights, logs, credentials or local deployment files are in Git.
