@@ -39,8 +39,9 @@ size_t plain_partial_floats(int tiles);
 /// The scores, softmax, values and gate as four launches, with as many tokens a launch as `tiles` allows.
 void attend_plain(const Attend& a, float* scores, float* partial, int tiles, cudaStream_t st);
 
-/// The same in one launch (STRATA_INKLING_FLASH=1, prompt batches): 32 tokens of one K/V group a block, keys 32 at
-/// a time with an online softmax, FP32 products of the same dequantized values; only the order of the sums differs.
+/// The same in one launch (STRATA_INKLING_FLASH=1, prompt batches): 16 tokens of one K/V group a block, keys 16 at
+/// a time with an online softmax in base 2, FP32 products of the same dequantized values; the order of the sums and
+/// the exponential's rounding differ.
 void attend_flash(const Attend& a, cudaStream_t st);
 
 }  // namespace strata::poly::inkling

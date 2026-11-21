@@ -64,7 +64,7 @@ private:
     bool flash_ = false;   // STRATA_INKLING_FLASH=1 (load_geometry())
 
     float *q_ = nullptr, *k_ = nullptr, *v_ = nullptr, *att_ = nullptr, *gate_ = nullptr, *rel_ = nullptr,
-          *sink_ = nullptr, *taps_ = nullptr, *scores_ = nullptr, *partial_ = nullptr;
+          *sink_ = nullptr, *taps_ = nullptr, *scores_ = nullptr, *partial_ = nullptr, *halo_ = nullptr;
     std::array<float*, 3> input_{};
     std::array<float*, 4> depth_{};
     float *prelude_ = nullptr, *bank0_ = nullptr, *bank1_ = nullptr, *msg_ = nullptr, *pair_ = nullptr,
@@ -73,6 +73,7 @@ private:
     bool q8() const { return opt_.kv_format == KvFmt::kQ8_0; }
     bool messages() const { return visit_ >= kStart + kCore && visit_ < kCoda; }
     size_t kv_bytes() const;
+    void conv(float* x, float* state, const float* w, const float* dynamic, int width, int n);
     void store(const float* x, Cache& c, int side, int n);
     void attention(const Block& b, int n);
     void depth_mix(const float* query, float* dst, int first, int n);

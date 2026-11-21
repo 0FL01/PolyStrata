@@ -112,24 +112,68 @@ __global__ void gate_kernel(const float* parts, int count, const float* gate, fl
 
 // attend_flash(): a block takes kTokens tokens of one K/V group. Eight threads own a token: its 3 query heads (which
 // share the keys, the mask and the distances) over an eighth of the head's values each, float4 w = lane + 8 i, so
-// that 8 threads read 128 consecutive bytes of a key. Keys come kKeys at a time, dequantized once into shared memory
-// as the plain kernels dequantize them, with the slice of the relative table their distances need; the 8 parts of
-// a score meet by shuffles. A block of keys starts at a multiple of kKeys, so a token's keys fall into the same
-// blocks whatever tokens share its launch; a block it attends none of leaves its sums as they were.
-constexpr int kTokens = 32, kKeys = 16, kSplit = 8, kFlashThreads = kSplit * kTokens;
+// that 8 threads read 128 consecutive bytes of a key. Keys come kKeys at a time, loaded a block ahead into registers
+// and dequantized once into shared memory as the plain kernels dequantize them, with the slice of the relative table
+// their distances need; the 8 parts of a score meet by DPP8 moves. A block of keys starts at a multiple of kKeys, so
+// a token's keys fall into the same blocks whatever tokens share its launch; a block it attends none of leaves its
+// sums as they were. On RX 6700 XT, 16 tokens and 16 keys beat 32 and 8 tokens and 32 keys (which spilled).
+constexpr int kTokens = 16, kKeys = 16, kSplit = 8, kFlashThreads = kSplit * kTokens;
 constexpr int kVec = kHead / 4 / kSplit;               // float4s of a head a thread owns
 constexpr int kRelPart = kRelative / kSplit;           // relative terms a thread owns
 constexpr int kSlice = kTokens + kKeys - 1;
+constexpr float kLog2e = 1.4426950408889634f;   // the softmax runs in powers of 2: scores and the sink times log2(e)
+// the sink in those units, finite: a running maximum of +-inf would make exp2f(inf - inf)
+__device__ float sink2(float x) { return fminf(fmaxf(x * kLog2e, -FLT_MAX), FLT_MAX); }
 
-template <bool Q8> __device__ float4 kv4(KvView c, size_t at) {   // at: a multiple of 4
-    if constexpr (Q8) {
-        const char4 x = *reinterpret_cast<const char4*>(c.data + at);
-        const float s = __half2float(reinterpret_cast<const __half*>(c.scales)[at / 32]);
-        return make_float4((float) x.x * s, (float) x.y * s, (float) x.z * s, (float) x.w * s);
+// A thread's share of a block of keys as the cache holds it, loaded a block ahead (flash_kernel): kLoads float4s of
+// K and of V, as codes and their scales (Q8_0) or as halves.
+constexpr int kLoads = kKeys * (kHead / 4) / kFlashThreads;
+template <bool Q8> struct Raw;
+template <> struct Raw<true> {
+    char4 k[kLoads], v[kLoads];
+    __half ks[kLoads], vs[kLoads];
+};
+template <> struct Raw<false> {
+    uint2 k[kLoads], v[kLoads];
+};
+
+template <bool Q8> __device__ void fetch(Raw<Q8>& raw, KvView k, KvView v, int64_t kb, int64_t kmin, int64_t kmax,
+                                         int ring, int g, int tid) {
+#pragma unroll
+    for (int i = 0; i < kLoads; ++i) {
+        const int at_i = tid + i * kFlashThreads, c = at_i / (kHead / 4), w = at_i % (kHead / 4);
+        const int64_t key = kb + c;
+        const bool in = key >= kmin && key <= kmax;   // no stale or unwritten rows: their weight is 0
+        const size_t at = in ? ((size_t) (ring ? key % ring : key) * kKv + g) * kHead + 4 * w : 0;
+        if constexpr (Q8) {
+            raw.k[i] = in ? *reinterpret_cast<const char4*>(k.data + at) : make_char4(0, 0, 0, 0);
+            raw.v[i] = in ? *reinterpret_cast<const char4*>(v.data + at) : make_char4(0, 0, 0, 0);
+            raw.ks[i] = in ? reinterpret_cast<const __half*>(k.scales)[at / 32] : __float2half(0.f);
+            raw.vs[i] = in ? reinterpret_cast<const __half*>(v.scales)[at / 32] : __float2half(0.f);
+        } else {
+            raw.k[i] = in ? *reinterpret_cast<const uint2*>(reinterpret_cast<const __half*>(k.data) + at) : make_uint2(0, 0);
+            raw.v[i] = in ? *reinterpret_cast<const uint2*>(reinterpret_cast<const __half*>(v.data) + at) : make_uint2(0, 0);
+        }
     }
-    const __half* h = reinterpret_cast<const __half*>(c.data) + at;
-    const __half2 a = *reinterpret_cast<const __half2*>(h), b = *reinterpret_cast<const __half2*>(h + 2);
-    return make_float4(__low2float(a), __high2float(a), __low2float(b), __high2float(b));
+}
+
+template <bool Q8> __device__ float4 unpack(const Raw<Q8>& raw, int i, bool value) {
+    if constexpr (Q8) {
+        const char4 x = value ? raw.v[i] : raw.k[i];
+        const float s = __half2float(value ? raw.vs[i] : raw.ks[i]);
+        return make_float4((float) x.x * s, (float) x.y * s, (float) x.z * s, (float) x.w * s);
+    } else {
+        const uint2 x = value ? raw.v[i] : raw.k[i];
+        const __half2 a = *reinterpret_cast<const __half2*>(&x.x), b = *reinterpret_cast<const __half2*>(&x.y);
+        return make_float4(__low2float(a), __high2float(a), __low2float(b), __high2float(b));
+    }
+}
+
+// lane ^ X within each group of 8 lanes, as one VALU move (DPP8, gfx10 and later) rather than through LDS
+template <int X> __device__ float xor8(float v) {
+    constexpr int sel = (0 ^ X) | (1 ^ X) << 3 | (2 ^ X) << 6 | (3 ^ X) << 9 | (4 ^ X) << 12 | (5 ^ X) << 15 |
+                        (6 ^ X) << 18 | (7 ^ X) << 21;
+    return __int_as_float(__builtin_amdgcn_mov_dpp8(__float_as_int(v), sel));
 }
 
 template <bool Q8>
@@ -158,26 +202,23 @@ flash_kernel(const float* __restrict__ q, const float* __restrict__ rel, const f
             o[r][4 * i] = o[r][4 * i + 1] = o[r][4 * i + 2] = o[r][4 * i + 3] = 0.f;
         }
 #pragma unroll
-        for (int i = 0; i < kRelPart; ++i) rr[r][i] = rel[(qh0 + r) * kRelative + part * kRelPart + i];
+        for (int i = 0; i < kRelPart; ++i) rr[r][i] = rel[(qh0 + r) * kRelative + part * kRelPart + i] * kLog2e;
         // the sink's term, exp(sink - m), joins l at the end; m stays finite, so masked keys give exp(-inf) = 0
-        m[r] = fmaxf(sink[qh0 + r], -FLT_MAX);
+        m[r] = sink2(sink[qh0 + r]);
         l[r] = lc[r] = 0.f;
     }
 
+    Raw<Q8> raw;
+    fetch<Q8>(raw, k, v, kmin / kKeys * kKeys, kmin, kmax, ring, g, tid);
     for (int64_t kb = kmin / kKeys * kKeys; kb <= kmax; kb += kKeys) {
         __syncthreads();   // the block before has been read
-        for (int i = tid; i < kKeys * (kHead / 4); i += kFlashThreads) {
-            const int c = i / (kHead / 4), w = i % (kHead / 4);
-            const int64_t key = kb + c;
-            float4 kx = make_float4(0.f, 0.f, 0.f, 0.f), vx = kx;   // no stale or unwritten rows: their weight is 0
-            if (key >= kmin && key <= kmax) {
-                const size_t at = ((size_t) (ring ? key % ring : key) * kKv + g) * kHead + 4 * w;
-                kx = kv4<Q8>(k, at);
-                vx = kv4<Q8>(v, at);
-            }
-            ks[c][w] = kx;
-            vs[c][w] = vx;
+#pragma unroll
+        for (int i = 0; i < kLoads; ++i) {
+            const int at_i = tid + i * kFlashThreads, c = at_i / (kHead / 4), w = at_i % (kHead / 4);
+            ks[c][w] = unpack<Q8>(raw, i, false);
+            vs[c][w] = unpack<Q8>(raw, i, true);
         }
+        if (kb + kKeys <= kmax) fetch<Q8>(raw, k, v, kb + kKeys, kmin, kmax, ring, g, tid);   // under this block's work
         // ts[j]: the table row of distance pos + t0 - (kb + kKeys - 1) + j, zero past the bias's extent
         const int64_t dlo = pos + t0 - (kb + kKeys - 1);
         for (int i = tid; i < kSlice * kRelative; i += kFlashThreads) {
@@ -204,7 +245,7 @@ flash_kernel(const float* __restrict__ q, const float* __restrict__ rel, const f
             const float* tr = ts + (tl + kKeys - 1 - c) * kRelative + part * kRelPart;
 #pragma unroll
             for (int r = 0; r < kGroup; ++r) {
-                float score = dot[r] * 0.08838834764831845f;
+                float score = dot[r] * (0.08838834764831845f * kLog2e);
 #pragma unroll
                 for (int i = 0; i < kRelPart; ++i) score = fmaf(rr[r][i], tr[i], score);
                 s[r][c] = score;
@@ -216,15 +257,15 @@ flash_kernel(const float* __restrict__ q, const float* __restrict__ rel, const f
 #pragma unroll
             for (int c = 0; c < kKeys; ++c) {
                 float x = s[r][c];
-                x += __shfl_xor(x, 1, 32);
-                x += __shfl_xor(x, 2, 32);
-                x += __shfl_xor(x, 4, 32);
+                x += xor8<1>(x);
+                x += xor8<2>(x);
+                x += xor8<4>(x);
                 const int64_t key = kb + c;
                 s[r][c] = key < lo || key > p ? -INFINITY : x;
                 top = fmaxf(top, s[r][c]);
             }
             // a block the row attends none of scales by exp(0) and adds exp(-inf): it changes nothing
-            const float mn = fmaxf(m[r], top), shrink = expf(m[r] - mn);
+            const float mn = fmaxf(m[r], top), shrink = exp2f(m[r] - mn);
             m[r] = mn;
             l[r] *= shrink;
             lc[r] *= shrink;
@@ -235,7 +276,7 @@ flash_kernel(const float* __restrict__ q, const float* __restrict__ rel, const f
             float sum = 0.f;
 #pragma unroll
             for (int c = 0; c < kKeys; ++c) {
-                s[r][c] = expf(s[r][c] - mn);
+                s[r][c] = exp2f(s[r][c] - mn);
                 sum += s[r][c];
             }
             const float y = sum - lc[r], next = l[r] + y;
@@ -260,7 +301,7 @@ flash_kernel(const float* __restrict__ q, const float* __restrict__ rel, const f
     if (!live) return;
 #pragma unroll
     for (int r = 0; r < kGroup; ++r) {
-        l[r] += expf(sink[qh0 + r] - m[r]);
+        l[r] += exp2f(sink2(sink[qh0 + r]) - m[r]);
         const size_t at = (qh0 + r) * kHead;
 #pragma unroll
         for (int i = 0; i < kVec; ++i)

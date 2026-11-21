@@ -108,6 +108,50 @@ __global__ void conv_kernel(float* x, float* state, const float* w, const float*
     h[2] = c;
 }
 
+// A prompt batch's convolution in spans of kConvSpan tokens, a thread a channel and span: conv_halo_kernel keeps the
+// three raw inputs before each span (the state's before the first) and conv_span_kernel computes each span as
+// conv_kernel does, with the same sums, so the results are conv_kernel's bit for bit.
+constexpr int kConvSpan = 64;
+__global__ void conv_halo_kernel(const float* x, const float* state, float* halo, int width) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x, span = blockIdx.y;
+    if (i >= width) return;
+    float* to = halo + ((size_t) span * width + i) * 3;
+    for (int j = 0; j < 3; ++j) {
+        const int t = span * kConvSpan - 3 + j;
+        to[j] = t >= 0 ? x[(size_t) t * width + i] : state[3 * i + 3 + t];
+    }
+}
+
+__global__ void conv_span_kernel(float* x, float* state, const float* halo, const float* w, const float* dynamic,
+                                 int width, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x, span = blockIdx.y;
+    if (i >= width) return;
+    const float* from = halo + ((size_t) span * width + i) * 3;
+    float a = from[0], b = from[1], c = from[2];
+    w += 4 * i;
+    const float scale = dynamic ? 1.f / 3.f : 0.4472135954999579f;
+    const int first = span * kConvSpan, end = min(n, first + kConvSpan);
+    for (int t = first; t < end; ++t) {
+        const size_t at = (size_t) t * width + i;
+        const float d = x[at];
+        float s = a * w[0] + b * w[1] + c * w[2] + d * w[3];
+        if (dynamic) {
+            const float* p = dynamic + 4 * (t * (width / 128) + i / 128);
+            s += d * p[0] + c * p[1] + b * p[2] + a * p[3];
+        }
+        x[at] = (d + s) * scale;
+        a = b;
+        b = c;
+        c = d;
+    }
+    if (end == n) {
+        float* h = state + 3 * i;
+        h[0] = a;
+        h[1] = b;
+        h[2] = c;
+    }
+}
+
 __global__ void head_norm_kernel(float* x, const float* w, int width, int heads, float clip, float eps,
                                  int64_t pos, int floor, float alpha) {
     __shared__ float waves[kThreads / 32];
@@ -355,6 +399,7 @@ void Inkling2::assign_scratch() {
     rel_ = fbuf(n * kHeads * kRelative);
     sink_ = fbuf(n * kHeads);
     taps_ = fbuf(n * kKv * kTaps);
+    halo_ = fbuf((size_t) div_up(rows_, kConvSpan) * 3 * kWidth);
     // A tile takes kValueTile scores and one kHead-wide partial value vector per query head. Keep room
     // for a single query at the configured limit, but share that room across queries on shorter prefixes.
     constexpr int target_tiles = (1 << 20) / (kHeads * kValueTile);
@@ -372,6 +417,16 @@ void Inkling2::assign_scratch() {
     rank_ = fbuf(n * kRank);
     gain_ = fbuf(width);
     forget_ = fbuf(width);
+}
+
+void Inkling2::conv(float* x, float* state, const float* w, const float* dynamic, int width, int n) {
+    if (n <= kConvSpan) {
+        conv_kernel<<<div_up(width, kThreads), kThreads, 0, cs(st_)>>>(x, state, w, dynamic, width, n);
+        return;
+    }
+    const dim3 grid(div_up(width, kThreads), div_up(n, kConvSpan));
+    conv_halo_kernel<<<grid, kThreads, 0, cs(st_)>>>(x, state, halo_, width);
+    conv_span_kernel<<<grid, kThreads, 0, cs(st_)>>>(x, state, halo_, w, dynamic, width, n);
 }
 
 void Inkling2::store(const float* x, Cache& c, int side, int n) {
@@ -477,12 +532,12 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
     lin(b.gate, xq, gate_, n, shared);
 
     float* hist = state_ + (size_t) visit_ * kConvFloats;
-    const auto conv = [&](float* x, float* state, const Dev& w, const Dev& dyn, const float* input) {
+    const auto kv_conv = [&](float* x, float* state, const Dev& w, const Dev& dyn, const float* input) {
         if (!swa) lin(dyn, input, taps_, n);
-        conv_kernel<<<div_up(kKey, kThreads), kThreads, 0, cs(st_)>>>(x, state, fp(w), swa ? nullptr : taps_, kKey, n);
+        conv(x, state, fp(w), swa ? nullptr : taps_, kKey, n);
     };
-    conv(k_, hist, b.kconv, b.kproj, xk);
-    conv(v_, hist + 3 * kKey, b.vconv, b.vproj, xv);
+    kv_conv(k_, hist, b.kconv, b.kproj, xk);
+    kv_conv(v_, hist + 3 * kKey, b.vconv, b.vproj, xv);
     const int floor = swa ? 0 : floor_;
     const auto heads = [&](float* x, const float* w, int width, int count, float clip, int log_floor) {
         head_norm_kernel<<<dim3(count, n), kThreads, 0, cs(st_)>>>(x, w, width, count, clip, rms_eps_, pos_, log_floor,
@@ -496,8 +551,7 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
     dbg("Kcur", visit_, k_, kKey);
     attention(b, n);
     lin(b.o, att_, ao_, n);
-    conv_kernel<<<div_up(kWidth, kThreads), kThreads, 0, cs(st_)>>>(ao_, hist + 6 * kKey, fp(b.aconv), nullptr,
-                                                                   kWidth, n);
+    conv(ao_, hist + 6 * kKey, fp(b.aconv), nullptr, kWidth, n);
     if (il % kBlock == 0) {
         axpy(r_, 1.f, depth_[depth_n_++], n * kWidth, false, st_);
         axpy(ao_, 1.f, r_, n * kWidth, false, st_);
@@ -511,8 +565,7 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
 
 void Inkling2::layer_tail(Layer&, int il, int n) {
     float* hist = state_ + (size_t) visit_ * kConvFloats + 6 * kKey + 3 * kWidth;
-    conv_kernel<<<div_up(kWidth, kThreads), kThreads, 0, cs(st_)>>>(fo_, hist, fp(blocks_[il].fconv), nullptr,
-                                                                   kWidth, n);
+    conv(fo_, hist, fp(blocks_[il].fconv), nullptr, kWidth, n);
     axpy(fo_, 1.f, r_, n * kWidth, true, st_);
     dbg("l_out", visit_, r_, kWidth);
 }
