@@ -2,6 +2,7 @@
 // the three core traversals reuse those weights and expert slots, not the sequence state.
 #include "inkling2.hpp"
 
+#include "inkling_attend.hpp"
 #include "runtime.hpp"
 #include "strata/kernels/gfx_arch.hpp"
 #include "strata/kernels/native_mmvq.hpp"
@@ -11,6 +12,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 
@@ -117,79 +120,6 @@ __global__ void head_norm_kernel(float* x, const float* w, int width, int heads,
     if (i < width) dest[i] = v * s * tau;
 }
 
-struct KvRead {
-    const uint8_t* data;
-    const uint16_t* scales;
-};
-
-template <bool Q8> __device__ float kv_at(KvRead cache, size_t i) {
-    if constexpr (Q8)
-        return (float) reinterpret_cast<const int8_t*>(cache.data)[i] *
-               __half2float(reinterpret_cast<const __half*>(cache.scales)[i / 32]);
-    return __half2float(reinterpret_cast<const __half*>(cache.data)[i]);
-}
-
-__device__ int64_t oldest(int64_t end, int window) { return window > 0 && end > window ? end - window : 0; }
-
-// A wave computes one score, with 4 values from a 128-wide head per lane. The FP32 query is not quantized.
-template <bool Q8> __global__ void scores_kernel(const float* q, const float* rel, const float* table, KvRead k,
-                                                 int64_t pos, int span, int window, int ring, float* scores) {
-    const int lane = threadIdx.x & 31, col = blockIdx.x * (kThreads / 32) + threadIdx.x / 32;
-    const int h = blockIdx.y, row = blockIdx.z;
-    const int64_t end = pos + row + 1, start = oldest(end, window), key = start + col;
-    if (key >= end) return;
-    const size_t qh = (size_t) row * 24 + h;
-    const size_t key_at = ((size_t) (ring ? key % ring : key) * 8 + h / 3) * 128;
-    float dot = 0.f;
-    for (int i = lane; i < 128; i += 32) dot += q[qh * 128 + i] * kv_at<Q8>(k, key_at + i);
-    const int64_t delta = end - 1 - key;
-    float score = dot * 0.08838834764831845f;
-    if (lane < 16 && delta < 1024) score += rel[qh * 16 + lane] * table[delta * 16 + lane];
-    score = wave_reduce<false>(score);
-    if (lane == 0) scores[qh * span + col] = score;
-}
-
-// The projected sink joins the softmax once per head and query and has no value vector.
-__global__ void probs_kernel(float* scores, const float* sink, int64_t pos, int span, int window) {
-    __shared__ float waves[kThreads / 32];
-    const int64_t end = pos + blockIdx.y + 1;
-    const int count = (int) (end - oldest(end, window));
-    const size_t h = (size_t) blockIdx.y * 24 + blockIdx.x;
-    float* dst = scores + h * span;
-    float top = sink[h];
-    for (int i = threadIdx.x; i < count; i += kThreads) top = fmaxf(top, dst[i]);
-    top = block_reduce<true>(top, waves);
-    float s = threadIdx.x == 0 ? expf(sink[h] - top) : 0.f;
-    for (int i = threadIdx.x; i < count; i += kThreads) s += (dst[i] = expf(dst[i] - top));
-    s = block_reduce(s, waves);
-    for (int i = threadIdx.x; i < count; i += kThreads) dst[i] /= s;
-}
-
-template <bool Q8> __global__ void values_kernel(const float* probs, KvRead v, int64_t pos, int span, int window,
-                                                 int ring, int parts, float* out) {
-    const int h = blockIdx.x, row = blockIdx.y, tile = blockIdx.z, d = threadIdx.x;
-    const int64_t end = pos + row + 1, start = oldest(end, window);
-    const size_t qh = (size_t) row * 24 + h;
-    const float* p = probs + qh * span;
-    const int count = (int) (end - start), first = tile * kValueTile;
-    const int last = min(first + kValueTile, count);
-    float sum = 0.f;
-    for (int i = first; i < last; ++i) {
-        const int64_t key = start + i;
-        const size_t at = ((size_t) (ring ? key % ring : key) * 8 + h / 3) * 128 + d;
-        sum += p[i] * kv_at<Q8>(v, at);
-    }
-    out[(qh * parts + tile) * 128 + d] = sum;
-}
-
-__global__ void gate_kernel(const float* parts, int count, const float* gate, float* out) {
-    const size_t h = (size_t) blockIdx.y * 24 + blockIdx.x;
-    const int d = threadIdx.x;
-    float sum = 0.f;
-    for (int i = 0; i < count; ++i) sum += parts[(h * count + i) * 128 + d];
-    out[h * 128 + d] = sum / (1.f + expf(-gate[h * 128 + d]));
-}
-
 }  // namespace
 
 void Inkling2::load_geometry() {
@@ -205,6 +135,9 @@ void Inkling2::load_geometry() {
         throw std::runtime_error("Inkling-2-Mini requires one sequence and one card, without draft or expert skipping");
     opt_.window = 1;
     opt_.draft = false;
+    const char* flash = std::getenv("STRATA_INKLING_FLASH");
+    flash_ = flash && flash[0] == '1' && flash[1] == '\0';
+    if (flash_) std::fputs("strata-poly: STRATA_INKLING_FLASH=1: fused attention for prompt batches\n", stderr);
     if (!q8() && opt_.kv_format != KvFmt::kFp16)
         throw std::runtime_error("Inkling-2-Mini supports Q8_0 or FP16 KV");
     load_shape();
@@ -427,8 +360,8 @@ void Inkling2::assign_scratch() {
     constexpr int target_tiles = (1 << 20) / (kHeads * kValueTile);
     attend_tiles_ = std::max(div_up(opt_.max_context, kValueTile),
                              std::min(target_tiles, rows_ * div_up(opt_.max_context, kValueTile)));
-    scores_ = fbuf((size_t) attend_tiles_ * kHeads * kValueTile);
-    partial_ = fbuf((size_t) attend_tiles_ * kQuery);
+    scores_ = fbuf(inkling::plain_score_floats(attend_tiles_));
+    partial_ = fbuf(inkling::plain_partial_floats(attend_tiles_));
     for (auto& x : input_) x = fbuf(width);
     for (auto& x : depth_) x = fbuf(width);
     prelude_ = fbuf(width);
@@ -461,28 +394,22 @@ void Inkling2::attention(const Block& b, int n) {
     store(k_, c, 0, n);
     store(v_, c, 1, n);
     const bool swa = local(visit_);
-    const int window = swa ? kWindow : 0, ring = swa ? ring_ : 0;
-    const KvRead k{c.planes[0].data, (const uint16_t*) c.planes[1].data};
-    const KvRead v{c.planes[2].data, (const uint16_t*) c.planes[3].data};
-    const int max_span = (int) (swa ? std::min<int64_t>(window, pos_ + n) : pos_ + n);
-    const int attend_rows = attend_tiles_ / div_up(max_span, kValueTile);
-    for (int at = 0; at < n; at += attend_rows) {
-        const int m = std::min(n - at, attend_rows);
-        const int64_t pos = pos_ + at;
-        const int span = (int) (swa ? std::min<int64_t>(window, pos + m) : pos + m);
-        const int parts = div_up(span, kValueTile);
-        const dim3 sg(div_up(span, kThreads / 32), kHeads, m), vg(kHeads, m, parts), hp(kHeads, m);
-        const size_t off = (size_t) at * kQuery, rh = (size_t) at * kHeads;
-        const auto launch = [&]<bool Q8>() {
-            scores_kernel<Q8><<<sg, kThreads, 0, cs(st_)>>>(q_ + off, rel_ + rh * kRelative, fp(b.table), k, pos,
-                                                            span, window, ring, scores_);
-            probs_kernel<<<hp, kThreads, 0, cs(st_)>>>(scores_, sink_ + rh, pos, span, window);
-            values_kernel<Q8><<<vg, kHead, 0, cs(st_)>>>(scores_, v, pos, span, window, ring, parts, partial_);
-        };
-        if (q8()) launch.template operator()<true>();
-        else launch.template operator()<false>();
-        gate_kernel<<<hp, kHead, 0, cs(st_)>>>(partial_, parts, gate_ + off, att_ + off);
-    }
+    inkling::Attend a;
+    a.q = q_;
+    a.rel = rel_;
+    a.table = fp(b.table);
+    a.sink = sink_;
+    a.gate = gate_;
+    a.k = {c.planes[0].data, (const uint16_t*) c.planes[1].data};
+    a.v = {c.planes[2].data, (const uint16_t*) c.planes[3].data};
+    a.pos = pos_;
+    a.n = n;
+    a.window = swa ? kWindow : 0;
+    a.ring = swa ? ring_ : 0;
+    a.out = att_;
+    // Prompt batches only: a token's answer and short calls keep the plain kernels and their sums.
+    if (flash_ && n >= kStageRows) inkling::attend_flash(a, cs(st_));
+    else inkling::attend_plain(a, scores_, partial_, attend_tiles_, cs(st_));
 }
 
 void Inkling2::depth_mix(const float* query, float* dst, int first, int n) {
