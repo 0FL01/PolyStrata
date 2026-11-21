@@ -23,6 +23,16 @@ void gemv_bf16(const uint16_t* w, const float* x, float* y, int n_in, int n_out,
 /// it, Inkling's STRATA_INKLING_DECODE=1): its sums go in another order than gemv_f32's.
 void gemv_f32_waves(const float* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows,
                     void* stream);
+/// Up to four gemv_f32_waves() products of the same shape in one launch, each its own w, x and y; every output is
+/// the one gemv_f32_waves() gives for its segment, to the bit.
+struct F32Segments {
+    static constexpr int kMost = 4;
+    const float* w[kMost] = {};
+    const float* x[kMost] = {};
+    float* y[kMost] = {};
+};
+void gemv_f32_waves_segments(const F32Segments& s, int count, int n_in, int n_out, int rows_per_x, int rows,
+                             void* stream);
 /// The same for the many rows of a prompt batch, as a cuBLAS product on the stream of `blas` (blas_create), one
 /// for each group of rows_per_x outputs.  It sums in another order than gemv_f32, so a row does not come out
 /// to the last bit as it does there.  Throws std::runtime_error.
@@ -45,6 +55,15 @@ void scale_rows(float* y, int64_t ld, int width, int rows, const int32_t* place,
 /// rows) may be null.  A row of y starts y_stride values after the one before it (0: n), so two calls can fill
 /// the two halves of rows twice as long.
 void rms_norm(const float* x, const float* w, float* y, int n, int rows, float eps, void* stream, int y_stride = 0);
+/// Up to four rms_norm() calls of the same shape (rows of n values, y_stride n) in one launch, each its own x, w and
+/// y; every row is the one rms_norm() gives, to the bit.
+struct NormSegments {
+    static constexpr int kMost = 4;
+    const float* x[kMost] = {};
+    const float* w[kMost] = {};
+    float* y[kMost] = {};
+};
+void rms_norm_segments(const NormSegments& s, int count, int n, int rows, float eps, void* stream);
 /// The threads of a block that sums over n values (rms_norm()'s among them).
 int sum_threads(int n);
 /// y = (x - mean) / sqrt(var + eps) * w + b.

@@ -1408,7 +1408,7 @@ void Engine::shrink_cache(size_t bytes) {
     };
     const auto held = [&](int il, int e) {
         const size_t i = (size_t) il * ne + (size_t) e;
-        return Held{recent_.empty() ? 0.f : recent_[i], (prior_.empty() ? 0 : prior_[i]) + use_[i], il, e};
+        return Held{recent_.empty() ? 0.f : recent_[i], weighed(il, (prior_.empty() ? 0 : prior_[i]) + use_[i]), il, e};
     };
     const auto more = [](const Held& a, const Held& b) {
         return a.recent != b.recent ? a.recent > b.recent : a.prior > b.prior;
@@ -1911,7 +1911,8 @@ void Engine::fill_expert_cache() {
         slot_max_ = std::max(slot_max_, bytes);
         for (int e = 0; e < n_expert_; ++e) {
             const size_t i = (size_t) il * n_expert_ + e;
-            const double used = (double) ((prior_.empty() ? 0 : prior_[i]) + use_[i]);
+            double used = (double) ((prior_.empty() ? 0 : prior_[i]) + use_[i]);
+            if (!use_w_.empty()) used *= use_weight(il);
             cands.push_back({il, e, bytes, used / (double) bytes});
             all += bytes;
         }
@@ -2298,7 +2299,8 @@ int Engine::grow_cache(size_t bytes, bool later) {
         for (int e = 0; e < n_expert_; ++e) {
             const size_t i = (size_t) il * n_expert_ + e;
             if (L.slot[(size_t) e] || (!coming_.empty() && coming_[i])) continue;
-            const double used = (double) ((prior_.empty() ? 0 : prior_[i]) + use_[i]);
+            double used = (double) ((prior_.empty() ? 0 : prior_[i]) + use_[i]);
+            if (!use_w_.empty()) used *= use_weight(il);
             cands.push_back({il, e, used / (double) L.slot_bytes});
         }
     }
@@ -2560,7 +2562,7 @@ void Engine::follow(int written) {
         for (int e = 0; e < n_expert_; ++e) {
             const size_t i = (size_t) il * ne + (size_t) e;
             const float r = recent_[i];
-            const int64_t p = prior_.empty() ? 0 : prior_[i];
+            const int64_t p = weighed(il, prior_.empty() ? 0 : prior_[i]);
             if (L.slot[(size_t) e]) put(out, {il, e, r, p}, less);
             else if (r >= kSwapMin && !coming_[i]) put(in, {il, e, r, p}, more);
         }
@@ -4188,7 +4190,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
                 // a block's guesses are not the answer's tokens: the cache is not filled by them
                 if (!block_pass_) {
                     ++use_[(size_t) il * n_expert_ + e];
-                    if (n_swap_ > 0) recent_[(size_t) il * n_expert_ + e] += 1.f;
+                    if (n_swap_ > 0) recent_[(size_t) il * n_expert_ + e] += use_weight(il);
                 }
                 // NVFP4's down scale goes on the weight (ExpertScales)
                 const float we = L.h_s_down.empty() ? w[k] : w[k] * L.h_s_down[e];

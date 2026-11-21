@@ -166,6 +166,24 @@ bool run(const Case& c, float* scores, float* partial, int tiles, bool timed) {
         cudaEventElapsedTime(&ms_flash, t0, t1);
         std::printf("%-26s plain %.3f ms, %s %.3f ms a call\n", "", ms_plain / kRuns, c.dec ? "decode" : "flash",
                     ms_flash / kRuns);
+        if (c.dec) {   // with the K/V out of the caches first, as a decode visit meets them (the card's 96 MB L3)
+            void* flush = nullptr;
+            constexpr size_t kFlush = size_t(256) << 20;
+            cudaMalloc(&flush, kFlush);
+            float cold = 0;
+            for (int i = 0; i < kRuns; ++i) {
+                cudaMemsetAsync(flush, i, kFlush);
+                cudaEventRecord(t0);
+                other();
+                cudaEventRecord(t1);
+                cudaEventSynchronize(t1);
+                float ms = 0;
+                cudaEventElapsedTime(&ms, t0, t1);
+                cold += ms;
+            }
+            std::printf("%-26s decode, cold caches %.3f ms a call\n", "", cold / kRuns);
+            cudaFree(flush);
+        }
         cudaEventDestroy(t0);
         cudaEventDestroy(t1);
     }
@@ -226,6 +244,7 @@ int main() {
     ok = run({"timed: window", 8192, 512, true, true}, scores, partial, tiles, true) && ok;
     ok = run({"timed: full at 4K", 4096, 512, false, true}, scores, partial, tiles, true) && ok;
     ok = run({"timed: full at 32K", 32768, 512, false, true}, scores, partial, tiles, true) && ok;
+    ok = run({"timed: decode at 200", 200, 1, true, true, 0.f, false, true}, scores, partial, tiles, true) && ok;
     ok = run({"timed: decode window", 8192, 1, true, true, 0.f, false, true}, scores, partial, tiles, true) && ok;
     ok = run({"timed: decode full at 16K", 16384, 1, false, true, 0.f, false, true}, scores, partial, tiles, true) && ok;
     ok = run({"timed: decode full at 190K", 190000, 1, false, true, 0.f, false, true}, scores, partial, tiles, true) &&

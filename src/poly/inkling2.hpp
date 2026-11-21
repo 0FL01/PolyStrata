@@ -72,9 +72,16 @@ private:
     bool decode_ = false;   // STRATA_INKLING_DECODE=1 (load_geometry())
     bool cpu_sum_ = false;  // moe_add() left the CPU experts' sum for layer_tail()
     bool fo_clean_ = false; // layer_tail() left fo_ 0 for the next layer's experts (moe_shared())
+    bool kv_stored_ = false;   // layer_head() stored the decode row's K and V (heads_kv_kernel) for attention()
     void* attq_ = nullptr;  // the attention's output as Q8_1 (attend_decode()), for the output projection
     void *kq8_ = nullptr, *vq8_ = nullptr;   // K's and V's own inputs as Q8_1 (project())
-    void project(const Block& b, const float* xk, const float* xv, bool shared_kv);
+    // heads(): the three streams' current rows, messages, norm pairs, ranks, normed inputs (one after the other)
+    // and those as Q8_1, for decode rows
+    float *s3cur_ = nullptr, *s3msg_ = nullptr, *s3pair_ = nullptr, *s3rank_ = nullptr, *s3in_ = nullptr;
+    void* s3q8_ = nullptr;
+    void project(const Block& b, const float* xq, const float* xk, const float* xv, bool shared_kv, const void* q8,
+                 const void* k8 = nullptr, const void* v8 = nullptr);
+    bool heads(const Block& b, int il, bool swa, bool loop, int n, const Dev* const* norm);
     bool fused(int n) const;   // decode_ and fewer rows than a prompt batch
     float* snap_of(float* state) const;
 

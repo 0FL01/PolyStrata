@@ -252,16 +252,25 @@ __global__ void bf16_to_f32_kernel(const uint16_t* __restrict__ w, float* __rest
     if (i < n) out[i] = ldw(w, i);
 }
 
-__global__ void rms_norm_kernel(const float* __restrict__ x, const float* __restrict__ w, float* y, int n,
-                                float eps, int y_stride) {
+__device__ __forceinline__ void rms_norm_row(const float* __restrict__ xr, const float* __restrict__ w, float* yr,
+                                             int n, float eps) {
     __shared__ float part[32];
-    const float* xr = x + size_t(blockIdx.x) * n;
-    float* yr = y + size_t(blockIdx.x) * y_stride;
     float ss = 0.0f;
     for (int i = threadIdx.x; i < n; i += blockDim.x) ss += xr[i] * xr[i];
     ss = block_sum(ss, part);
     const float scale = 1.0f / sqrtf(ss / float(n) + eps);
     for (int i = threadIdx.x; i < n; i += blockDim.x) yr[i] = w ? xr[i] * scale * w[i] : xr[i] * scale;
+}
+
+__global__ void rms_norm_kernel(const float* __restrict__ x, const float* __restrict__ w, float* y, int n,
+                                float eps, int y_stride) {
+    rms_norm_row(x + size_t(blockIdx.x) * n, w, y + size_t(blockIdx.x) * y_stride, n, eps);
+}
+
+// rms_norm_segments(): a segment a blockIdx.y, each row as rms_norm_kernel's
+__global__ void rms_norm_segments_kernel(NormSegments s, int n, float eps) {
+    const int g = blockIdx.y;
+    rms_norm_row(s.x[g] + size_t(blockIdx.x) * n, s.w[g], s.y[g] + size_t(blockIdx.x) * n, n, eps);
 }
 
 __global__ void layer_norm_kernel(const float* __restrict__ x, const float* __restrict__ w,
@@ -2691,9 +2700,9 @@ void gemv_f32(const float* w, const float* x, float* y, int n_in, int n_out, int
 namespace {
 
 // gemv_f32_waves(): L lanes of a wave take an output row, float4s L apart, and meet by xor shuffles inside their L.
-template <int L> __global__ void __launch_bounds__(256)
-gemv_waves_kernel(const float* __restrict__ w, const float* __restrict__ x, float* __restrict__ y, int n_in, int n_out,
-                  int rows_per_x) {
+template <int L> __device__ __forceinline__ void
+gemv_waves_body(const float* __restrict__ w, const float* __restrict__ x, float* __restrict__ y, int n_in, int n_out,
+                int rows_per_x) {
     const int lane = threadIdx.x % L, o = blockIdx.x * (256 / L) + threadIdx.x / L;
     const size_t tok = blockIdx.y;
     if (o >= n_out) return;
@@ -2710,10 +2719,16 @@ gemv_waves_kernel(const float* __restrict__ w, const float* __restrict__ x, floa
     if (lane == 0) y[tok * n_out + o] = acc;
 }
 
+template <int L> __global__ void __launch_bounds__(256)
+gemv_waves_kernel(const float* __restrict__ w, const float* __restrict__ x, float* __restrict__ y, int n_in, int n_out,
+                  int rows_per_x) {
+    gemv_waves_body<L>(w, x, y, n_in, n_out, rows_per_x);
+}
+
 // A row too long for the few rows there are to fill the card: a block a row, float4s 256 apart.
-__global__ void __launch_bounds__(256)
-gemv_rows_kernel(const float* __restrict__ w, const float* __restrict__ x, float* __restrict__ y, int n_in, int n_out,
-                 int rows_per_x) {
+__device__ __forceinline__ void
+gemv_rows_body(const float* __restrict__ w, const float* __restrict__ x, float* __restrict__ y, int n_in, int n_out,
+               int rows_per_x) {
     __shared__ float waves[8];
     const int o = blockIdx.x;
     const size_t tok = blockIdx.y;
@@ -2737,6 +2752,24 @@ gemv_rows_kernel(const float* __restrict__ w, const float* __restrict__ x, float
     }
 }
 
+__global__ void __launch_bounds__(256)
+gemv_rows_kernel(const float* __restrict__ w, const float* __restrict__ x, float* __restrict__ y, int n_in, int n_out,
+                 int rows_per_x) {
+    gemv_rows_body(w, x, y, n_in, n_out, rows_per_x);
+}
+
+// gemv_f32_waves_segments(): a segment a blockIdx.z, each row as the one-segment kernels'
+template <int L> __global__ void __launch_bounds__(256)
+gemv_waves_segments_kernel(F32Segments s, int n_in, int n_out, int rows_per_x) {
+    const int g = blockIdx.z;
+    gemv_waves_body<L>(s.w[g], s.x[g], s.y[g], n_in, n_out, rows_per_x);
+}
+
+__global__ void __launch_bounds__(256) gemv_rows_segments_kernel(F32Segments s, int n_in, int n_out, int rows_per_x) {
+    const int g = blockIdx.z;
+    gemv_rows_body(s.w[g], s.x[g], s.y[g], n_in, n_out, rows_per_x);
+}
+
 }  // namespace
 
 void gemv_f32_waves(const float* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows,
@@ -2752,6 +2785,30 @@ void gemv_f32_waves(const float* w, const float* x, float* y, int n_in, int n_ou
     // fewer blocks than two a compute unit of an RX 6700 XT at 32 lanes a row: a block a row instead
     if (n_in >= 1024 && (n_out + 7) / 8 * rows < 80)
         gemv_rows_kernel<<<dim3(n_out, rows), 256, 0, st>>>(w, x, y, n_in, n_out, rows_per_x);
+    else if (n_in >= 256) launch.template operator()<32>();
+    else if (n_in >= 128) launch.template operator()<16>();
+    else if (n_in >= 64) launch.template operator()<8>();
+    else launch.template operator()<4>();
+}
+
+void gemv_f32_waves_segments(const F32Segments& s, int count, int n_in, int n_out, int rows_per_x, int rows,
+                             void* stream) {
+    if (count < 1 || count > F32Segments::kMost) throw std::invalid_argument("gemv_f32_waves_segments: 1 to 4 segments");
+    bool aligned = n_in % 4 == 0;
+    for (int g = 0; g < count; ++g)
+        aligned = aligned && (reinterpret_cast<uintptr_t>(s.w[g]) | reinterpret_cast<uintptr_t>(s.x[g])) % 16 == 0;
+    if (!aligned) {   // gemv_f32_waves() would take gemv() for each: so do they here
+        for (int g = 0; g < count; ++g) gemv_f32_waves(s.w[g], s.x[g], s.y[g], n_in, n_out, rows_per_x, rows, stream);
+        return;
+    }
+    const cudaStream_t st = (cudaStream_t) stream;
+    const auto launch = [&]<int L>() {
+        gemv_waves_segments_kernel<L><<<dim3((n_out + 256 / L - 1) / (256 / L), rows, count), 256, 0, st>>>(
+            s, n_in, n_out, rows_per_x);
+    };
+    // the choice gemv_f32_waves() makes for one segment
+    if (n_in >= 1024 && (n_out + 7) / 8 * rows < 80)
+        gemv_rows_segments_kernel<<<dim3(n_out, rows, count), 256, 0, st>>>(s, n_in, n_out, rows_per_x);
     else if (n_in >= 256) launch.template operator()<32>();
     else if (n_in >= 128) launch.template operator()<16>();
     else if (n_in >= 64) launch.template operator()<8>();
@@ -2810,6 +2867,13 @@ void rms_norm(const float* x, const float* w, float* y, int n, int rows, float e
     rms_norm_kernel<<<rows, sum_threads(n), 0, cs(stream)>>>(x, w, y, n, eps, y_stride ? y_stride : n);
     if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess)
         throw std::runtime_error(std::string("rms_norm: ") + cudaGetErrorString(e));
+}
+
+void rms_norm_segments(const NormSegments& s, int count, int n, int rows, float eps, void* stream) {
+    if (count < 1 || count > NormSegments::kMost) throw std::invalid_argument("rms_norm_segments: 1 to 4 segments");
+    rms_norm_segments_kernel<<<dim3(rows, count), sum_threads(n), 0, cs(stream)>>>(s, n, eps);
+    if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess)
+        throw std::runtime_error(std::string("rms_norm_segments: ") + cudaGetErrorString(e));
 }
 
 void layer_norm(const float* x, const float* w, const float* b, float* y, int n, int rows, float eps, void* stream) {

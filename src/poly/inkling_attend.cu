@@ -321,6 +321,7 @@ flash_kernel(const float* __restrict__ q, const float* __restrict__ rel, const f
 // its unnormalized values per head; decode_combine_kernel() adds the chunks and the sink, divides and gates.
 constexpr int kDecodeBlocks = 4096;   // chunks times K/V groups times rows at most: the scratch's size
 constexpr int kChunkFloats = kGroup * (kHead + 2);
+constexpr int kAhead = 8;   // decode_kernel(): a wave's values loaded at a time
 
 template <bool Q8> struct KeyRow;
 template <> struct KeyRow<true> {
@@ -465,7 +466,26 @@ template <bool Q8> __global__ void decode_kernel(const float* q, const float* re
 #pragma unroll
         for (int r = 0; r < kGroup; ++r) l[r] += e[r];
         const int keys = min(kThreads, last - tile);
-        for (int j = slot; j < keys; j += 4) {
+        int j = slot;
+        // kAhead keys' values loaded before any is added: one wait for memory where each key waited for its own.
+        // The sums go in the same order as below.
+        for (; j + 4 * (kAhead - 1) < keys; j += 4 * kAhead) {
+            float x[kAhead][4];
+#pragma unroll
+            for (int u = 0; u < kAhead; ++u) {
+                const int64_t key = start + tile + j + 4 * u;
+                KeyRow<Q8>::value(v, ((size_t) (ring ? key % ring : key) * kKv + g) * kHead + 4 * lane, x[u]);
+            }
+#pragma unroll
+            for (int u = 0; u < kAhead; ++u)
+#pragma unroll
+                for (int r = 0; r < kGroup; ++r) {
+                    const float p = ps[j + 4 * u][r];
+#pragma unroll
+                    for (int y = 0; y < 4; ++y) acc[r][y] += p * x[u][y];
+                }
+        }
+        for (; j < keys; j += 4) {
             const int64_t key = start + tile + j;
             float x[4];
             KeyRow<Q8>::value(v, ((size_t) (ring ? key % ring : key) * kKv + g) * kHead + 4 * lane, x);
@@ -507,9 +527,12 @@ __global__ void decode_combine_kernel(const float* part, int chunks, const float
     const float* base = part + ((size_t) row * kKv + g) * chunks * kChunkFloats + r * (kHead + 2);
     const float s = sink[qh];
     float top = s;
+    // unrolled for the loads, the max and the sums in chunk order as one chunk at a time
+#pragma unroll 8
     for (int c = 0; c < chunks; ++c) top = fmaxf(top, base[(size_t) c * kChunkFloats]);
     const float at = top == -INFINITY ? 0.f : top;
     float sum = expf(s - at), o = 0.f;
+#pragma unroll 8
     for (int c = 0; c < chunks; ++c) {
         const float* p = base + (size_t) c * kChunkFloats;
         const float w = expf(p[0] - at);

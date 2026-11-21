@@ -60,10 +60,9 @@ struct MixInputs { const float* x[5]; };
 // a thread loads its 18 values of every input at once and all ten sums go up the tree together: a single block (one
 // token) waits for memory once, not 36 times. The products are fused as the compiler fuses them in the per-element
 // loops (explicitly: with five inputs in registers it would not).
-__global__ void mix_kernel(MixInputs in, int count, const float* query, float* out) {
+__device__ __forceinline__ void mix_row(const MixInputs& in, int count, const float* query, float* out, size_t row) {
     constexpr int kMost = 5, kWaves = kThreads / 32, kPer = kRowWidth / kThreads;
     static_assert(kRowWidth % kThreads == 0, "a row is whole loads of the block");
-    const size_t row = (size_t) blockIdx.x * kRowWidth;
     __shared__ float waves[2 * kMost][kWaves];
     float x[kMost][kPer], q[kPer];
 #pragma unroll
@@ -119,6 +118,19 @@ __global__ void mix_kernel(MixInputs in, int count, const float* query, float* o
             if (j < count) val = __fmaf_rn(w[j] * scale[j], x[j][k], val);
         out[row + threadIdx.x + k * kThreads] = val / sum;
     }
+}
+
+__global__ void mix_kernel(MixInputs in, int count, const float* query, float* out) {
+    mix_row(in, count, query, out, (size_t) blockIdx.x * kRowWidth);
+}
+
+// A visit's streams (Inkling2::heads()): stream blockIdx.y's query and output, each row as mix_kernel's.
+struct Streams3 {
+    const float* query[3];
+    float* out[3];
+};
+__global__ void mix3_kernel(MixInputs in, int count, Streams3 s) {
+    mix_row(in, count, s.query[blockIdx.y], s.out[blockIdx.y], (size_t) blockIdx.x * kRowWidth);
 }
 
 __global__ void control_kernel(float* cur, const float* msg, const float* gain, const float* forget, int count) {
@@ -281,6 +293,42 @@ __global__ void head_norms_kernel(HeadNorms h, float eps, int64_t pos, float alp
     head_norm(s.x, s.w, s.width, s.heads, s.clip, eps, pos, s.floor, alpha, head, blockIdx.y, waves);
 }
 
+// One decode row's conv2_kernel, head_norms_kernel and store2_q8_kernel in one launch, a block a head as
+// head_norms_kernel: a K or V head's block first convolves its channels (a thread a channel, as conv2_kernel), then
+// norms the head, then each wave writes its 32 values' Q8_0 block as store2_q8_kernel does (the block's maximum by
+// shuffles: the same maximum, so the same scale and codes).  The normed K and V stay in k and v as well.
+struct KvStore {
+    int8_t *kc, *vc;
+    __half *ks, *vs;
+    int64_t at;   // the row's place in the cache
+};
+__global__ void heads_kv_kernel(Conv k, Conv v, HeadNorms h, KvStore c, float eps, int64_t pos, float alpha,
+                                size_t stride) {
+    __shared__ float waves[kThreads / 32];
+    int head = blockIdx.x, j = 0;
+    while (j < 3 && head >= h.s[j].heads) head -= h.s[j++].heads;
+    static_assert(kThreads == 128, "a thread a value of a 128-wide K or V head");
+    const int i = head * kThreads + threadIdx.x;
+    if (j == 1 || j == 2) {
+        const Conv& cv = j == 2 ? v : k;
+        conv_channel(cv.x, cv.state, cv.w, cv.dynamic, kKvWidth, 1, i, cv.snap, stride);
+    }
+    const HeadNorm& s = h.s[j];
+    head_norm(s.x, s.w, s.width, s.heads, s.clip, eps, pos, s.floor, alpha, head, 0, waves);
+    if (j != 1 && j != 2) return;
+    const float x = s.x[i];
+    float amax = fmaxf(0.f, fabsf(x));   // store2_q8_kernel's maximum starts at 0: a NaN does not count
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) amax = fmaxf(amax, __shfl_xor(amax, o, 32));
+    const float d = amax / 127.0f;
+    const float id = d > 0.f ? 1.0f / d : 0.0f;
+    constexpr int nb = kKvWidth / 32;
+    if (threadIdx.x % 32 == 0) (j == 2 ? c.vs : c.ks)[(size_t) c.at * nb + i / 32] = __float2half(d);
+    float q = rintf(x * id);
+    q = fminf(fmaxf(q, -127.0f), 127.0f);
+    (j == 2 ? c.vc : c.kc)[(size_t) c.at * kKvWidth + i] = (int8_t) q;
+}
+
 // K and V into their Q8_0 caches in one launch, as store_q8_kernel writes them, a row at (pos + row) % ring (or
 // pos + row in a full layer's cache).
 __global__ void store2_q8_kernel(const float* k, const float* v, int8_t* kc, __half* ks, int8_t* vc, __half* vs,
@@ -310,10 +358,9 @@ __global__ void store2_q8_kernel(const float* k, const float* v, int8_t* kc, __h
 
 // A loop stream's control (Inkling2::control) in three launches instead of seven, the first: the message as
 // mix_kernel mixes the banks, and the RMS norms of the stream and the message side by side in pair.
-__global__ void control_in_kernel(const float* bank0, const float* bank1, const float* query, const float* in,
-                                  float* msg, float* pair) {
+__device__ __forceinline__ void control_in_row(const float* bank0, const float* bank1, const float* query,
+                                               const float* in, float* msg, float* pair, size_t row) {
     constexpr int kPer = kRowWidth / kThreads, kWaves = kThreads / 32;
-    const size_t row = (size_t) blockIdx.x * kRowWidth;
     __shared__ float waves[6][kWaves];
     float b0[kPer], b1[kPer], x[kPer], q[kPer];
 #pragma unroll
@@ -376,9 +423,29 @@ __global__ void control_in_kernel(const float* bank0, const float* bank1, const 
     }
 }
 
+__global__ void control_in_kernel(const float* bank0, const float* bank1, const float* query, const float* in,
+                                  float* msg, float* pair) {
+    control_in_row(bank0, bank1, query, in, msg, pair, (size_t) blockIdx.x * kRowWidth);
+}
+
+// The streams' control (Inkling2::heads()): stream blockIdx.y's, each row as the one-stream kernels'.
+struct Control3 {
+    const float* query[3];
+    float* cur[3];
+    float* msg[3];
+    float* pair[3];
+    const float* gain[3];
+    const float* forget[3];
+    const float* rank[3];
+};
+__global__ void control_in3_kernel(const float* bank0, const float* bank1, Control3 c) {
+    const int s = blockIdx.y;
+    control_in_row(bank0, bank1, c.query[s], c.cur[s], c.msg[s], c.pair[s], (size_t) blockIdx.x * kRowWidth);
+}
+
 // The third: the gain and the forget gate of each value from the rank, eight lanes an output, applied to the stream.
-__global__ void __launch_bounds__(256) control_out_kernel(const float* gain, const float* forget, const float* rank,
-                                                          const float* msg, float* cur, int ranks) {
+__device__ __forceinline__ void control_out_body(const float* gain, const float* forget, const float* rank,
+                                                 const float* msg, float* cur, int ranks) {
     const int lane = threadIdx.x % 8, o = blockIdx.x * 32 + threadIdx.x / 8, t = blockIdx.y;
     const float4* g = reinterpret_cast<const float4*>(gain + (size_t) o * ranks);
     const float4* f = reinterpret_cast<const float4*>(forget + (size_t) o * ranks);
@@ -398,6 +465,16 @@ __global__ void __launch_bounds__(256) control_out_kernel(const float* gain, con
         const size_t at = (size_t) t * kRowWidth + o;
         cur[at] = (1.f - tanhf(fa)) * cur[at] + tanhf(ga) * msg[at];
     }
+}
+
+__global__ void __launch_bounds__(256) control_out_kernel(const float* gain, const float* forget, const float* rank,
+                                                          const float* msg, float* cur, int ranks) {
+    control_out_body(gain, forget, rank, msg, cur, ranks);
+}
+
+__global__ void __launch_bounds__(256) control_out3_kernel(Control3 c, int ranks) {
+    const int s = blockIdx.z;
+    control_out_body(c.gain[s], c.forget[s], c.rank[s], c.msg[s], c.cur[s], ranks);
 }
 
 }  // namespace
@@ -423,6 +500,15 @@ void Inkling2::load_geometry() {
     const char* decode = std::getenv("STRATA_INKLING_DECODE");
     decode_ = decode && decode[0] == '1' && decode[1] == '\0';
     wave_gemv_ = head_warps_ = decode_;
+    // A miss in a once-visited layer (0-5, 18-23) stalls the card: the CPU's experts there are 2-3 a visit and the
+    // card waited 200-340 us a visit for them, against 5-70 us in the core visits, whose card experts hide one or two.
+    // Counted per visit, the core's uses (three a token) held ~1,200 of the ~1,330 slots.  Weighed twice, forced decode
+    // 39.07 -> 40.15 tok/s and 16K 30.87 -> 32.65 (RX 6700 XT; 1.5 to 3 measured the same).
+    if (decode_) {
+        use_w_.assign(kPhysical, 1.f);
+        for (int il = 0; il < kPhysical; ++il)
+            if (il < kStart || il >= kStart + kCore) use_w_[(size_t) il] = 2.f;
+    }
     if (decode_) std::fputs("strata-poly: STRATA_INKLING_DECODE=1: decode kernels for a few tokens at a time\n", stderr);
     if (!q8() && opt_.kv_format != KvFmt::kFp16)
         throw std::runtime_error("Inkling-2-Mini supports Q8_0 or FP16 KV");
@@ -843,6 +929,14 @@ void Inkling2::assign_scratch() {
         attq_ = fbuf((size_t) kStageRows * (kQuery / 32) * 36 / sizeof(float));   // Q8_1: 36 bytes a block of 32
         kq8_ = fbuf((size_t) (kWidth / 32) * 36 / sizeof(float));
         vq8_ = fbuf((size_t) (kWidth / 32) * 36 / sizeof(float));
+        // heads(): the three streams of up to kStageRows - 1 decode rows
+        const size_t w3 = 3 * (size_t) kStageRows * kWidth;
+        s3cur_ = fbuf(w3);
+        s3msg_ = fbuf(w3);
+        s3pair_ = fbuf(2 * w3);
+        s3rank_ = fbuf(3 * (size_t) kStageRows * kRank);
+        s3in_ = fbuf(w3);
+        s3q8_ = fbuf(3 * (size_t) kStageRows * kernels::native_q8_1_bytes(kWidth) / sizeof(float));
     }
     for (auto& x : input_) x = fbuf(width);
     for (auto& x : depth_) x = fbuf(width);
@@ -913,9 +1007,11 @@ void Inkling2::attention(const Block& b, int n) {
     const bool swa = local(visit_);
     if (fused(n) && q8()) {
         const int blocks = 2 * (kKey / 32) * n;
-        store2_q8_kernel<<<div_up(blocks, 256), 256, 0, cs(st_)>>>(
-            k_, v_, (int8_t*) c.planes[0].data, (__half*) c.planes[1].data, (int8_t*) c.planes[2].data,
-            (__half*) c.planes[3].data, pos_, swa ? ring_ : 0, n);
+        if (!kv_stored_)
+            store2_q8_kernel<<<div_up(blocks, 256), 256, 0, cs(st_)>>>(
+                k_, v_, (int8_t*) c.planes[0].data, (__half*) c.planes[1].data, (int8_t*) c.planes[2].data,
+                (__half*) c.planes[3].data, pos_, swa ? ring_ : 0, n);
+        kv_stored_ = false;
     } else {
         store(k_, c, 0, n);
         store(v_, c, 1, n);
@@ -971,6 +1067,59 @@ void Inkling2::control(const Block& b, int il, int stream, float* in, int n) {
     control_kernel<<<div_up(n * kWidth, kThreads), kThreads, 0, cs(st_)>>>(in, msg_, gain_, forget_, n * kWidth);
 }
 
+// Decode rows of a visit with three streams (q, k, v): each stream's mix, control and norm as control() and
+// layer_head()'s loop do them, all three in each launch, into s3in_ (the streams one after the other).  Five launches
+// in place of fifteen with the control, two in place of six without; every row bit for bit the per-stream launches'.
+// False, and nothing launched, where the per-stream path has to run (a prompt batch, the first layer, a control that
+// is not the F32 products control() fuses).
+bool Inkling2::heads(const Block& b, int il, bool swa, bool loop, int n, const Dev* const* norm) {
+    if (!fused(n) || il == 0 || !s3in_ || depth_n_ + 1 > 5) return false;
+    if (loop)
+        for (const Control& c : {b.control[0], b.control[1], b.control[2]})
+            if (c.down.type != kTypeF32 || c.down.scale != 1.f || c.gain.type != kTypeF32 || c.forget.type != kTypeF32 ||
+                c.gain.scale != 1.f || c.forget.scale != 1.f || c.down.n_in != 2 * kWidth || c.down.n_out != kRank)
+                return false;
+    const size_t w = (size_t) n * kWidth;
+    MixInputs m{};
+    for (int i = 0; i < depth_n_; ++i) m.x[i] = depth_[i];
+    m.x[depth_n_] = r_;
+    Streams3 ms{};
+    for (int i = 0; i < 3; ++i) {
+        ms.query[i] = fp(b.aquery) + (swa ? 0 : i * kWidth);
+        ms.out[i] = s3cur_ + i * w;
+    }
+    mix3_kernel<<<dim3(n, 3), kThreads, 0, cs(st_)>>>(m, depth_n_ + 1, ms);
+    if (loop) {
+        Control3 c{};
+        F32Segments down;
+        for (int i = 0; i < 3; ++i) {
+            const size_t row = 2 * (size_t) (il - kStart) + (i >= 2 ? 1 : 0);
+            c.query[i] = fp(i == 0 ? loop_query_ : loop_kv_query_) + row * kWidth;
+            c.cur[i] = s3cur_ + i * w;
+            c.msg[i] = s3msg_ + i * w;
+            c.pair[i] = s3pair_ + 2 * i * w;
+            c.gain[i] = fp(b.control[i].gain);
+            c.forget[i] = fp(b.control[i].forget);
+            c.rank[i] = s3rank_ + (size_t) i * n * kRank;
+            down.w[i] = fp(b.control[i].down);
+            down.x[i] = c.pair[i];
+            down.y[i] = s3rank_ + (size_t) i * n * kRank;
+        }
+        control_in3_kernel<<<dim3(n, 3), kThreads, 0, cs(st_)>>>(bank0_, bank1_, c);
+        // lin(c.down, pair_, rank_, n) of each stream: gemv_f32_waves() with a row of outputs to its input
+        gemv_f32_waves_segments(down, 3, 2 * kWidth, kRank, kRank, n, st_);
+        control_out3_kernel<<<dim3(kWidth / 32, n, 3), 256, 0, cs(st_)>>>(c, kRank);
+    }
+    NormSegments ns;
+    for (int i = 0; i < 3; ++i) {
+        ns.x[i] = s3cur_ + i * w;
+        ns.w[i] = fp(*norm[i]);
+        ns.y[i] = s3in_ + i * w;
+    }
+    rms_norm_segments(ns, 3, kWidth, n, rms_eps_, st_);
+    return true;
+}
+
 void Inkling2::run_visits(int n) {
     // Engine::input already put the projected patches in r_. Only token embeddings take the learned norm.
     const auto norm_text = [&](int first, int count) {
@@ -1017,25 +1166,40 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
     const bool swa = local(visit_), loop = messages();
     const Dev* norm[3] = {&L.attn_norm, swa ? &L.attn_norm : &b.knorm, swa ? &L.attn_norm : &b.vnorm};
     const int streams = swa && !loop ? 1 : 3;
-    for (int i = 0; i < streams; ++i) {
-        if (il == 0) axpy(r_, 1.f, cur_, n * kWidth, false, st_);
-        else depth_mix(fp(b.aquery) + (swa ? 0 : i * kWidth), cur_, 0, n);
-        if (loop) control(b, il, i, cur_, n);
-        rms_norm(cur_, fp(*norm[i]), input_[i], kWidth, n, rms_eps_, st_);
+    const float *xq = input_[0], *xk = xq, *xv = xq;
+    const void *kq = nullptr, *vq = nullptr;   // K's and V's own inputs as Q8_1, when heads() quantized them
+    const bool three = streams == 3 && heads(b, il, swa, loop, n, norm);
+    if (three) {
+        const size_t w = (size_t) n * kWidth, wq = (size_t) n * kernels::native_q8_1_bytes(kWidth);
+        xq = s3in_;
+        xk = s3in_ + w;
+        xv = s3in_ + 2 * w;
+        // the three inputs lie one after the other, and a Q8_1 block never straddles two: one launch for all
+        kernels::native_quantize_q8_1(s3in_, s3q8_, kWidth * n * 3, 1, st_);
+        kq = (const uint8_t*) s3q8_ + wq;
+        vq = (const uint8_t*) s3q8_ + 2 * wq;
+    } else {
+        for (int i = 0; i < streams; ++i) {
+            if (il == 0) axpy(r_, 1.f, cur_, n * kWidth, false, st_);
+            else depth_mix(fp(b.aquery) + (swa ? 0 : i * kWidth), cur_, 0, n);
+            if (loop) control(b, il, i, cur_, n);
+            rms_norm(cur_, fp(*norm[i]), input_[i], kWidth, n, rms_eps_, st_);
+        }
+        if (streams == 3) {
+            xk = input_[1];
+            xv = input_[2];
+        }
     }
-    const float* xq = input_[0];
-    const float* xk = streams == 1 ? xq : input_[1];
-    const float* xv = streams == 1 ? xq : input_[2];
     // MMVQ uses the same Q8_1 input for Q, relative bias and the attention gate (also K and V when
     // they share the input). The matrix-matrix prompt path uses its own layout instead.
     const bool mmv = n < kStageRows;
-    if (mmv) kernels::native_quantize_q8_1(xq, xq_, kWidth * n, 1, st_);
-    const void* shared = mmv ? xq_ : nullptr;
-    if (fused(n) && n == 1) project(b, xk, xv, streams == 1);
+    if (mmv && !three) kernels::native_quantize_q8_1(xq, xq_, kWidth * n, 1, st_);
+    const void* shared = three ? s3q8_ : mmv ? xq_ : nullptr;
+    if (fused(n) && n == 1) project(b, xq, xk, xv, streams == 1, shared, kq, vq);
     else {
         lin(b.q, xq, q_, n, shared);
-        lin(b.k, xk, k_, n, streams == 1 ? shared : nullptr);
-        lin(b.v, xv, v_, n, streams == 1 ? shared : nullptr);
+        lin(b.k, xk, k_, n, streams == 1 ? shared : kq);
+        lin(b.v, xv, v_, n, streams == 1 ? shared : vq);
         lin(b.rel, xq, rel_, n, shared);
         lin(b.gate, xq, gate_, n, shared);
     }
@@ -1052,12 +1216,21 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
             lin(b.kproj, xk, taps_, n);
             lin(b.vproj, xv, taps2_, n);
         }
-        conv2_kernel<<<div_up(2 * kKey, kThreads), kThreads, 0, cs(st_)>>>(
-            Conv{k_, hist, fp(b.kconv), swa ? nullptr : taps_, snap_of(hist)},
-            Conv{v_, hist + 3 * kKey, fp(b.vconv), swa ? nullptr : taps2_, snap_of(hist + 3 * kKey)}, kKey, n, rec_n_);
+        const Conv ck{k_, hist, fp(b.kconv), swa ? nullptr : taps_, snap_of(hist)};
+        const Conv cv{v_, hist + 3 * kKey, fp(b.vconv), swa ? nullptr : taps2_, snap_of(hist + 3 * kKey)};
         HeadNorms h{{{q_, fp(b.qclip), kHead, kHeads, qk_clip_, floor}, {k_, nullptr, kHead, kKv, qk_clip_, 0},
                      {v_, nullptr, kHead, kKv, 0.f, 0}, {rel_, fp(b.rclip), kRelative, kHeads, r_clip_, floor}}};
-        head_norms_kernel<<<dim3(2 * kHeads + 2 * kKv, n), kThreads, 0, cs(st_)>>>(h, rms_eps_, pos_, alpha_);
+        if (n == 1 && q8()) {   // attention() finds K and V stored
+            Cache& c = caches_[visit_];
+            const KvStore to{(int8_t*) c.planes[0].data, (int8_t*) c.planes[2].data, (__half*) c.planes[1].data,
+                             (__half*) c.planes[3].data, swa ? pos_ % ring_ : pos_};
+            heads_kv_kernel<<<2 * kHeads + 2 * kKv, kThreads, 0, cs(st_)>>>(ck, cv, h, to, rms_eps_, pos_, alpha_,
+                                                                           rec_n_);
+            kv_stored_ = true;
+        } else {
+            conv2_kernel<<<div_up(2 * kKey, kThreads), kThreads, 0, cs(st_)>>>(ck, cv, kKey, n, rec_n_);
+            head_norms_kernel<<<dim3(2 * kHeads + 2 * kKv, n), kThreads, 0, cs(st_)>>>(h, rms_eps_, pos_, alpha_);
+        }
     } else {
         kv_conv(k_, hist, b.kconv, b.kproj, xk);
         kv_conv(v_, hist + 3 * kKey, b.vconv, b.vproj, xv);
@@ -1105,10 +1278,13 @@ float* Inkling2::snap_of(float* state) const {
 // A token's q, gate and relative terms of input_[0] (xq_, quantized), and its K and V of the same or of their own
 // inputs: one launch a weight format (kernels::native_mmvq_segments(), the rows bit for bit lin()'s), lin() for what
 // that does not take.
-void Inkling2::project(const Block& b, const float* xk, const float* xv, bool shared_kv) {
-    if (!shared_kv) {
+void Inkling2::project(const Block& b, const float* xq, const float* xk, const float* xv, bool shared_kv,
+                       const void* q8, const void* k8, const void* v8) {
+    if (!shared_kv && !k8) {
         kernels::native_quantize_q8_1(xk, kq8_, kWidth, 1, st_);
         kernels::native_quantize_q8_1(xv, vq8_, kWidth, 1, st_);
+        k8 = kq8_;
+        v8 = vq8_;
     }
     struct Part {
         const Dev* w;
@@ -1116,11 +1292,11 @@ void Inkling2::project(const Block& b, const float* xk, const float* xv, bool sh
         const void* xq;
         float* y;
         bool done;
-    } parts[5] = {{&b.q, input_[0], xq_, q_, false},
-                  {&b.gate, input_[0], xq_, gate_, false},
-                  {&b.rel, input_[0], xq_, rel_, false},
-                  {&b.k, xk, shared_kv ? xq_ : kq8_, k_, false},
-                  {&b.v, xv, shared_kv ? xq_ : vq8_, v_, false}};
+    } parts[5] = {{&b.q, xq, q8, q_, false},
+                  {&b.gate, xq, q8, gate_, false},
+                  {&b.rel, xq, q8, rel_, false},
+                  {&b.k, xk, shared_kv ? q8 : k8, k_, false},
+                  {&b.v, xv, shared_kv ? q8 : v8, v_, false}};
     const auto fits = [](const Dev& w) { return w.n_in == kWidth && w.scale == 1.f; };
     for (int i = 0; i < 5; ++i) {
         if (parts[i].done || !fits(*parts[i].w)) continue;
