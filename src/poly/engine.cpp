@@ -4273,8 +4273,15 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
                 }
                 ExpertScales es = expert_scales(L);
                 for (int j = 0; j < m && (es.gate || es.up); ++j) es.e[j] = cached[i0 + j].e;
-                expert_activation(g_, h_, m, limit, es);
-                kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_, m, st_);
+#if defined(STRATA_USE_HIP)
+                if (situ_q8_ && situ_.beta > 0.f)
+                    situ_rows_q8_1(g_, q8_, n_ff_exp_, m, situ_.beta, situ_.linear_beta, st_, es);
+                else
+#endif
+                {
+                    expert_activation(g_, h_, m, limit, es);
+                    kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_, m, st_);
+                }
                 if (!(m > 1 && kernels::native_mmvq_slots((int) L.d_type, down, m, n_ff_exp_, n_embd_, st_)))
                     for (int j = 0; j < m; ++j)
                         kernels::native_mmvq((int) L.d_type, down.w[j], down.x[j], down.y[j], n_ff_exp_, n_embd_, 1,

@@ -210,6 +210,9 @@ void swiglu_clamp_rows(const float* gate_up, float* out, int n, int rows, float 
 #if defined(STRATA_USE_HIP)
 void situ_rows(const float* gate_up, float* out, int n, int rows, float beta, float linear_beta,
                void* stream, const ExpertScales& scales);
+/// situ_rows() and native_quantize_q8_1() of its rows (n a multiple of 32) in one launch: the same Q8_1 bytes.
+void situ_rows_q8_1(const float* gate_up, void* q8, int n, int rows, float beta, float linear_beta, void* stream,
+                    const ExpertScales& scales);
 #endif
 /// out = gelu(gate) * up, with the tanh form of GELU that ggml's CUDA backend computes.
 void geglu(const float* gate, const float* up, float* out, int n, void* stream);

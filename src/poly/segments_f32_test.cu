@@ -1,7 +1,9 @@
 // src/poly/segments_f32_test.cu - gemv_f32_waves_segments() and rms_norm_segments() against one gemv_f32_waves() or
-// rms_norm() call a segment.  Every output must be the same bytes (Inkling's decode streams, Inkling2::heads()).
+// rms_norm() call a segment, and situ_rows_q8_1() against situ_rows() then native_quantize_q8_1().  Every output must
+// be the same bytes (Inkling's decode path).
 //
 // usage: poly_segments_f32_test   (exit 0: every byte the same)
+#include "strata/kernels/native_mmvq.hpp"
 #include "strata/poly/kernels.hpp"
 
 #include <cuda_runtime.h>
@@ -98,6 +100,46 @@ int norm_case(int count, int n, int rows, std::mt19937& rng) {
     return ok ? 0 : 1;
 }
 
+// gate and up of `rows` rows (n each), the SiTU of the routed experts, scaled by expert e's scales
+int situ_case(int n, int rows, float beta, float lbeta, const std::vector<float>& gu, bool scaled, const char* what) {
+    cudaStream_t s;
+    cudaStreamCreate(&s);
+    float* g = upload(gu);
+    float* h = upload(std::vector<float>((size_t) n * rows, 0.f));
+    std::vector<float> sc(8, 1.f);
+    for (int i = 0; i < 8; ++i) sc[i] = 0.75f + 0.125f * i;
+    float* dsc = upload(sc);
+    ExpertScales es{};
+    if (scaled) {
+        es.gate = dsc;
+        es.up = dsc + 1;
+        for (int r = 0; r < rows; ++r) es.e[r] = r % 6;
+    }
+    const size_t qb = strata::kernels::native_q8_1_bytes(n) * rows;
+    void *q1 = nullptr, *q2 = nullptr;
+    cudaMalloc(&q1, qb);
+    cudaMalloc(&q2, qb);
+    cudaMemset(q1, 0x5a, qb);
+    cudaMemset(q2, 0xa5, qb);
+    situ_rows(g, h, n, rows, beta, lbeta, s, es);
+    strata::kernels::native_quantize_q8_1(h, q1, n, rows, s);
+    situ_rows_q8_1(g, q2, n, rows, beta, lbeta, s, es);
+    cudaStreamSynchronize(s);
+    std::vector<unsigned char> a(qb), b(qb);
+    cudaMemcpy(a.data(), q1, qb, cudaMemcpyDeviceToHost);
+    cudaMemcpy(b.data(), q2, qb, cudaMemcpyDeviceToHost);
+    const bool ok = a == b;
+    for (size_t i = 0, shown = 0; i < qb && shown < 6; ++i)
+        if (a[i] != b[i]) {
+            std::printf("     byte %zu (block %zu, offset %zu): %02x vs %02x\n", i, i / 36, i % 36, a[i], b[i]);
+            ++shown;
+        }
+    cudaFree(g), cudaFree(h), cudaFree(dsc), cudaFree(q1), cudaFree(q2);
+    cudaStreamDestroy(s);
+    std::printf("%s situ  q8_1 n %5d rows %2d %s\n", ok ? "ok  " : "FAIL", n, rows, what);
+    return ok ? 0 : 1;
+}
+
 }  // namespace
 
 int main() {
@@ -111,6 +153,17 @@ int main() {
     for (int rows : {1, 3, 31})
         for (int count : {1, 3}) bad += norm_case(count, 2304, rows, rng);
     bad += norm_case(4, 4096, 2, rng);
+    for (int rows : {1, 3, 8})
+        for (bool scaled : {false, true}) {
+            std::vector<float> gu = random((size_t) 2 * 1152 * rows, rng);
+            for (float& v : gu) v *= 3.f;
+            bad += situ_case(1152, rows, 10.f, 10.f, gu, scaled, scaled ? "random, scaled" : "random");
+        }
+    {   // the review's block: lanes 0 and 16 large and opposite, the rest 0, betas 83.2
+        std::vector<float> gu((size_t) 2 * 1152, 0.f);
+        gu[0] = 2048.f, gu[16] = 2048.f, gu[1152 + 0] = 2048.f, gu[1152 + 16] = -2048.f;
+        bad += situ_case(1152, 1, 83.2f, 83.2f, gu, false, "opposite pair");
+    }
     if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess) {
         std::printf("CUDA: %s\n", cudaGetErrorString(e));
         return 1;

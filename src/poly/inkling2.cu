@@ -499,7 +499,7 @@ void Inkling2::load_geometry() {
     if (flash_) std::fputs("strata-poly: STRATA_INKLING_FLASH=1: fused attention for prompt batches\n", stderr);
     const char* decode = std::getenv("STRATA_INKLING_DECODE");
     decode_ = decode && decode[0] == '1' && decode[1] == '\0';
-    wave_gemv_ = head_warps_ = decode_;
+    wave_gemv_ = head_warps_ = situ_q8_ = decode_;
     // A miss in a once-visited layer (0-5, 18-23) stalls the card: the CPU's experts there are 2-3 a visit and the
     // card waited 200-340 us a visit for them, against 5-70 us in the core visits, whose card experts hide one or two.
     // Counted per visit, the core's uses (three a token) held ~1,200 of the ~1,330 slots.  Weighed twice, forced decode

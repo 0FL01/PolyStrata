@@ -1,6 +1,6 @@
 # Goal: fewer Inkling decode stalls and launches on RDNA2
 
-Status: active
+Status: complete
 Source: user requests of 2026-11-21: "Нужно подумать как поднять скорость decode, жду план после RECON ... гоняй тесты,
 профилируй", then on the plan: "компромисс принимаем, не критично", "приступай к реализации", "делай копию плана в
 цель, ревью правок своих через саб агентов делай", "и коммит пуш делать тоже", "в прод пока не деплоить, я тут играю
@@ -57,19 +57,27 @@ or a proven blocker; record the evidence and smallest unlock.
     kept is bit for bit the separate launches' result (or within the attention test's tolerance for the attention)
     and measures faster in paired runs; one that does not pay is dropped and recorded.
   - Primary evidence: unit tests, parity fixture, A/B runs.
-  - Status: open
+  - Status: verified
+  - Evidence: kept `heads_kv_kernel` (stage 1: parity identical) and `situ_rows_q8_1()` (stage 3: unit test bitwise
+    on random rows and a +x/-x block; forced decode +3.9%). Attention + combine not built: the combine is 3.8 us a
+    visit, and folding it into the last block is the single-block shape that lost before (expected under 1%).
 - R5: The CPU experts' fixed costs.
   - Source: plan stage 5 (a cold CPU expert 155 us against a 107 us read floor for 8 threads).
   - Acceptance: per-expert CPU time measured lower with the same sums, or the stage stopped with the measurement.
   - Primary evidence: per-layer CPU expert timing, A/B runs.
-  - Status: open
+  - Status: verified (stopped with the measurement)
+  - Evidence: stage 3 below: the fixed costs are ~3 us a call; the rest is ggml's NVFP4 dot at 85% of the read
+    speed. Not worth a change of the sums for at most ~15% of the CPU experts' time, mostly hidden since R1.
 - R6: Reviewed, committed, pushed; not deployed.
   - Source: user ("ревью правок своих через саб агентов", "коммит пуш делать тоже", "в прод пока не деплоить").
   - Acceptance: each code stage reviewed by a general-purpose sub-agent with accepted findings fixed; default path
     (switch off) identical on the parity fixture; task commits on `origin/main`; the production service and config
     untouched by this goal.
   - Primary evidence: review results here, parity, `git log origin/main`.
-  - Status: open
+  - Status: verified
+  - Evidence: five general-purpose reviews (history); switch off identical to `32b3fc6f` on the parity fixture after
+    every stage; `7d9de842`, `e1cdebb2` and the stage-3 commit on `origin/main`; `strata.service` and its config not
+    touched (the service was stopped by the user for a game; not deployed).
 
 ### Constraints
 
@@ -116,8 +124,8 @@ tok/s, 16K 30.87 -> 32.65 (16K prefill 679.7 -> 662.2, one run); stream 0 alone 
 
 ## Current State
 
-- Resolved: R1, R2, R3; R4 in part (conv2 + head norms + K/V store fused).
-- Next: R4's rest (attention + combine, expert activation + Q8_1), R5.
+- Resolved: R1-R6. Not measured: decode beyond 16K end to end (the attention kernel alone: 190K 6.73 -> 2.20 ms a
+  full layer); prefill beyond 16K.
 
 ## Material Decisions
 
@@ -156,3 +164,30 @@ tok/s, 16K 30.87 -> 32.65 (16K prefill 679.7 -> 662.2, one run); stream 0 alone 
   1,166 launches a token (1,578 in RECON), attention 12.4 us a visit. Review (general-purpose): rounding over very
   long chunks (31 rows at 200K, constructed inputs: 1.46e-4) rejected on the measured random and spike cases above;
   an overflow from +-2e38 relative-table entries rejected (the model's table is small).
+- 2026-11-21: stage 3 (R4 rest, R5). `situ_rows_q8_1()`: the cached experts' SiTU and its Q8_1 in one launch, the
+  kernel without FP contraction (a review found the first sum's add fused with the lane's SiTU product: a +x/-x block
+  summed to x's rounding error, ds.y 0x0bae instead of 0; `__fadd_rn` alone did not stop it, `#pragma clang fp
+  contract(off)` did; unit test cases added). Interleaved, forced 94+96: without 42.38 / 43.47 / 42.23, with 44.05 /
+  44.07 / 43.76 tok/s. R5 profile (one-row calls, 1.6 CPU experts a call, warm page cache): activation Q8_0 1.3 us,
+  gate/up 145 us, h Q8_0 0.7 us, down 67 us a call, i.e. ~90 and ~42 us an expert against a 70 / 35 us read with 8
+  threads; ggml's NVFP4 dot alone with persistent threads 83 us for an expert's gate/up (36.0 GB/s against 42.4 GB/s
+  read). Rows a gate/up task 32 / 16 / 8 / 4: 144.1 / 141.9 / 145.0 / 161.7 us a CPU expert; the GPU launches the
+  CPU threads hand off take 21 us of one thread. Stage stopped.
+  Found on the way: with 0.7 GB of the 14.7 GB GGUF out of the page cache (after a game), forced decode 37.7 tok/s
+  and the CPU experts 8.3 ms/token; after reading the file once, 46.7-47.3 and 4.1-4.2. Untraced token times (warm):
+  median 20.1 ms, mean 21.1, max ~31 (94 tokens); the multi-millisecond gaps in rocprofv3 traces are the tracer's.
+- Final pair, warm page cache, interleaved (RX 6700 XT / Ryzen 7 5700X, production flags, A = `32b3fc6f`, B = this
+  goal's build before the stage-3 fix, numerically the same kernels): forced 94+96 decode A 40.66 / 40.72 / 40.76,
+  B 46.71 / 46.25 / 46.47 tok/s (+14.2%); 128 tokens after 16,384: A 33.03 / 33.51, B 41.03 / 40.86 (+23%), prefill
+  16K A 707.7 / 705.5, B 685.0 / 684.7 (-3.1%, accepted). Final binary: parity fixture identical to `32b3fc6f` with
+  the switch off and to stage 2 with it on (CPU experts); forced 46.79 tok/s. Not deployed (user).
+
+## Completion
+
+- Resolved outcomes: R1-R6 (R5 stopped with its measurement).
+- Commands and artifacts: `poly_segments_f32_test`, `poly_inkling_attend_test`; scratch `~/.cache/claude-dec3/`
+  (run.sh, runc.sh, traces, prototypes, mb/ microbenchmarks; outside Git).
+- Constraint and diff-scope check: everything new under `STRATA_INKLING_DECODE=1`; switch off identical; other
+  models unchanged (refactored bodies, new entry points only Inkling calls); RDNA2 only; same GGUF, Q8_0 KV;
+  benchmarks on profile copies; production service not changed.
+- Final status: complete.

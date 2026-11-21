@@ -2,6 +2,7 @@
 // ggml ops it builds.  Where a kernel takes several tokens, blockIdx.y is the token unless it says otherwise.
 #include "strata/poly/kernels.hpp"
 #include "strata/kernels/dp4a.hpp"
+#include "strata/kernels/q8_1_finite.hpp"
 #ifdef STRATA_POLY_GDN_MMA
 #include "gdn_mma.hpp"
 #include "strata/kernels/gdn_mma_policy.hpp"
@@ -1001,15 +1002,46 @@ __global__ void expert_weights_kernel(float* __restrict__ w, const float* __rest
 }
 
 #if defined(STRATA_USE_HIP)
+struct Q81Out {   // native_mmvq's Q8_1 block: the scale and the sum as halves, then 32 codes
+    __half2 ds;
+    int8_t qs[32];
+};
+__device__ __forceinline__ float situ_value(const float* gate_up, int n, int i, float beta, float linear_beta,
+                                           const ExpertScales& scales) {
+    const float* row = gate_up + size_t(blockIdx.y) * 2 * n;
+    const float2 sc = row_scales(scales, blockIdx.y);
+    const float g = row[i] * sc.x, u = row[n + i] * sc.y;
+    return beta * tanhf(g / beta) / (1.f + expf(-g)) * (linear_beta * tanhf(u / linear_beta));
+}
+
 __global__ void situ_rows_kernel(const float* __restrict__ gate_up, float* __restrict__ out, int n,
                                  float beta, float linear_beta, ExpertScales scales) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    const float* row = gate_up + size_t(blockIdx.y) * 2 * n;
-    const float2 sc = row_scales(scales, blockIdx.y);
-    const float g = row[i] * sc.x, u = row[n + i] * sc.y;
-    out[size_t(blockIdx.y) * n + i] = beta * tanhf(g / beta) / (1.f + expf(-g)) *
-                                      (linear_beta * tanhf(u / linear_beta));
+    out[size_t(blockIdx.y) * n + i] = situ_value(gate_up, n, i, beta, linear_beta, scales);
+}
+
+// situ_rows() then native_quantize_q8_1() of its rows in one launch: a warp 32 values of one Q8_1 block, its maximum
+// and sum by the xor tree native_quantize_q8_1_kernel uses, and its scale and codes by the same helpers.
+__global__ void situ_rows_q8_1_kernel(const float* __restrict__ gate_up, Q81Out* __restrict__ y, int n, float beta,
+                                      float linear_beta, ExpertScales scales) {
+    // No contraction: an add fused with this lane's SiTU product would take it unrounded, where the separate launches
+    // sum rounded values (a block of +x and -x summed to the rounding error of x, not 0).
+#pragma clang fp contract(off)
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;   // n is whole blocks of 32: only whole warps return
+    const float xi = situ_value(gate_up, n, i, beta, linear_beta, scales);
+    float amax = fabsf(xi), sum = xi;
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+        amax = fmaxf(amax, __shfl_xor(amax, o, 32));
+        sum += __shfl_xor(sum, o, 32);
+    }
+    const float d = kernels::q8_1_finite(amax / 127.0f);
+    const size_t at = size_t(blockIdx.y) * n + i;
+    Q81Out& b = y[at / 32];
+    b.qs[at % 32] = kernels::q8_1_quant(xi, d, amax);
+    if (at % 32 == 0) b.ds = kernels::q8_1_ds(d, sum);
 }
 #endif
 
@@ -3147,6 +3179,13 @@ void swiglu_clamp_rows(const float* gate_up, float* out, int n, int rows, float 
 }
 
 #if defined(STRATA_USE_HIP)
+void situ_rows_q8_1(const float* gate_up, void* q8, int n, int rows, float beta, float linear_beta, void* stream,
+                    const ExpertScales& scales) {
+    if (n % 32) throw std::invalid_argument("situ_rows_q8_1: rows of whole Q8_1 blocks");
+    situ_rows_q8_1_kernel<<<dim3(grid(n, 256), rows), 256, 0, cs(stream)>>>(gate_up, static_cast<Q81Out*>(q8), n, beta,
+                                                                            linear_beta, scales);
+}
+
 void situ_rows(const float* gate_up, float* out, int n, int rows, float beta, float linear_beta,
                void* stream, const ExpertScales& scales) {
     situ_rows_kernel<<<dim3(grid(n, 256), rows), 256, 0, cs(stream)>>>(gate_up, out, n, beta, linear_beta, scales);

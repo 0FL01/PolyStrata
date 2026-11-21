@@ -730,6 +730,7 @@ protected:
     bool half_sum_guard_ = false;
     bool wave_gemv_ = false;   ///< lin(): F32 products of a few tokens by gemv_f32_waves() (Inkling's decode switch)
     bool head_warps_ = false;  ///< lin(): the output head of one row by native_q6_k_mmvq_warps() (Inkling's decode switch)
+    bool situ_q8_ = false;     ///< the cached experts' SiTU and Q8_1 in one launch (Inkling's decode switch)
     bool cols_kernels_ = false;   ///< lin(): Q6_K and Q8_0 for 2 to 8 rows a warp a row, each block read once (a guesser)
     /// per layer: what one use of its experts weighs for the expert cache (the fill and follow()), empty for 1.  A model
     /// sets it where a miss costs more in some layers than in others (Inkling's once-visited layers).
