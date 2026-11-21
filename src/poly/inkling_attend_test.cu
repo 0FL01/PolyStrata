@@ -1,7 +1,9 @@
-// src/poly/inkling_attend_test.cu - attend_flash() against attend_plain() for Inkling-2-Mini's attention: a window
+// src/poly/inkling_attend_test.cu - attend_flash() and attend_decode() against attend_plain() for Inkling-2-Mini's
+// attention: a window
 // layer's ring before and after it wraps, a full layer, a batch's last partial block of tokens and FP16 caches,
 // with the plain path's scratch as the engine sizes it at 200,000 tokens of context. The two read the same
-// dequantized values and differ only in the order of their FP32 sums. Also times both on a 512-token batch.
+// dequantized values and differ only in the order of their FP32 sums. Also times them on a 512-token batch and one
+// token's decode.
 //
 // usage: poly_inkling_attend_test   (exit 0: every case within 1e-4 of the plain path's largest output, no NaN;
 //                                    77: no card)
@@ -44,11 +46,14 @@ struct Case {
     bool swa, q8;
     float sink_add = 0.f;   // a sink far above the scores: each key's share is below the rounding of 1
     bool spike = false;     // key 0 about 20 above every other key: the others' shares are below its rounding
+    bool dec = false;       // attend_decode() in place of attend_flash()
 };
 
 // rows of cache the case reads: a window layer's ring is the engine's (window + batch - 1), a full layer's
 // every position up to the batch's end
 int64_t cache_rows(const Case& c) { return c.swa ? kWindow + 512 - 1 : c.pos + c.n; }
+
+float* chunks = nullptr;   // attend_decode()'s scratch
 
 bool run(const Case& c, float* scores, float* partial, int tiles, bool timed) {
     std::mt19937 rng(1234 + (unsigned) c.pos + 7u * (unsigned) c.n);
@@ -116,7 +121,11 @@ bool run(const Case& c, float* scores, float* partial, int tiles, bool timed) {
     a.out = plain;
     attend_plain(a, scores, partial, tiles, nullptr);
     a.out = flash;
-    attend_flash(a, nullptr);
+    const auto other = [&] {
+        if (c.dec) attend_decode(a, chunks, nullptr);
+        else attend_flash(a, nullptr);
+    };
+    other();
     const cudaError_t e = cudaDeviceSynchronize();
     if (e != cudaSuccess) {
         std::printf("%s: %s\n", c.name, cudaGetErrorString(e));
@@ -151,11 +160,12 @@ bool run(const Case& c, float* scores, float* partial, int tiles, bool timed) {
         cudaEventElapsedTime(&ms_plain, t0, t1);
         a.out = flash;
         cudaEventRecord(t0);
-        for (int i = 0; i < kRuns; ++i) attend_flash(a, nullptr);
+        for (int i = 0; i < kRuns; ++i) other();
         cudaEventRecord(t1);
         cudaEventSynchronize(t1);
         cudaEventElapsedTime(&ms_flash, t0, t1);
-        std::printf("%-26s plain %.3f ms, flash %.3f ms a call\n", "", ms_plain / kRuns, ms_flash / kRuns);
+        std::printf("%-26s plain %.3f ms, %s %.3f ms a call\n", "", ms_plain / kRuns, c.dec ? "decode" : "flash",
+                    ms_flash / kRuns);
         cudaEventDestroy(t0);
         cudaEventDestroy(t1);
     }
@@ -180,6 +190,7 @@ int main() {
     float *scores = nullptr, *partial = nullptr;
     cudaMalloc(&scores, plain_score_floats(tiles) * sizeof(float));
     cudaMalloc(&partial, plain_partial_floats(tiles) * sizeof(float));
+    cudaMalloc(&chunks, decode_floats() * sizeof(float));
     const Case cases[] = {
         {"window, first batch", 0, 512, true, true},
         {"window, inside the ring", 512, 512, true, true},
@@ -195,12 +206,30 @@ int main() {
         {"window, sink above", 3001, 64, true, true, 16.f},
         {"window, no sink, masked block", 1023, 32, true, true, -INFINITY},
         {"full, one key above 190K", 190000, 32, false, true, 0.f, true},
+        {"decode: window, first", 0, 1, true, true, 0.f, false, true},
+        {"decode: window, 150", 150, 1, true, true, 0.f, false, true},
+        {"decode: window, wrapped", 3001, 1, true, true, 0.f, false, true},
+        {"decode: window, 7 rows", 4090, 7, true, true, 0.f, false, true},
+        {"decode: window, 31 rows", 1000, 31, true, true, 0.f, false, true},
+        {"decode: full, first", 0, 1, false, true, 0.f, false, true},
+        {"decode: full, 777", 777, 1, false, true, 0.f, false, true},
+        {"decode: full, 16K", 16384, 1, false, true, 0.f, false, true},
+        {"decode: full, 31 rows", 5003, 31, false, true, 0.f, false, true},
+        {"decode: window, fp16", 3001, 3, true, false, 0.f, false, true},
+        {"decode: full, fp16", 1200, 1, false, false, 0.f, false, true},
+        {"decode: full, sink above", 60000, 1, false, true, 16.f, false, true},
+        {"decode: window, no sink", 1023, 2, true, true, -INFINITY, false, true},
+        {"decode: one key above 190K", 190000, 1, false, true, 0.f, true, true},
     };
     bool ok = true;
     for (const Case& c : cases) ok = run(c, scores, partial, tiles, false) && ok;
     ok = run({"timed: window", 8192, 512, true, true}, scores, partial, tiles, true) && ok;
     ok = run({"timed: full at 4K", 4096, 512, false, true}, scores, partial, tiles, true) && ok;
     ok = run({"timed: full at 32K", 32768, 512, false, true}, scores, partial, tiles, true) && ok;
+    ok = run({"timed: decode window", 8192, 1, true, true, 0.f, false, true}, scores, partial, tiles, true) && ok;
+    ok = run({"timed: decode full at 16K", 16384, 1, false, true, 0.f, false, true}, scores, partial, tiles, true) && ok;
+    ok = run({"timed: decode full at 190K", 190000, 1, false, true, 0.f, false, true}, scores, partial, tiles, true) &&
+         ok;
     std::puts(ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }

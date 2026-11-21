@@ -19,6 +19,10 @@ namespace strata::poly {
 void gemv_f32(const float* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows, void* stream);
 void gemv_bf16(const uint16_t* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows,
                void* stream);
+/// The same for products of a few tokens with an output row to a few lanes of a wave (Options of an engine that asks for
+/// it, Inkling's STRATA_INKLING_DECODE=1): its sums go in another order than gemv_f32's.
+void gemv_f32_waves(const float* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows,
+                    void* stream);
 /// The same for the many rows of a prompt batch, as a cuBLAS product on the stream of `blas` (blas_create), one
 /// for each group of rows_per_x outputs.  It sums in another order than gemv_f32, so a row does not come out
 /// to the last bit as it does there.  Throws std::runtime_error.

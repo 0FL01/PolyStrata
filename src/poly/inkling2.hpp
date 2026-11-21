@@ -33,6 +33,7 @@ protected:
     void finish_logits(float* logits, int rows) override;
     void route(int il, const float* logits, int32_t, int* ids, float* w, float* tmp) const override;
     void moe_shared(const Layer&, int, int n) override;
+    void moe_add(int n) override;
 
 private:
     static constexpr int kPhysical = 24, kVisits = 48;
@@ -62,10 +63,14 @@ private:
     Dev token_norm_, output_query_, loop_query_, loop_kv_query_;
     float qk_clip_ = 0, r_clip_ = 0, alpha_ = 0, cap_ = 0, expert_scale_ = 0;
     int floor_ = 0, ring_ = 0, visit_ = 0, depth_n_ = 0, attend_tiles_ = 0;
-    bool flash_ = false;   // STRATA_INKLING_FLASH=1 (load_geometry())
+    bool flash_ = false;    // STRATA_INKLING_FLASH=1 (load_geometry())
+    bool decode_ = false;   // STRATA_INKLING_DECODE=1 (load_geometry())
+    bool cpu_sum_ = false;  // moe_add() left the CPU experts' sum for layer_tail()
+    bool fused(int n) const;   // decode_ and fewer rows than a prompt batch
 
     float *q_ = nullptr, *k_ = nullptr, *v_ = nullptr, *att_ = nullptr, *gate_ = nullptr, *rel_ = nullptr,
-          *sink_ = nullptr, *taps_ = nullptr, *scores_ = nullptr, *partial_ = nullptr, *halo_ = nullptr;
+          *sink_ = nullptr, *taps_ = nullptr, *scores_ = nullptr, *partial_ = nullptr, *halo_ = nullptr,
+          *chunks_ = nullptr, *taps2_ = nullptr;
     std::array<float*, 3> input_{};
     std::array<float*, 4> depth_{};
     float *prelude_ = nullptr, *bank0_ = nullptr, *bank1_ = nullptr, *msg_ = nullptr, *pair_ = nullptr,

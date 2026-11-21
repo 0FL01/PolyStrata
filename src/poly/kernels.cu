@@ -2688,6 +2688,76 @@ void gemv_f32(const float* w, const float* x, float* y, int n_in, int n_out, int
     gemv(w, x, y, n_in, n_out, rows_per_x, rows, stream);
 }
 
+namespace {
+
+// gemv_f32_waves(): L lanes of a wave take an output row, float4s L apart, and meet by xor shuffles inside their L.
+template <int L> __global__ void __launch_bounds__(256)
+gemv_waves_kernel(const float* __restrict__ w, const float* __restrict__ x, float* __restrict__ y, int n_in, int n_out,
+                  int rows_per_x) {
+    const int lane = threadIdx.x % L, o = blockIdx.x * (256 / L) + threadIdx.x / L;
+    const size_t tok = blockIdx.y;
+    if (o >= n_out) return;
+    const float4* wr = reinterpret_cast<const float4*>(w + size_t(o) * n_in);
+    const float4* xr =
+        reinterpret_cast<const float4*>(x + (tok * size_t(n_out / rows_per_x) + size_t(o / rows_per_x)) * n_in);
+    float acc = 0.0f;
+    for (int i = lane; i < n_in / 4; i += L) {
+        const float4 a = wr[i], b = xr[i];
+        acc += a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    }
+#pragma unroll
+    for (int d = L / 2; d > 0; d /= 2) acc += __shfl_xor(acc, d, 32);
+    if (lane == 0) y[tok * n_out + o] = acc;
+}
+
+// A row too long for the few rows there are to fill the card: a block a row, float4s 256 apart.
+__global__ void __launch_bounds__(256)
+gemv_rows_kernel(const float* __restrict__ w, const float* __restrict__ x, float* __restrict__ y, int n_in, int n_out,
+                 int rows_per_x) {
+    __shared__ float waves[8];
+    const int o = blockIdx.x;
+    const size_t tok = blockIdx.y;
+    const float4* wr = reinterpret_cast<const float4*>(w + size_t(o) * n_in);
+    const float4* xr =
+        reinterpret_cast<const float4*>(x + (tok * size_t(n_out / rows_per_x) + size_t(o / rows_per_x)) * n_in);
+    float acc = 0.0f;
+    for (int i = threadIdx.x; i < n_in / 4; i += 256) {
+        const float4 a = wr[i], b = xr[i];
+        acc += a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    }
+#pragma unroll
+    for (int d = 16; d > 0; d /= 2) acc += __shfl_xor(acc, d, 32);
+    if (threadIdx.x % 32 == 0) waves[threadIdx.x / 32] = acc;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float sum = 0.0f;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) sum += waves[i];
+        y[tok * n_out + o] = sum;
+    }
+}
+
+}  // namespace
+
+void gemv_f32_waves(const float* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows,
+                    void* stream) {
+    // float4 rows: the engine's buffers are aligned and every product of a model that asks for this is whole float4s
+    if (n_in % 4 || (reinterpret_cast<uintptr_t>(w) | reinterpret_cast<uintptr_t>(x)) % 16)
+        return gemv(w, x, y, n_in, n_out, rows_per_x, rows, stream);
+    const cudaStream_t st = (cudaStream_t) stream;
+    const auto launch = [&]<int L>() {
+        gemv_waves_kernel<L><<<dim3((n_out + 256 / L - 1) / (256 / L), rows), 256, 0, st>>>(w, x, y, n_in, n_out,
+                                                                                       rows_per_x);
+    };
+    // fewer blocks than two a compute unit of an RX 6700 XT at 32 lanes a row: a block a row instead
+    if (n_in >= 1024 && (n_out + 7) / 8 * rows < 80)
+        gemv_rows_kernel<<<dim3(n_out, rows), 256, 0, st>>>(w, x, y, n_in, n_out, rows_per_x);
+    else if (n_in >= 256) launch.template operator()<32>();
+    else if (n_in >= 128) launch.template operator()<16>();
+    else if (n_in >= 64) launch.template operator()<8>();
+    else launch.template operator()<4>();
+}
+
 void gemv_bf16(const uint16_t* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows,
                void* stream) {
     gemv(w, x, y, n_in, n_out, rows_per_x, rows, stream);

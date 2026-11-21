@@ -3664,7 +3664,8 @@ void Engine::lin_raw(const Dev& w, const float* x, float* y, int n, const void* 
             }
             return gemm_f32(blas_, wf, x, y, w.n_in, w.n_out, per, n);
         }
-        if (w.type == kTypeF32) return gemv_f32(fp(w), x, y, w.n_in, w.n_out, per, n, st_);
+        if (w.type == kTypeF32)
+            return (wave_gemv_ ? gemv_f32_waves : gemv_f32)(fp(w), x, y, w.n_in, w.n_out, per, n, st_);
         return gemv_bf16((const uint16_t*) w.p, x, y, w.n_in, w.n_out, per, n, st_);
     }
     // a prompt batch: llama.cpp's matrix-matrix kernels read the weights once for all the tokens

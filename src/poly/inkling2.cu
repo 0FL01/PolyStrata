@@ -21,6 +21,8 @@ namespace strata::poly {
 namespace {
 
 constexpr int kThreads = 128;
+constexpr int kRowWidth = 2304;   // Inkling2::kWidth, for the kernels that keep a whole row in registers
+constexpr int kKvWidth = 1024;    // Inkling2::kKey
 constexpr int kValueTile = 128;
 int div_up(int a, int b) { return (a + b - 1) / b; }
 
@@ -52,27 +54,68 @@ template <bool Maximum = false> __device__ float block_reduce(float x, float* wa
 struct MixInputs { const float* x[5]; };
 
 // A depth query attends all finished blocks and the current partial block. RMS-normalized states are values too.
-__global__ void mix_kernel(MixInputs in, int count, const float* query, float* out, int width) {
-    const size_t row = (size_t) blockIdx.x * width;
-    __shared__ float waves[kThreads / 32];
-    float scale[5], w[5], top = -INFINITY;
-    for (int j = 0; j < count; ++j) {
-        const float* x = in.x[j] + row;
+// Each input's two sums take the same per-thread order and the same reduction tree as one block_reduce() each, but
+// a thread loads its 18 values of every input at once and all ten sums go up the tree together: a single block (one
+// token) waits for memory once, not 36 times. The products are fused as the compiler fuses them in the per-element
+// loops (explicitly: with five inputs in registers it would not).
+__global__ void mix_kernel(MixInputs in, int count, const float* query, float* out) {
+    constexpr int kMost = 5, kWaves = kThreads / 32, kPer = kRowWidth / kThreads;
+    static_assert(kRowWidth % kThreads == 0, "a row is whole loads of the block");
+    const size_t row = (size_t) blockIdx.x * kRowWidth;
+    __shared__ float waves[2 * kMost][kWaves];
+    float x[kMost][kPer], q[kPer];
+#pragma unroll
+    for (int k = 0; k < kPer; ++k) q[k] = query[threadIdx.x + k * kThreads];
+#pragma unroll
+    for (int j = 0; j < kMost; ++j)
+        if (j < count)
+#pragma unroll
+            for (int k = 0; k < kPer; ++k) x[j][k] = in.x[j][row + threadIdx.x + k * kThreads];
+    const int lane = threadIdx.x & 31, wave = threadIdx.x / 32;
+#pragma unroll
+    for (int j = 0; j < kMost; ++j) {
+        if (j >= count) break;
         float ss = 0.f, dot = 0.f;
-        for (int i = threadIdx.x; i < width; i += kThreads) {
-            ss += x[i] * x[i];
-            dot += x[i] * query[i];
+#pragma unroll
+        for (int k = 0; k < kPer; ++k) {
+            ss = __fmaf_rn(x[j][k], x[j][k], ss);
+            dot = __fmaf_rn(x[j][k], q[k], dot);
         }
-        scale[j] = rsqrtf(block_reduce(ss, waves) / width + 1.e-6f);
-        w[j] = block_reduce(dot, waves) * scale[j] * rsqrtf((float) width);
-        top = fmaxf(top, w[j]);
+        ss = wave_reduce<false>(ss);
+        dot = wave_reduce<false>(dot);
+        if (lane == 0) {
+            waves[2 * j][wave] = ss;
+            waves[2 * j + 1][wave] = dot;
+        }
     }
+    __syncthreads();
+    if (wave == 0)
+#pragma unroll
+        for (int v = 0; v < 2 * kMost; ++v) {
+            if (v >= 2 * count) break;
+            const float y = wave_reduce<false>(lane < kWaves ? waves[v][lane] : 0.f);
+            if (lane == 0) waves[v][0] = y;
+        }
+    __syncthreads();
+    float scale[kMost], w[kMost], top = -INFINITY;
+#pragma unroll
+    for (int j = 0; j < kMost; ++j)
+        if (j < count) {
+            scale[j] = rsqrtf(waves[2 * j][0] / kRowWidth + 1.e-6f);
+            w[j] = waves[2 * j + 1][0] * scale[j] * rsqrtf((float) kRowWidth);
+            top = fmaxf(top, w[j]);
+        }
     float sum = 0.f;
-    for (int j = 0; j < count; ++j) sum += (w[j] = expf(w[j] - top));
-    for (int i = threadIdx.x; i < width; i += kThreads) {
+#pragma unroll
+    for (int j = 0; j < kMost; ++j)
+        if (j < count) sum += (w[j] = expf(w[j] - top));
+#pragma unroll
+    for (int k = 0; k < kPer; ++k) {
         float val = 0.f;
-        for (int j = 0; j < count; ++j) val += w[j] * scale[j] * in.x[j][row + i];
-        out[row + i] = val / sum;
+#pragma unroll
+        for (int j = 0; j < kMost; ++j)
+            if (j < count) val = __fmaf_rn(w[j] * scale[j], x[j][k], val);
+        out[row + threadIdx.x + k * kThreads] = val / sum;
     }
 }
 
@@ -83,9 +126,8 @@ __global__ void control_kernel(float* cur, const float* msg, const float* gain, 
 
 // One thread owns one channel and keeps its raw input history across the chunk. In GGUF the static taps
 // run oldest to newest; the input-dependent taps of each KV head start with the current token.
-__global__ void conv_kernel(float* x, float* state, const float* w, const float* dynamic, int width, int n) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= width) return;
+__device__ __forceinline__ void conv_channel(float* x, float* state, const float* w, const float* dynamic, int width,
+                                             int n, int i) {
     float* h = state + 3 * i;
     float a = h[0], b = h[1], c = h[2];
     w += 4 * i;
@@ -106,6 +148,47 @@ __global__ void conv_kernel(float* x, float* state, const float* w, const float*
     h[0] = a;
     h[1] = b;
     h[2] = c;
+}
+
+__global__ void conv_kernel(float* x, float* state, const float* w, const float* dynamic, int width, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < width) conv_channel(x, state, w, dynamic, width, n, i);
+}
+
+// The decode switch's launches that each do what two to four of the ones above do, with the same sums.
+struct Conv {
+    float* x;
+    float* state;
+    const float* w;
+    const float* dynamic;
+};
+// K's and V's convolutions (kKey channels each) in one launch.
+__global__ void conv2_kernel(Conv k, Conv v, int width, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const bool second = i >= width;
+    if (second) i -= width;
+    if (i >= width) return;
+    const Conv& c = second ? v : k;
+    conv_channel(c.x, c.state, c.w, c.dynamic, width, n, i);
+}
+
+// A static convolution of x (plus `add`, the CPU experts' sum, when there is one) added to the residual r, as
+// axpy(add, 1, x), conv() and axpy(x, 1, r) do. With `depth`, a block of layers starts: depth takes r and r takes x,
+// as axpy(r, 1, depth) and axpy(x, 1, r) without adding do.
+__global__ void conv_add_kernel(float* x, const float* add, float* state, const float* w, float* r, float* depth,
+                                int width, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= width) return;
+    if (add)
+        for (int t = 0; t < n; ++t) x[(size_t) t * width + i] = x[(size_t) t * width + i] + add[(size_t) t * width + i];
+    conv_channel(x, state, w, nullptr, width, n, i);
+    for (int t = 0; t < n; ++t) {
+        const size_t at = (size_t) t * width + i;
+        if (depth) {
+            depth[at] = r[at];
+            r[at] = x[at];
+        } else r[at] = r[at] + x[at];
+    }
 }
 
 // A prompt batch's convolution in spans of kConvSpan tokens, a thread a channel and span: conv_halo_kernel keeps the
@@ -152,16 +235,157 @@ __global__ void conv_span_kernel(float* x, float* state, const float* halo, cons
     }
 }
 
-__global__ void head_norm_kernel(float* x, const float* w, int width, int heads, float clip, float eps,
-                                 int64_t pos, int floor, float alpha) {
-    __shared__ float waves[kThreads / 32];
-    const int i = threadIdx.x, head = blockIdx.x, row = blockIdx.y;
+__device__ __forceinline__ void head_norm(float* x, const float* w, int width, int heads, float clip, float eps,
+                                          int64_t pos, int floor, float alpha, int head, int row, float* waves) {
+    const int i = threadIdx.x;
     float* dest = x + ((size_t) row * heads + head) * width;
     const float v = i < width ? dest[i] * (w ? w[head * width + i] : 1.f) : 0.f;
     const float ss = block_reduce(v * v, waves);
     const float s = clip > 0.f ? fminf(1.f, clip / (sqrtf(ss) + 1.e-6f)) : rsqrtf(ss / width + eps);
     const float tau = floor > 0 ? 1.f + alpha * logf(fmaxf(1.f, float(pos + row + 1) / floor)) : 1.f;
     if (i < width) dest[i] = v * s * tau;
+}
+
+__global__ void head_norm_kernel(float* x, const float* w, int width, int heads, float clip, float eps,
+                                 int64_t pos, int floor, float alpha) {
+    __shared__ float waves[kThreads / 32];
+    head_norm(x, w, width, heads, clip, eps, pos, floor, alpha, blockIdx.x, blockIdx.y, waves);
+}
+
+// Q's, K's, V's and the relative terms' norms in one launch, a block a head as head_norm_kernel.
+struct HeadNorm {
+    float* x;
+    const float* w;
+    int width, heads;
+    float clip;
+    int floor;
+};
+struct HeadNorms { HeadNorm s[4]; };
+__global__ void head_norms_kernel(HeadNorms h, float eps, int64_t pos, float alpha) {
+    __shared__ float waves[kThreads / 32];
+    int head = blockIdx.x, j = 0;
+    while (j < 3 && head >= h.s[j].heads) head -= h.s[j++].heads;
+    const HeadNorm& s = h.s[j];
+    head_norm(s.x, s.w, s.width, s.heads, s.clip, eps, pos, s.floor, alpha, head, blockIdx.y, waves);
+}
+
+// K and V into their Q8_0 caches in one launch, as store_q8_kernel writes them, a row at (pos + row) % ring (or
+// pos + row in a full layer's cache).
+__global__ void store2_q8_kernel(const float* k, const float* v, int8_t* kc, __half* ks, int8_t* vc, __half* vs,
+                                 int64_t pos, int ring, int rows) {
+    constexpr int nb = kKvWidth / 32;
+    int gb = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gb >= 2 * nb * rows) return;
+    const bool second = gb >= nb * rows;
+    if (second) gb -= nb * rows;
+    const int row = gb / nb, blk = gb % nb;
+    const int64_t at = ring ? (pos + row) % ring : pos + row;
+    const float* xr = (second ? v : k) + (size_t) row * kKvWidth + blk * 32;
+    float amax = 0.f;
+#pragma unroll
+    for (int j = 0; j < 32; ++j) amax = fmaxf(amax, fabsf(xr[j]));
+    const float d = amax / 127.0f;
+    const float id = d > 0.f ? 1.0f / d : 0.0f;
+    (second ? vs : ks)[(size_t) at * nb + blk] = __float2half(d);
+    int8_t* cr = (second ? vc : kc) + (size_t) at * kKvWidth + blk * 32;
+#pragma unroll
+    for (int j = 0; j < 32; ++j) {
+        float q = rintf(xr[j] * id);
+        q = fminf(fmaxf(q, -127.0f), 127.0f);
+        cr[j] = (int8_t) q;
+    }
+}
+
+// A loop stream's control (Inkling2::control) in three launches instead of seven, the first: the message as
+// mix_kernel mixes the banks, and the RMS norms of the stream and the message side by side in pair.
+__global__ void control_in_kernel(const float* bank0, const float* bank1, const float* query, const float* in,
+                                  float* msg, float* pair) {
+    constexpr int kPer = kRowWidth / kThreads, kWaves = kThreads / 32;
+    const size_t row = (size_t) blockIdx.x * kRowWidth;
+    __shared__ float waves[6][kWaves];
+    float b0[kPer], b1[kPer], x[kPer], q[kPer];
+#pragma unroll
+    for (int k = 0; k < kPer; ++k) {
+        const int i = threadIdx.x + k * kThreads;
+        q[k] = query[i];
+        b0[k] = bank0[row + i];
+        b1[k] = bank1[row + i];
+        x[k] = in[row + i];
+    }
+    float sums[6] = {};   // the banks' squares and products with the query, the stream's squares, the message's
+#pragma unroll
+    for (int k = 0; k < kPer; ++k) {
+        sums[0] = __fmaf_rn(b0[k], b0[k], sums[0]);
+        sums[1] = __fmaf_rn(b0[k], q[k], sums[1]);
+        sums[2] = __fmaf_rn(b1[k], b1[k], sums[2]);
+        sums[3] = __fmaf_rn(b1[k], q[k], sums[3]);
+        sums[4] += x[k] * x[k];
+    }
+    const int lane = threadIdx.x & 31, wave = threadIdx.x / 32;
+    const auto reduce = [&](int first, int count) {
+        for (int j = first; j < first + count; ++j) {
+            const float y = wave_reduce<false>(sums[j]);
+            if (lane == 0) waves[j][wave] = y;
+        }
+        __syncthreads();
+        if (wave == 0)
+            for (int j = first; j < first + count; ++j) {
+                const float y = wave_reduce<false>(lane < kWaves ? waves[j][lane] : 0.f);
+                if (lane == 0) waves[j][0] = y;
+            }
+        __syncthreads();
+        for (int j = first; j < first + count; ++j) sums[j] = waves[j][0];
+    };
+    reduce(0, 5);
+    const float s0 = rsqrtf(sums[0] / kRowWidth + 1.e-6f), s1 = rsqrtf(sums[2] / kRowWidth + 1.e-6f);
+    float w0 = sums[1] * s0 * rsqrtf((float) kRowWidth), w1 = sums[3] * s1 * rsqrtf((float) kRowWidth);
+    const float top = fmaxf(w0, w1);
+    w0 = expf(w0 - top);
+    w1 = expf(w1 - top);
+    const float sum = w0 + w1;
+    float m[kPer];
+#pragma unroll
+    for (int k = 0; k < kPer; ++k) {
+        float val = __fmaf_rn(w0 * s0, b0[k], 0.f);
+        val = __fmaf_rn(w1 * s1, b1[k], val);
+        m[k] = val / sum;
+        msg[row + threadIdx.x + k * kThreads] = m[k];
+        sums[5] += m[k] * m[k];
+    }
+    __syncthreads();
+    reduce(5, 1);
+    const float sx = 1.0f / sqrtf(sums[4] / float(kRowWidth) + 1.e-6f), sm = 1.0f / sqrtf(sums[5] / float(kRowWidth) + 1.e-6f);
+    float* out = pair + 2 * row;
+#pragma unroll
+    for (int k = 0; k < kPer; ++k) {
+        const int i = threadIdx.x + k * kThreads;
+        out[i] = x[k] * sx;
+        out[kRowWidth + i] = m[k] * sm;
+    }
+}
+
+// The third: the gain and the forget gate of each value from the rank, eight lanes an output, applied to the stream.
+__global__ void __launch_bounds__(256) control_out_kernel(const float* gain, const float* forget, const float* rank,
+                                                          const float* msg, float* cur, int ranks) {
+    const int lane = threadIdx.x % 8, o = blockIdx.x * 32 + threadIdx.x / 8, t = blockIdx.y;
+    const float4* g = reinterpret_cast<const float4*>(gain + (size_t) o * ranks);
+    const float4* f = reinterpret_cast<const float4*>(forget + (size_t) o * ranks);
+    const float4* r = reinterpret_cast<const float4*>(rank + (size_t) t * ranks);
+    float ga = 0.f, fa = 0.f;
+    for (int i = lane; i < ranks / 4; i += 8) {
+        const float4 a = g[i], b = f[i], x = r[i];
+        ga += a.x * x.x + a.y * x.y + a.z * x.z + a.w * x.w;
+        fa += b.x * x.x + b.y * x.y + b.z * x.z + b.w * x.w;
+    }
+#pragma unroll
+    for (int d = 4; d > 0; d /= 2) {
+        ga += __shfl_xor(ga, d, 32);
+        fa += __shfl_xor(fa, d, 32);
+    }
+    if (lane == 0) {
+        const size_t at = (size_t) t * kRowWidth + o;
+        cur[at] = (1.f - tanhf(fa)) * cur[at] + tanhf(ga) * msg[at];
+    }
 }
 
 }  // namespace
@@ -182,6 +406,10 @@ void Inkling2::load_geometry() {
     const char* flash = std::getenv("STRATA_INKLING_FLASH");
     flash_ = flash && flash[0] == '1' && flash[1] == '\0';
     if (flash_) std::fputs("strata-poly: STRATA_INKLING_FLASH=1: fused attention for prompt batches\n", stderr);
+    const char* decode = std::getenv("STRATA_INKLING_DECODE");
+    decode_ = decode && decode[0] == '1' && decode[1] == '\0';
+    wave_gemv_ = decode_;
+    if (decode_) std::fputs("strata-poly: STRATA_INKLING_DECODE=1: decode kernels for a few tokens at a time\n", stderr);
     if (!q8() && opt_.kv_format != KvFmt::kFp16)
         throw std::runtime_error("Inkling-2-Mini supports Q8_0 or FP16 KV");
     load_shape();
@@ -407,6 +635,10 @@ void Inkling2::assign_scratch() {
                              std::min(target_tiles, rows_ * div_up(opt_.max_context, kValueTile)));
     scores_ = fbuf(inkling::plain_score_floats(attend_tiles_));
     partial_ = fbuf(inkling::plain_partial_floats(attend_tiles_));
+    if (decode_) {
+        chunks_ = fbuf(inkling::decode_floats());
+        taps2_ = fbuf(n * kKv * kTaps);
+    }
     for (auto& x : input_) x = fbuf(width);
     for (auto& x : depth_) x = fbuf(width);
     prelude_ = fbuf(width);
@@ -446,9 +678,16 @@ void Inkling2::store(const float* x, Cache& c, int side, int n) {
 
 void Inkling2::attention(const Block& b, int n) {
     Cache& c = caches_[visit_];
-    store(k_, c, 0, n);
-    store(v_, c, 1, n);
     const bool swa = local(visit_);
+    if (fused(n) && q8()) {
+        const int blocks = 2 * (kKey / 32) * n;
+        store2_q8_kernel<<<div_up(blocks, 256), 256, 0, cs(st_)>>>(
+            k_, v_, (int8_t*) c.planes[0].data, (__half*) c.planes[1].data, (int8_t*) c.planes[2].data,
+            (__half*) c.planes[3].data, pos_, swa ? ring_ : 0, n);
+    } else {
+        store(k_, c, 0, n);
+        store(v_, c, 1, n);
+    }
     inkling::Attend a;
     a.q = q_;
     a.rel = rel_;
@@ -464,24 +703,36 @@ void Inkling2::attention(const Block& b, int n) {
     a.out = att_;
     // Prompt batches only: a token's answer and short calls keep the plain kernels and their sums.
     if (flash_ && n >= kStageRows) inkling::attend_flash(a, cs(st_));
+    else if (decode_ && n < kStageRows) inkling::attend_decode(a, chunks_, cs(st_));
     else inkling::attend_plain(a, scores_, partial_, attend_tiles_, cs(st_));
 }
 
 void Inkling2::depth_mix(const float* query, float* dst, int first, int n) {
+    static_assert(kWidth == kRowWidth);
     const size_t at = (size_t) first * kWidth;
     MixInputs m{};
     for (int i = 0; i < depth_n_; ++i) m.x[i] = depth_[i] + at;
     m.x[depth_n_] = r_ + at;
-    mix_kernel<<<n, kThreads, 0, cs(st_)>>>(m, depth_n_ + 1, query, dst, kWidth);
+    mix_kernel<<<n, kThreads, 0, cs(st_)>>>(m, depth_n_ + 1, query, dst);
 }
 
 void Inkling2::control(const Block& b, int il, int stream, float* in, int n) {
     const size_t row = 2 * (size_t) (il - kStart) + (stream >= 2 ? 1 : 0);
     const float* query = fp(stream == 0 || stream == 3 ? loop_query_ : loop_kv_query_) + row * kWidth;
-    mix_kernel<<<n, kThreads, 0, cs(st_)>>>(MixInputs{{bank0_, bank1_}}, 2, query, msg_, kWidth);
-    rms_norm(in, nullptr, pair_, kWidth, n, 1.e-6f, st_, 2 * kWidth);
-    rms_norm(msg_, nullptr, pair_ + kWidth, kWidth, n, 1.e-6f, st_, 2 * kWidth);
+    if (fused(n)) control_in_kernel<<<n, kThreads, 0, cs(st_)>>>(bank0_, bank1_, query, in, msg_, pair_);
+    else {
+        mix_kernel<<<n, kThreads, 0, cs(st_)>>>(MixInputs{{bank0_, bank1_}}, 2, query, msg_);
+        rms_norm(in, nullptr, pair_, kWidth, n, 1.e-6f, st_, 2 * kWidth);
+        rms_norm(msg_, nullptr, pair_ + kWidth, kWidth, n, 1.e-6f, st_, 2 * kWidth);
+    }
     const Control& c = b.control[stream];
+    if (fused(n) && c.gain.type == kTypeF32 && c.forget.type == kTypeF32 && c.gain.scale == 1.f &&
+        c.forget.scale == 1.f) {
+        lin(c.down, pair_, rank_, n);
+        control_out_kernel<<<dim3(kWidth / 32, n), 256, 0, cs(st_)>>>(fp(c.gain), fp(c.forget), rank_, msg_, in,
+                                                                      kRank);
+        return;
+    }
     lin(c.down, pair_, rank_, n);
     lin(c.gain, rank_, gain_, n);
     lin(c.forget, rank_, forget_, n);
@@ -548,23 +799,42 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
         if (!swa) lin(dyn, input, taps_, n);
         conv(x, state, fp(w), swa ? nullptr : taps_, kKey, n);
     };
-    kv_conv(k_, hist, b.kconv, b.kproj, xk);
-    kv_conv(v_, hist + 3 * kKey, b.vconv, b.vproj, xv);
     const int floor = swa ? 0 : floor_;
+    if (fused(n)) {
+        if (!swa) {
+            lin(b.kproj, xk, taps_, n);
+            lin(b.vproj, xv, taps2_, n);
+        }
+        conv2_kernel<<<div_up(2 * kKey, kThreads), kThreads, 0, cs(st_)>>>(
+            Conv{k_, hist, fp(b.kconv), swa ? nullptr : taps_}, Conv{v_, hist + 3 * kKey, fp(b.vconv), swa ? nullptr : taps2_},
+            kKey, n);
+        HeadNorms h{{{q_, fp(b.qclip), kHead, kHeads, qk_clip_, floor}, {k_, nullptr, kHead, kKv, qk_clip_, 0},
+                     {v_, nullptr, kHead, kKv, 0.f, 0}, {rel_, fp(b.rclip), kRelative, kHeads, r_clip_, floor}}};
+        head_norms_kernel<<<dim3(2 * kHeads + 2 * kKv, n), kThreads, 0, cs(st_)>>>(h, rms_eps_, pos_, alpha_);
+    } else {
+        kv_conv(k_, hist, b.kconv, b.kproj, xk);
+        kv_conv(v_, hist + 3 * kKey, b.vconv, b.vproj, xv);
+    }
     const auto heads = [&](float* x, const float* w, int width, int count, float clip, int log_floor) {
         head_norm_kernel<<<dim3(count, n), kThreads, 0, cs(st_)>>>(x, w, width, count, clip, rms_eps_, pos_, log_floor,
                                                                   alpha_);
     };
-    heads(q_, fp(b.qclip), kHead, kHeads, qk_clip_, floor);
-    heads(k_, nullptr, kHead, kKv, qk_clip_, 0);
-    heads(v_, nullptr, kHead, kKv, 0.f, 0);
-    heads(rel_, fp(b.rclip), kRelative, kHeads, r_clip_, floor);
+    if (!fused(n)) {
+        heads(q_, fp(b.qclip), kHead, kHeads, qk_clip_, floor);
+        heads(k_, nullptr, kHead, kKv, qk_clip_, 0);
+        heads(v_, nullptr, kHead, kKv, 0.f, 0);
+        heads(rel_, fp(b.rclip), kRelative, kHeads, r_clip_, floor);
+    }
     dbg("Qcur", visit_, q_, kQuery);
     dbg("Kcur", visit_, k_, kKey);
     attention(b, n);
     lin(b.o, att_, ao_, n);
-    conv(ao_, hist + 6 * kKey, fp(b.aconv), nullptr, kWidth, n);
-    if (il % kBlock == 0) {
+    if (fused(n))
+        conv_add_kernel<<<div_up(kWidth, kThreads), kThreads, 0, cs(st_)>>>(
+            ao_, nullptr, hist + 6 * kKey, fp(b.aconv), r_, il % kBlock == 0 ? depth_[depth_n_++] : nullptr, kWidth, n);
+    else conv(ao_, hist + 6 * kKey, fp(b.aconv), nullptr, kWidth, n);
+    if (fused(n)) {   // conv_add_kernel() did the rest
+    } else if (il % kBlock == 0) {
         axpy(r_, 1.f, depth_[depth_n_++], n * kWidth, false, st_);
         axpy(ao_, 1.f, r_, n * kWidth, false, st_);
     } else axpy(ao_, 1.f, r_, n * kWidth, true, st_);
@@ -575,8 +845,22 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
     if (!batched(L, n)) moe_router(L, n);
 }
 
+bool Inkling2::fused(int n) const { return decode_ && n < kStageRows; }
+
+void Inkling2::moe_add(int n) {
+    if (fused(n)) cpu_sum_ = true;   // layer_tail() adds it
+    else Engine::moe_add(n);
+}
+
 void Inkling2::layer_tail(Layer&, int il, int n) {
     float* hist = state_ + (size_t) visit_ * kConvFloats + 6 * kKey + 3 * kWidth;
+    if (fused(n)) {
+        conv_add_kernel<<<div_up(kWidth, kThreads), kThreads, 0, cs(st_)>>>(
+            fo_, cpu_sum_ ? h_cpu_ : nullptr, hist, fp(blocks_[il].fconv), r_, nullptr, kWidth, n);
+        cpu_sum_ = false;
+        dbg("l_out", visit_, r_, kWidth);
+        return;
+    }
     conv(fo_, hist, fp(blocks_[il].fconv), nullptr, kWidth, n);
     axpy(fo_, 1.f, r_, n * kWidth, true, st_);
     dbg("l_out", visit_, r_, kWidth);

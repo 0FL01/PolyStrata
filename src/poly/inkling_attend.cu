@@ -313,6 +313,205 @@ flash_kernel(const float* __restrict__ q, const float* __restrict__ rel, const f
     }
 }
 
+// attend_decode(): a token's keys in chunks of whole tiles of kThreads keys, one block a chunk and K/V group. A thread
+// takes a key of a tile and its 3 query heads' scores; then four groups of 32 lanes add the tile's values, 4 dims a lane
+// and every fourth key, and fold their sums together at the end. A chunk leaves its maximum, its sum of exponentials and
+// its unnormalized values per head; decode_combine_kernel() adds the chunks and the sink, divides and gates.
+constexpr int kDecodeBlocks = 4096;   // chunks times K/V groups times rows at most: the scratch's size
+constexpr int kChunkFloats = kGroup * (kHead + 2);
+
+template <bool Q8> struct KeyRow;
+template <> struct KeyRow<true> {
+    static __device__ void dot(KvView k, size_t at, const float (*q)[kHead], float* d) {
+        const int4* codes = reinterpret_cast<const int4*>(reinterpret_cast<const int8_t*>(k.data) + at);
+        const __half* sc = reinterpret_cast<const __half*>(k.scales) + at / 32;
+#pragma unroll
+        for (int b = 0; b < kHead / 32; ++b) {
+            float part[kGroup] = {};
+#pragma unroll
+            for (int c = 0; c < 2; ++c) {
+                const int4 w = codes[2 * b + c];
+                const int words[4] = {w.x, w.y, w.z, w.w};
+#pragma unroll
+                for (int x = 0; x < 4; ++x)
+#pragma unroll
+                    for (int y = 0; y < 4; ++y) {
+                        const float val = (float) (int8_t) (words[x] >> (8 * y));
+                        const int i = 32 * b + 16 * c + 4 * x + y;
+#pragma unroll
+                        for (int r = 0; r < kGroup; ++r) part[r] += q[r][i] * val;
+                    }
+            }
+            const float scale = __half2float(sc[b]);
+#pragma unroll
+            for (int r = 0; r < kGroup; ++r) d[r] += part[r] * scale;
+        }
+    }
+    static __device__ void value(KvView v, size_t at, float* x) {
+        const char4 c = *reinterpret_cast<const char4*>(reinterpret_cast<const int8_t*>(v.data) + at);
+        const float scale = __half2float(reinterpret_cast<const __half*>(v.scales)[at / 32]);
+        x[0] = c.x * scale;
+        x[1] = c.y * scale;
+        x[2] = c.z * scale;
+        x[3] = c.w * scale;
+    }
+};
+template <> struct KeyRow<false> {
+    static __device__ void dot(KvView k, size_t at, const float (*q)[kHead], float* d) {
+        const uint4* halves = reinterpret_cast<const uint4*>(reinterpret_cast<const __half*>(k.data) + at);
+#pragma unroll
+        for (int b = 0; b < kHead / 8; ++b) {
+            const uint4 w = halves[b];
+            const unsigned words[4] = {w.x, w.y, w.z, w.w};
+#pragma unroll
+            for (int x = 0; x < 4; ++x) {
+                const __half2 h2 = *reinterpret_cast<const __half2*>(&words[x]);
+                const float2 f = __half22float2(h2);
+                const int i = 8 * b + 2 * x;
+#pragma unroll
+                for (int r = 0; r < kGroup; ++r) d[r] += q[r][i] * f.x + q[r][i + 1] * f.y;
+            }
+        }
+    }
+    static __device__ void value(KvView v, size_t at, float* x) {
+        const uint2 w = *reinterpret_cast<const uint2*>(reinterpret_cast<const __half*>(v.data) + at);
+        const float2 a = __half22float2(*reinterpret_cast<const __half2*>(&w.x));
+        const float2 b = __half22float2(*reinterpret_cast<const __half2*>(&w.y));
+        x[0] = a.x;
+        x[1] = a.y;
+        x[2] = b.x;
+        x[3] = b.y;
+    }
+};
+
+// the kGroup values of a block's threads reduced together, every thread gets them
+template <bool Maximum> __device__ void group_reduce(float* x, float (*waves)[kThreads / 32]) {
+    const int lane = threadIdx.x & 31, wave = threadIdx.x / 32;
+#pragma unroll
+    for (int r = 0; r < kGroup; ++r) {
+        x[r] = wave_reduce<Maximum>(x[r]);
+        if (lane == 0) waves[r][wave] = x[r];
+    }
+    __syncthreads();
+#pragma unroll
+    for (int r = 0; r < kGroup; ++r) {
+        float y = waves[r][0];
+#pragma unroll
+        for (int w = 1; w < kThreads / 32; ++w) y = Maximum ? fmaxf(y, waves[r][w]) : y + waves[r][w];
+        x[r] = y;
+    }
+    __syncthreads();
+}
+
+template <bool Q8> __global__ void decode_kernel(const float* q, const float* rel, const float* table, KvView k,
+                                                 KvView v, int64_t pos, int window, int ring, int chunk, float* part) {
+    const int c = blockIdx.x, g = blockIdx.y, row = blockIdx.z, t = threadIdx.x;
+    const int64_t end = pos + row + 1, start = oldest(end, window);
+    const int count = (int) (end - start), first = c * chunk, last = min(first + chunk, count);
+    __shared__ float qs[kGroup][kHead], rs[kGroup][kRelative], ps[kThreads][kGroup], red[4][kGroup][kHead];
+    __shared__ float waves[kGroup][kThreads / 32];
+    const size_t qh0 = (size_t) row * kHeads + g * kGroup;
+    for (int i = t; i < kGroup * kHead; i += kThreads) qs[i / kHead][i % kHead] = q[qh0 * kHead + i];
+    if (t < kGroup * kRelative) rs[t / kRelative][t % kRelative] = rel[qh0 * kRelative + t];
+    __syncthreads();
+    float m[kGroup], l[kGroup], acc[kGroup][4] = {};
+#pragma unroll
+    for (int r = 0; r < kGroup; ++r) m[r] = -INFINITY, l[r] = 0.f;
+    const int lane = t & 31, slot = t / 32;
+    for (int tile = first; tile < last; tile += kThreads) {
+        const int i = tile + t;
+        float s[kGroup];
+        if (i < last) {
+            const int64_t key = start + i, delta = end - 1 - key;
+            const size_t at = ((size_t) (ring ? key % ring : key) * kKv + g) * kHead;
+            float d[kGroup] = {};
+            KeyRow<Q8>::dot(k, at, qs, d);
+#pragma unroll
+            for (int r = 0; r < kGroup; ++r) s[r] = d[r] * 0.08838834764831845f;
+            if (delta < kExtent) {
+                const float* tb = table + delta * kRelative;
+#pragma unroll
+                for (int j = 0; j < kRelative; ++j) {
+                    const float b = tb[j];
+#pragma unroll
+                    for (int r = 0; r < kGroup; ++r) s[r] += rs[r][j] * b;
+                }
+            }
+        } else {
+#pragma unroll
+            for (int r = 0; r < kGroup; ++r) s[r] = -INFINITY;
+        }
+        float top[kGroup];
+#pragma unroll
+        for (int r = 0; r < kGroup; ++r) top[r] = s[r];
+        group_reduce<true>(top, waves);
+        float e[kGroup];
+#pragma unroll
+        for (int r = 0; r < kGroup; ++r) {
+            const float next = fmaxf(m[r], top[r]);
+            // every score so far -inf (overflowed terms): the exponentials are 0, as attend_plain() gives them
+            const float base = next == -INFINITY ? 0.f : next;
+            const float keep = expf(m[r] - base);
+            m[r] = next;
+            e[r] = i < last ? expf(s[r] - base) : 0.f;
+            ps[t][r] = e[r];
+            l[r] *= keep;
+#pragma unroll
+            for (int j = 0; j < 4; ++j) acc[r][j] *= keep;
+        }
+        group_reduce<false>(e, waves);   // also makes ps visible
+#pragma unroll
+        for (int r = 0; r < kGroup; ++r) l[r] += e[r];
+        const int keys = min(kThreads, last - tile);
+        for (int j = slot; j < keys; j += 4) {
+            const int64_t key = start + tile + j;
+            float x[4];
+            KeyRow<Q8>::value(v, ((size_t) (ring ? key % ring : key) * kKv + g) * kHead + 4 * lane, x);
+#pragma unroll
+            for (int r = 0; r < kGroup; ++r) {
+                const float p = ps[j][r];
+#pragma unroll
+                for (int y = 0; y < 4; ++y) acc[r][y] += p * x[y];
+            }
+        }
+        __syncthreads();   // ps is written again by the next tile
+    }
+#pragma unroll
+    for (int r = 0; r < kGroup; ++r)
+#pragma unroll
+        for (int y = 0; y < 4; ++y) red[slot][r][4 * lane + y] = acc[r][y];
+    __syncthreads();
+    float* dst = part + (((size_t) row * kKv + g) * gridDim.x + c) * kChunkFloats;
+#pragma unroll
+    for (int r = 0; r < kGroup; ++r) {
+        dst[r * (kHead + 2) + 2 + t] = red[0][r][t] + red[1][r][t] + red[2][r][t] + red[3][r][t];
+        if (t == 0) {
+            dst[r * (kHead + 2)] = m[r];
+            dst[r * (kHead + 2) + 1] = l[r];
+        }
+    }
+}
+
+// A chunk with no keys left -inf, 0 and zeros. The sink as probs_kernel takes it, -inf (no sink) included.
+__global__ void decode_combine_kernel(const float* part, int chunks, const float* sink, const float* gate,
+                                      float* out) {
+    const int h = blockIdx.x, row = blockIdx.y, d = threadIdx.x, g = h / kGroup, r = h % kGroup;
+    const size_t qh = (size_t) row * kHeads + h;
+    const float* base = part + ((size_t) row * kKv + g) * chunks * kChunkFloats + r * (kHead + 2);
+    const float s = sink[qh];
+    float top = s;
+    for (int c = 0; c < chunks; ++c) top = fmaxf(top, base[(size_t) c * kChunkFloats]);
+    const float at = top == -INFINITY ? 0.f : top;
+    float sum = expf(s - at), o = 0.f;
+    for (int c = 0; c < chunks; ++c) {
+        const float* p = base + (size_t) c * kChunkFloats;
+        const float w = expf(p[0] - at);
+        sum += p[1] * w;
+        o += p[2 + d] * w;
+    }
+    out[qh * kHead + d] = o / sum / (1.f + expf(-gate[qh * kHead + d]));
+}
+
 void check(const char* what) {
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(e));
@@ -344,6 +543,26 @@ void attend_plain(const Attend& a, float* scores, float* partial, int tiles, cud
         else launch.template operator()<false>();
         gate_kernel<<<hp, kHead, 0, st>>>(partial, parts, a.gate + off, a.out + off);
     }
+}
+
+size_t decode_floats() { return (size_t) kDecodeBlocks * kChunkFloats; }
+
+void attend_decode(const Attend& a, float* scratch, cudaStream_t st) {
+    if (a.n <= 0) return;
+    if (kKv * a.n > kDecodeBlocks) throw std::runtime_error("Inkling decode attention: too many rows");
+    const int64_t end = a.pos + a.n;
+    const int span = (int) (a.window ? std::min<int64_t>(a.window, end) : end);
+    const int most = std::max(1, kDecodeBlocks / (kKv * a.n));
+    const int chunk = div_up(div_up(span, most), kThreads) * kThreads;
+    const dim3 grid(div_up(span, chunk), kKv, a.n);
+    if (a.k.scales)
+        decode_kernel<true><<<grid, kThreads, 0, st>>>(a.q, a.rel, a.table, a.k, a.v, a.pos, a.window, a.ring, chunk,
+                                                       scratch);
+    else
+        decode_kernel<false><<<grid, kThreads, 0, st>>>(a.q, a.rel, a.table, a.k, a.v, a.pos, a.window, a.ring, chunk,
+                                                        scratch);
+    decode_combine_kernel<<<dim3(kHeads, a.n), kHead, 0, st>>>(scratch, (int) grid.x, a.sink, a.gate, a.out);
+    check("Inkling decode attention");
 }
 
 void attend_flash(const Attend& a, cudaStream_t st) {

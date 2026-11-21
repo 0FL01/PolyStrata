@@ -573,7 +573,7 @@ protected:
     /// The routed experts' rows a call routed on the card has room for (d_): a window of a model that guesses its
     /// own block, or kSumRows.  The others keep kSumRows, whose windows past it are routed on the host as before.
     int card_rows() const;
-    void moe_add(int n);
+    virtual void moe_add(int n);
     template <class F>
     void* record(F&& work);
     void moe_rows(Layer& L, int il, int n);
@@ -723,6 +723,7 @@ protected:
     /// a prompt batch's products go through guard_half_sums(): the model's activations can sum past a half's range
     /// in a block.  Off for the models whose sums stay in range: it cost LFM2.5 4% of a 30K prompt's read on a 5090.
     bool half_sum_guard_ = false;
+    bool wave_gemv_ = false;   ///< lin(): F32 products of a few tokens by gemv_f32_waves() (Inkling's decode switch)
 
     std::vector<Layer> layers_;   ///< the model's, and after them the draft block
     Dev out_norm_, output_;
