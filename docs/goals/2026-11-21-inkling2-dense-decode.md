@@ -1,6 +1,6 @@
 # Goal: faster dense projections and LM head in Inkling decode
 
-Status: active
+Status: complete
 Source: user requests of 2026-11-21: take "faster kernels for the dense Q8 projections and the LM head" into work,
 profile (production may be stopped), plan, then "copy the plan into a goal and implement iteratively", review with
 general-purpose sub-agents, commit, push (and deploy, as the previous goals).
@@ -47,8 +47,11 @@ or a proven blocker; record the evidence and smallest unlock.
     a general-purpose sub-agent with accepted findings fixed; commits on `origin/main`; service runs it with a rollback
     copy; live agent round trip.
   - Primary evidence: A/B logs, parity, `test-agent.py`, `git log origin/main`.
-  - Status: pending
-  - Evidence:
+  - Status: verified
+  - Evidence: A/B and checks in the history; `ec320c9d` on `origin/main`; the service runs `strata-poly-ec320c9d`
+    (rollback `before-ec320c9d.json.bak` + `strata-poly-5903fe61`); live agent round trip passed (tool call ID,
+    reasoning/text, cancel then `MARBLE`), 401 without the key, guard minimum 1,987 MiB free; its requests decoded at
+    39.0–43.6 tok/s (35.7–41.2 with `5903fe61`).
 
 ### Constraints
 
@@ -82,17 +85,9 @@ weights at ~360 GB/s = ~4.9 ms against 6.4.
 2. Q6_K head a warp a row: −0.15…0.19 ms.
 3. Checks, A/B, review, commit, push, deploy.
 
-## Current Checkpoint
-
-- Closes: R3
-- Smallest next action: deploy the committed binary with the production config, live agent check.
-- Expected evidence: service runs it; agent round trip passes.
-- Stop or replan if: a guard fault.
-
 ## Current State
 
-- Resolved: R1, R2; R3 but for deployment.
-- Next: deploy.
+- Resolved: R1–R3.
 
 ## Material Decisions
 
@@ -115,7 +110,10 @@ weights at ~360 GB/s = ~4.9 ms against 6.4.
 
 ## Completion
 
-- Resolved outcomes:
-- Commands and artifacts:
-- Constraint and diff-scope check:
-- Final status:
+- Resolved outcomes: R1–R3 verified.
+- Commands and artifacts: `poly_mmvq_segments_test`, `poly_inkling_attend_test`; scratch benchmarks in
+  `~/.cache/claude-inkling-dense`, `~/.cache/claude-inkling-dec`, `~/.cache/claude-inkling-pp` (outside Git).
+- Constraint and diff-scope check: opt-in under `STRATA_INKLING_DECODE=1`; default path identical on the parity
+  fixture; other models' kernels unchanged in results (bodies moved into device functions); no new VRAM copies.
+- Final status: complete. What remains of the dense floor (~4.9 ms of weights a token at ~360 GB/s against ~5.5 now)
+  is not reachable by launches; more decode speed needs fewer bytes a token.
