@@ -1,6 +1,8 @@
 // src/poly/inkling_attend.cu - see the header.
 #include "inkling_attend.hpp"
 
+#include "strata/kernels/q8_1_finite.hpp"
+
 #include <cuda_fp16.h>
 
 #include <algorithm>
@@ -493,8 +495,13 @@ template <bool Q8> __global__ void decode_kernel(const float* q, const float* re
 }
 
 // A chunk with no keys left -inf, 0 and zeros. The sink as probs_kernel takes it, -inf (no sink) included.
+struct Q81 {
+    __half2 ds;
+    int8_t qs[32];
+};
+
 __global__ void decode_combine_kernel(const float* part, int chunks, const float* sink, const float* gate,
-                                      float* out) {
+                                      float* out, Q81* q8) {
     const int h = blockIdx.x, row = blockIdx.y, d = threadIdx.x, g = h / kGroup, r = h % kGroup;
     const size_t qh = (size_t) row * kHeads + h;
     const float* base = part + ((size_t) row * kKv + g) * chunks * kChunkFloats + r * (kHead + 2);
@@ -509,7 +516,20 @@ __global__ void decode_combine_kernel(const float* part, int chunks, const float
         sum += p[1] * w;
         o += p[2 + d] * w;
     }
-    out[qh * kHead + d] = o / sum / (1.f + expf(-gate[qh * kHead + d]));
+    const float y = o / sum / (1.f + expf(-gate[qh * kHead + d]));
+    out[qh * kHead + d] = y;
+    if (q8) {   // a warp holds a block's 32 values in lane order, as native_quantize_q8_1_kernel's do
+        float amax = fabsf(y), bsum = y;
+#pragma unroll
+        for (int o2 = 16; o2 > 0; o2 >>= 1) {
+            amax = fmaxf(amax, __shfl_xor(amax, o2, 32));
+            bsum += __shfl_xor(bsum, o2, 32);
+        }
+        const float dq = kernels::q8_1_finite(amax / 127.0f);
+        Q81& b = q8[(qh * kHead + d) / 32];
+        b.qs[d % 32] = kernels::q8_1_quant(y, dq, amax);
+        if (d % 32 == 0) b.ds = kernels::q8_1_ds(dq, bsum);
+    }
 }
 
 void check(const char* what) {
@@ -547,7 +567,7 @@ void attend_plain(const Attend& a, float* scores, float* partial, int tiles, cud
 
 size_t decode_floats() { return (size_t) kDecodeBlocks * kChunkFloats; }
 
-void attend_decode(const Attend& a, float* scratch, cudaStream_t st) {
+void attend_decode(const Attend& a, float* scratch, cudaStream_t st, void* q8) {
     if (a.n <= 0) return;
     if (kKv * a.n > kDecodeBlocks) throw std::runtime_error("Inkling decode attention: too many rows");
     const int64_t end = a.pos + a.n;
@@ -561,7 +581,8 @@ void attend_decode(const Attend& a, float* scratch, cudaStream_t st) {
     else
         decode_kernel<false><<<grid, kThreads, 0, st>>>(a.q, a.rel, a.table, a.k, a.v, a.pos, a.window, a.ring, chunk,
                                                         scratch);
-    decode_combine_kernel<<<dim3(kHeads, a.n), kHead, 0, st>>>(scratch, (int) grid.x, a.sink, a.gate, a.out);
+    decode_combine_kernel<<<dim3(kHeads, a.n), kHead, 0, st>>>(scratch, (int) grid.x, a.sink, a.gate, a.out,
+                                                               static_cast<Q81*>(q8));
     check("Inkling decode attention");
 }
 

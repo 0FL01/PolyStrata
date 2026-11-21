@@ -117,6 +117,11 @@ bool native_expert_expdec_takes(const NativeExpertLayout& L, bool& gu, bool& dow
 /// true selects the older kernels that decode it again per column (STRATA_OLD_IQ_MMVQ=1 at startup).  Both give
 /// bitwise the same results.  Set before graph capture; captured graphs keep the kernels they captured.
 void iq_set_old_kernels(bool old);
+/// iq_mmvq_slots() and iq_mmvq_ids() with an NVFP4 row to half a warp, two rows a warp.  A warp a row leaves lanes
+/// idle on Inkling-2-Mini's experts (72 and 36 calls of 32 values a row on 32 lanes); on an RX 6700 XT their 8-slot
+/// launches took 5.3 ms a decode token in place of 6.4 (4 and 8 lanes a row were slower than 16 for the 36-call
+/// rows, 32 for the 72).  Another order of the sums.  Off unless an engine asks (Inkling's decode switch).
+void iq_set_slot_lanes(bool on);
 bool iq_old_kernels();
 
 }  // namespace strata::kernels

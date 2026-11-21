@@ -5,6 +5,7 @@
 #include "inkling_attend.hpp"
 #include "runtime.hpp"
 #include "strata/kernels/gfx_arch.hpp"
+#include "strata/kernels/iq_kernels.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 
 #include <cuda_fp16.h>
@@ -176,7 +177,7 @@ __global__ void conv2_kernel(Conv k, Conv v, int width, int n) {
 // axpy(add, 1, x), conv() and axpy(x, 1, r) do. With `depth`, a block of layers starts: depth takes r and r takes x,
 // as axpy(r, 1, depth) and axpy(x, 1, r) without adding do.
 __global__ void conv_add_kernel(float* x, const float* add, float* state, const float* w, float* r, float* depth,
-                                int width, int n) {
+                                int width, int n, bool clean) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= width) return;
     if (add)
@@ -188,6 +189,7 @@ __global__ void conv_add_kernel(float* x, const float* add, float* state, const 
             depth[at] = r[at];
             r[at] = x[at];
         } else r[at] = r[at] + x[at];
+        if (clean) x[at] = 0.f;   // fo_: the next layer's experts add into it (moe_shared())
     }
 }
 
@@ -638,6 +640,7 @@ void Inkling2::assign_scratch() {
     if (decode_) {
         chunks_ = fbuf(inkling::decode_floats());
         taps2_ = fbuf(n * kKv * kTaps);
+        attq_ = fbuf((size_t) kStageRows * (kQuery / 32) * 36 / sizeof(float));   // Q8_1: 36 bytes a block of 32
     }
     for (auto& x : input_) x = fbuf(width);
     for (auto& x : depth_) x = fbuf(width);
@@ -703,7 +706,7 @@ void Inkling2::attention(const Block& b, int n) {
     a.out = att_;
     // Prompt batches only: a token's answer and short calls keep the plain kernels and their sums.
     if (flash_ && n >= kStageRows) inkling::attend_flash(a, cs(st_));
-    else if (decode_ && n < kStageRows) inkling::attend_decode(a, chunks_, cs(st_));
+    else if (decode_ && n < kStageRows) inkling::attend_decode(a, chunks_, cs(st_), attq_);
     else inkling::attend_plain(a, scores_, partial_, attend_tiles_, cs(st_));
 }
 
@@ -754,6 +757,12 @@ void Inkling2::run_visits(int n) {
         first = (int) std::min<int64_t>(n, im.at + im.n - pos_);
     }
     if (first < n) norm_text(first, n - first);
+    fo_clean_ = false;   // fo_ is what the last call left
+    // half a warp an NVFP4 expert row for this call's few tokens only (iq_set_slot_lanes() is the process's)
+    kernels::iq_set_slot_lanes(fused(n));
+    struct Lanes {
+        ~Lanes() { kernels::iq_set_slot_lanes(false); }
+    } lanes;
     depth_n_ = 0;
     for (visit_ = 0; visit_ < kVisits; ++visit_) {
         if (visit_ == kStart) axpy(r_, 1.f, prelude_, n * kWidth, false, st_);
@@ -828,10 +837,11 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
     dbg("Qcur", visit_, q_, kQuery);
     dbg("Kcur", visit_, k_, kKey);
     attention(b, n);
-    lin(b.o, att_, ao_, n);
+    lin(b.o, att_, ao_, n, fused(n) ? attq_ : nullptr);   // attend_decode() quantized it
     if (fused(n))
         conv_add_kernel<<<div_up(kWidth, kThreads), kThreads, 0, cs(st_)>>>(
-            ao_, nullptr, hist + 6 * kKey, fp(b.aconv), r_, il % kBlock == 0 ? depth_[depth_n_++] : nullptr, kWidth, n);
+            ao_, nullptr, hist + 6 * kKey, fp(b.aconv), r_, il % kBlock == 0 ? depth_[depth_n_++] : nullptr, kWidth, n,
+            false);
     else conv(ao_, hist + 6 * kKey, fp(b.aconv), nullptr, kWidth, n);
     if (fused(n)) {   // conv_add_kernel() did the rest
     } else if (il % kBlock == 0) {
@@ -856,8 +866,9 @@ void Inkling2::layer_tail(Layer&, int il, int n) {
     float* hist = state_ + (size_t) visit_ * kConvFloats + 6 * kKey + 3 * kWidth;
     if (fused(n)) {
         conv_add_kernel<<<div_up(kWidth, kThreads), kThreads, 0, cs(st_)>>>(
-            fo_, cpu_sum_ ? h_cpu_ : nullptr, hist, fp(blocks_[il].fconv), r_, nullptr, kWidth, n);
+            fo_, cpu_sum_ ? h_cpu_ : nullptr, hist, fp(blocks_[il].fconv), r_, nullptr, kWidth, n, true);
         cpu_sum_ = false;
+        fo_clean_ = true;
         dbg("l_out", visit_, r_, kWidth);
         return;
     }
@@ -882,7 +893,11 @@ void Inkling2::route(int il, const float* logits, int32_t, int* ids, float* w, f
     for (int i = 0; i < n_used_; ++i) w[i] *= expert_scale_ / (sum + 1.e-20f);
 }
 
-void Inkling2::moe_shared(const Layer&, int, int n) { zero_vram(fo_, (size_t) n * kWidth * sizeof(float)); }
+void Inkling2::moe_shared(const Layer&, int, int n) {
+    // the previous layer's fused tail left fo_ 0 for the same rows
+    if (!(fused(n) && fo_clean_)) zero_vram(fo_, (size_t) n * kWidth * sizeof(float));
+    fo_clean_ = false;
+}
 
 void Inkling2::output_rows(int first, int rows, float* h) {
     depth_mix(fp(output_query_), cur_, first, rows);

@@ -98,19 +98,25 @@ experts 5.0 ms (~200 GB/s), small kernels ~3 ms, Q8_0 projections 6 ms and LM he
 
 ## Current Checkpoint
 
-- Closes: R1 (stage 2), R3
-- Smallest next action: `--expert-swaps` for Inkling on the decode fixtures; reserve 2048 vs 3072 for PP and TG.
-- Expected evidence: higher VRAM hit rate and decode; PP change at 2048 MiB.
-- Stop or replan if: swaps give no decode gain on top of stage 1.
+- Closes: R1, R2, R4
+- Smallest next action: final cold A/B pair (installed `90b7ec72` + prod config against the candidate + new config) on
+  the forced decode fixture, 16K decode and 2K/8K prefill; live agent check; deploy with a rollback copy.
+- Expected evidence: B above A beyond run-to-run variation; agent round trip passes.
+- Stop or replan if: a guard fault, or B not faster.
 
 ## Current State
 
-- Resolved: RECON, stage 1 (decode kernels, opt-in `STRATA_INKLING_DECODE=1`).
-- Next: stage 2.
+- Resolved: RECON, stages 1–4 (decode kernels; swaps and reserve as configuration; NVFP4 slot rows).
+- Next: final A/B, deployment.
 
 ## Material Decisions
 
 - 2026-11-21: user approved the plan; reserve 2048 MiB unless prefill drops significantly.
+- 2026-11-21: stage 3 replanned on evidence. Routing on the card with cached experts launched from device ids
+  (host waits only for the picks) measured 36.4/36.4 tok/s against 37.6 without it: decode is GPU-bound and the
+  inter-kernel gap is GPU-side (median 4.2 µs in prefill, where the host is far ahead, as in decode). Reverted
+  (patch kept outside Git). Stage 3 is now fewer launches on the one-row residual path; stage 4 the NVFP4 slot
+  kernel (36/72 calls a row on 32 lanes: 56–75% lane use).
 
 ## Checkpoint History
 
@@ -129,6 +135,23 @@ experts 5.0 ms (~200 GB/s), small kernels ~3 ms, Q8_0 projections 6 ms and LM he
   3,072 with batch 2048: restored and replayed IDs equal. Review (general-purpose): accepted an all-`-inf` tile
   giving NaN and a clamped `-inf` sink gaining weight (both fixed, test passes); refuted a Q8 dot overflow (queries
   are clipped head norms) and an `-ffp-contract=off` mismatch (`inkling2.cu` is built with the default).
+- 2026-11-21: stage 2 (configuration only), stage-1 binary, decode on, one run each: swaps 0 / reserve 3072 →
+  forced 26.7, prose 27.7 tok/s (VRAM hits 58–60%); `--expert-swaps 64` → 35.9 / 36.7 (79–85%); plus reserve 2048 →
+  37.6 / 38.6 (82–90%, 1,329 experts against 1,093). 16 and 32 swaps in flight: 36.3–37.4 / 38.6, no better than 64.
+  R3: ABBA prefill at reserve 3072 / 2048 / 2048 / 3072: 2K 665.4 / 705.4 / 703.0 / 668.6 tok/s, 8K 701.5 / 730.1 /
+  730.6 / 705.3 — prefill rises with the larger cache, so 2048; guard minimum free 1,997 MiB at 2048.
+- 2026-11-21: stage 4 (NVFP4 slot rows, `iq_set_slot_lanes()`, set by Inkling for its decode calls only): a row to
+  16 lanes. Traced expert launches 6.4 → 5.3 ms a token (8 lanes for 72-call rows and 4 for 36: 5.9; 2 / 8 / 16 / 32
+  lanes swept). Forced decode 38.8–38.9 (one 36.7).
+- 2026-11-21: stage 3 as replanned: a one-row kernel doing the residual's convolution, the mix, the norm and Q8_1 for
+  a token (launches 1,851 → 1,415, bit for bit but for a 128-thread norm whose reference sums its four warps in a
+  data-dependent order) measured 36.1–37.6: a single block waits on memory (18 µs reading the CPU experts' sum from
+  host memory, 9–17 µs for a norm with Q8_1 that separate launches do in 4–5) — reverted (kept outside Git). Kept:
+  the decode attention writes the output projection's Q8_1 blocks, and the fused MoE tail leaves fo_ 0 so the next
+  layer skips its fill. Forced decode 39.31 / 39.50 / 39.52 tok/s; 16K context 31.4 tok/s (15.1 installed). Default
+  path identical to `90b7ec72` on the parity fixture; decode on (GPU experts): 8/8 top-1, largest change 0.033.
+  Attention unit test PASS; SWA ring-wrap rewind at 3,072 equal. Review: accepted the slot switch reaching prompt
+  batches without MMQ and outliving the engine — now set for a decode call's duration only (RAII in run_visits).
 
 ## Completion
 

@@ -44,8 +44,9 @@ size_t decode_floats();
 
 /// The same for a few tokens (STRATA_INKLING_DECODE=1, fewer rows than a prompt batch): each token's keys in chunks
 /// across the card, a chunk's maximum, sum and unnormalized values per head, then a launch that adds the chunks and the
-/// sink. FP32 products of the same dequantized values; the order of the sums differs.
-void attend_decode(const Attend& a, float* scratch, cudaStream_t st);
+/// sink. FP32 products of the same dequantized values; the order of the sums differs. With q8, the output's Q8_1
+/// blocks too, as native_quantize_q8_1() makes them of the rows back to back.
+void attend_decode(const Attend& a, float* scratch, cudaStream_t st, void* q8 = nullptr);
 
 /// The same in one launch (STRATA_INKLING_FLASH=1, prompt batches): 16 tokens of one K/V group a block, keys 16 at
 /// a time with an online softmax in base 2, FP32 products of the same dequantized values; the order of the sums and

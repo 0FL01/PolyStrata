@@ -2559,6 +2559,7 @@ bool env_on(const char* name) {
 }
 // STRATA_OLD_IQ_MMVQ=1 keeps the per-column kernels (bitwise equal to the new ones; kept for A/B timing)
 bool g_old_kernels = env_on("STRATA_OLD_IQ_MMVQ");
+bool g_slot_lanes = false;   // iq_set_slot_lanes()
 bool g_no_sub16_gu = env_on("STRATA_NO_SUB16_GU");
 // STRATA_IQ_STAGE_GRID=0 disables staging 64-bit i-quant codebook tables into shared memory
 bool g_stage_grid = [] {
@@ -3439,6 +3440,7 @@ void launch_down(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, c
 }  // namespace
 
 void iq_set_old_kernels(bool old) { g_old_kernels = old; }
+void iq_set_slot_lanes(bool on) { g_slot_lanes = on; }
 bool iq_old_kernels() { return g_old_kernels; }
 
 bool iq_supported(int t) noexcept { return is_iq(t); }
@@ -3504,9 +3506,37 @@ __global__ void __launch_bounds__(128) mmvq_slots_kernel(S slots, size_t row_byt
     if (lane == 0) at.y[row] = s;
 }
 
+// mmvq_slots_kernel with L lanes a row, 32 / L rows a warp: the calls k = lane, lane + L, ... and a sum over the L.
+template<int TY, int L, typename S>
+__global__ void __launch_bounds__(128) mmvq_slot_lanes_kernel(S slots, size_t row_bytes, int n_in, int n_out) {
+    using F = Fmt<TY>;
+    const int part = threadIdx.x % L, row = (blockIdx.x * 4 + threadIdx.y) * (32 / L) + threadIdx.x / L;
+    const SlotPtrs at = slot_ptrs(slots, int(blockIdx.y));
+    float s = 0.0f;
+    if (row < n_out) {
+        const uint8_t* wr = (const uint8_t*) at.w + (size_t) row * row_bytes;
+        const block_q8_1* x = (const block_q8_1*) at.x;
+        const int calls = n_in / F::qk * F::ipb;
+        for (int k = part; k < calls; k += L) {
+            const int kbx = k / F::ipb, iqs = F::step * (k % F::ipb);
+            s += F::dot(wr, x + kbx * (F::qk / 32), kbx, iqs);
+        }
+    }
+#pragma unroll
+    for (int o = L / 2; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
+    if (part == 0 && row < n_out) at.y[row] = s;
+}
+
 template<typename S>
 void slots_of(int t, const S& slots, int count, int n_in, int n_out, void* stream) {
     const size_t rb = iq_row_bytes(t, n_in);
+    if (g_slot_lanes && t == 40) {   // NVFP4: half a warp a row
+        constexpr int lanes = 16, rows = 4 * (32 / lanes);
+        const dim3 grid((unsigned) ((n_out + rows - 1) / rows), (unsigned) count), block(32, 4);
+        mmvq_slot_lanes_kernel<40, lanes, S><<<grid, block, 0, (cudaStream_t) stream>>>(slots, rb, n_in, n_out);
+        check("iq_mmvq_slots");
+        return;
+    }
     const dim3 grid((unsigned) ((n_out + 3) / 4), (unsigned) count), block(32, 4);
     switch (t) {
 #define STRATA_MMVQ(T) case T: mmvq_slots_kernel<T, S><<<grid, block, 0, (cudaStream_t) stream>>>(slots, rb, n_in, n_out); break;
