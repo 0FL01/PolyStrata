@@ -17,6 +17,7 @@ offers the same steps as tools.
 
 ## Working on the code
 
+- During R&D, you may stop the production server at any time, even while people are using it.
 - How the engine works, every measured number, the API and all settings: [docs/DETAILS.md](docs/DETAILS.md) and
   the [paper](docs/paper/Strata-Paper.pdf).
 - Build the affected HIP target and run the closest relevant checks on RDNA2; report the GPU tested. See
