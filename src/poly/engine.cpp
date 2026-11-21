@@ -659,6 +659,7 @@ Engine::~Engine() {
     if (up_) cudaStreamSynchronize(cs(up_));
     if (rs_) cudaStreamSynchronize(cs(rs_));
     if (st_) cudaStreamSynchronize(cs(st_));
+    for (const auto& span : registered_) cudaHostUnregister((void*) span.first);   // no copy reads them now
     workers_.reset();
     mmq_.reset();
 #if defined(STRATA_GPU_METAL)
@@ -744,7 +745,26 @@ void Engine::hfree(void* p) {
 // any architecture (LFM2.5 and Qwen3.6 alike), and never for a shorter one, whose cover() has nothing to map
 // and so never gives VRAM back.  On st_ the same copies are behind the syncs that were already there.
 void Engine::h2d(void* dst, const void* src, size_t bytes) {
-    ck(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice, cs(st_)), "a copy into VRAM");
+    if (!direct_stage_) {
+        ck(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice, cs(st_)), "a copy into VRAM");
+        return;
+    }
+    // STRATA_POLY_DIRECT_STAGE: a registered span takes whole pages, so it can hold the start of a cached expert and
+    // not the rest; the card refuses a copy that starts in a registered span and goes past it. Such a copy goes in
+    // pieces at the spans' edges.
+    std::lock_guard<std::mutex> lock(reg_m_);
+    auto* to = static_cast<uint8_t*>(dst);
+    uintptr_t from = (uintptr_t) src;
+    for (size_t left = bytes; left > 0;) {
+        const auto next = std::upper_bound(registered_.begin(), registered_.end(), std::make_pair(from, UINTPTR_MAX));
+        size_t n = left;
+        if (next != registered_.begin() && from < std::prev(next)->second) n = std::min(n, (size_t) (std::prev(next)->second - from));
+        else if (next != registered_.end()) n = std::min(n, (size_t) (next->first - from));
+        ck(cudaMemcpyAsync(to, (const void*) from, n, cudaMemcpyHostToDevice, cs(st_)), "a copy into VRAM");
+        to += n;
+        from += n;
+        left -= n;
+    }
 }
 
 void Engine::zero_vram(void* dst, size_t bytes) {
@@ -2635,6 +2655,8 @@ void Engine::load(const Options& o) {
     if (requested_stream_stage)
         std::fprintf(stderr, "strata-poly: STRATA_POLY_STREAM_STAGE: %s\n",
                      stream_stage_ ? "streaming CPU stores for expert staging" : "unsupported CPU build; stock copies");
+    const char* direct_stage = std::getenv("STRATA_POLY_DIRECT_STAGE");
+    direct_stage_ = direct_stage && std::atoi(direct_stage) == 1;
     gg_ = std::make_unique<Shards>(opt_.model);
     if (!opt_.draft_model.empty() && opt_.draft && opt_.window != 1) dg_ = std::make_unique<Shards>(opt_.draft_model);
 #if defined(STRATA_GPU_METAL)
@@ -3001,9 +3023,15 @@ void Engine::load(const Options& o) {
             }
         } else
 #endif
-        mapper_ = std::thread([this, cpu = std::move(cpu), outside = std::move(outside)] {
+        // the experts outside VRAM as the load left them, for STRATA_POLY_DIRECT_STAGE
+        std::vector<std::pair<int, int>> direct;
+        for (size_t il = 0; direct_stage_ && !pool_ && mmq_ && il < layers_.size(); ++il)
+            for (int e = 0; layers_[il].moe && e < n_expert_; ++e)
+                if (!layers_[il].slot[(size_t) e]) direct.emplace_back((int) il, e);
+        mapper_ = std::thread([this, cpu = std::move(cpu), outside = std::move(outside), direct = std::move(direct)] {
             map_pages(cpu, *gg_, map_quit_);
             if (!outside.empty()) lock_outside(outside);
+            if (!direct.empty()) register_outside(direct);
         });
     }
 }
@@ -3313,6 +3341,54 @@ void Engine::load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t 
 // Options::lock_experts, on mapper_ once map_pages() is done: the experts outside VRAM at the load, locked one by
 // one so that relock() knows which are.  Windows locks no more pages than the working-set minimum leaves room
 // for, so it is raised once, by those experts and 512 MiB for the rest of the process.  It says what it got.
+// STRATA_POLY_DIRECT_STAGE: the spans of the experts outside VRAM, whole pages, merged where they meet (a page
+// registers once), registered read-only. An expert is direct_ once all its spans are. Under a RAM budget (pool_) the
+// experts can come from elsewhere than the mapping, so none is listed (load()). On RX 6700 XT the card read a
+// registered 1 GiB of the mapped file at 26.6 GB/s.
+void Engine::register_outside(const std::vector<std::pair<int, int>>& outside) {
+    cudaSetDevice(device_);   // a thread starts on card 0
+    const size_t page = 4096;
+    std::vector<std::pair<uintptr_t, uintptr_t>> spans;
+    for (const auto& [il, e] : outside)
+        expert_bytes(layers_[(size_t) il], e, e + 1, [&](const uint8_t* p, size_t n) {
+            const uintptr_t a = (uintptr_t) p / page * page, b = ((uintptr_t) p + n + page - 1) / page * page;
+            spans.emplace_back(a, b);
+        });
+    std::sort(spans.begin(), spans.end());
+    std::vector<std::pair<uintptr_t, uintptr_t>> merged;
+    for (const auto& s : spans) {
+        if (!merged.empty() && s.first <= merged.back().second) merged.back().second = std::max(merged.back().second, s.second);
+        else merged.push_back(s);
+    }
+    size_t bytes = 0;
+    bool refused = false;
+    for (const auto& [a, b] : merged) {
+        if (map_quit_.load(std::memory_order_relaxed)) break;
+        std::lock_guard<std::mutex> lock(reg_m_);   // a span and its entry at once for h2d()
+        if (cudaHostRegister((void*) a, b - a, cudaHostRegisterReadOnly) != cudaSuccess) {
+            cudaGetLastError();
+            refused = true;
+            continue;
+        }
+        registered_.emplace_back(a, b);
+        bytes += b - a;
+    }
+    const auto& done = registered_;   // only mapper_ adds to it, and it is done
+    const auto inside = [&](const uint8_t* p, size_t n) {
+        const auto it = std::upper_bound(done.begin(), done.end(), std::make_pair((uintptr_t) p, UINTPTR_MAX));
+        return it != done.begin() && (uintptr_t) p + n <= std::prev(it)->second;
+    };
+    direct_.assign(layers_.size() * (size_t) n_expert_, 0);
+    for (const auto& [il, e] : outside) {
+        bool ok = true;
+        expert_bytes(layers_[(size_t) il], e, e + 1, [&](const uint8_t* p, size_t n) { ok = ok && inside(p, n); });
+        direct_[(size_t) il * n_expert_ + (size_t) e] = ok;
+    }
+    std::fprintf(stderr, "strata-poly: STRATA_POLY_DIRECT_STAGE=1: %.1f GiB of experts outside VRAM registered for "
+                         "direct uploads%s\n", bytes / double(1ull << 30), refused ? " (the card refused some)" : "");
+    direct_ready_.store(true, std::memory_order_release);
+}
+
 void Engine::lock_outside(const std::vector<std::pair<int, int>>& outside) {
     size_t want = 0, got = 0;
     for (const auto& [il, e] : outside)
@@ -4317,6 +4393,64 @@ bool Engine::moe_card(Layer& L, int il, int n) {
 void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, bool alone) {
     staged_il_ = -1;   // whatever the buffer held
     const size_t step = L.gu_step, down_at = pad((size_t) m * step);
+    // STRATA_POLY_DIRECT_STAGE: registered experts go from the mapping into the buffer, with no copy by the host; the
+    // others (the cache gave them up after the load, or a span was refused) through the pinned buffers, each to its
+    // place. The layout is the one below: gate|up of the j-th at j * step, its down at down_at + j * d_bytes.
+    if (direct_ready_.load(std::memory_order_acquire)) {
+        const int il = (int) (&L - layers_.data());
+        const size_t at = (size_t) il * n_expert_;
+        std::vector<int>& rest = bounce_;
+        rest.clear();
+        for (int j = 0; j < m; ++j) {
+            const size_t e = (size_t) experts[j];
+            if (!direct_[at + e]) {
+                rest.push_back(j);
+                continue;
+            }
+            const uint8_t* gate = L.exp_gate + e * L.gu_stride;
+            const uint8_t* up = L.exp_up + e * L.u_stride;
+            uint8_t* to = stage_ + (size_t) j * step;
+            if (up == gate + L.gu_bytes) {
+                ck(cudaMemcpyAsync(to, gate, L.gu_bytes + L.u_bytes, cudaMemcpyHostToDevice, cs(stream)),
+                   "expert staging");
+            } else {
+                ck(cudaMemcpyAsync(to, gate, L.gu_bytes, cudaMemcpyHostToDevice, cs(stream)), "expert staging");
+                ck(cudaMemcpyAsync(to + L.gu_bytes, up, L.u_bytes, cudaMemcpyHostToDevice, cs(stream)),
+                   "expert staging");
+            }
+            ck(cudaMemcpyAsync(stage_ + down_at + (size_t) j * L.d_bytes, L.exp_down + e * L.d_bytes, L.d_bytes,
+                               cudaMemcpyHostToDevice, cs(stream)),
+               "expert staging");
+            // a mixed layer's step is whole tiles: MMQ may read up's last tile past gu2(), so that gap is zeros
+            if (step > L.gu2()) ck(cudaMemsetAsync(to + L.gu2(), 0, step - L.gu2(), cs(stream)), "expert staging");
+        }
+        const int per = (int) (chunk_bytes_ / (step + L.d_bytes));
+        for (size_t k0 = 0; k0 < rest.size(); k0 += (size_t) per) {
+            const size_t c = std::min((size_t) per, rest.size() - k0);
+            stage_turn_ ^= 1;
+            uint8_t* h = h_stage_[stage_turn_];
+            const cudaEvent_t left = (cudaEvent_t) ev_stage_[stage_turn_];
+            ck(cudaEventSynchronize(left), "expert staging");
+            const auto copy = [&](int i) {   // the mapping: there is no RAM budget (register_outside())
+                const size_t k = (size_t) i / 3, e = (size_t) experts[rest[k0 + k]];
+                if (i % 3 == 0) std::memcpy(h + k * step, L.exp_gate + e * L.gu_stride, L.gu_bytes);
+                else if (i % 3 == 1) std::memcpy(h + k * step + L.gu_bytes, L.exp_up + e * L.u_stride, L.u_bytes);
+                else std::memcpy(h + c * step + k * L.d_bytes, L.exp_down + e * L.d_bytes, L.d_bytes);
+            };
+            (alone ? *stagers_ : *workers_).run((int) (3 * c), copy);
+            for (size_t k = 0; k < c; ++k) {
+                const size_t j = (size_t) rest[k0 + k];
+                ck(cudaMemcpyAsync(stage_ + j * step, h + k * step, step, cudaMemcpyHostToDevice, cs(stream)),
+                   "expert staging");
+                ck(cudaMemcpyAsync(stage_ + down_at + j * L.d_bytes, h + c * step + k * L.d_bytes, L.d_bytes,
+                                   cudaMemcpyHostToDevice, cs(stream)),
+                   "expert staging");
+            }
+            ck(cudaEventRecord(left, cs(stream)), "expert staging");
+        }
+        ck(cudaMemsetAsync(stage_ + down_at + (size_t) m * L.d_bytes, 0, kTail, cs(stream)), "expert staging");
+        return;
+    }
     const int per = (int) (chunk_bytes_ / (step + L.d_bytes));
     for (int j0 = 0; j0 < m; j0 += per) {
         const size_t c = (size_t) std::min(per, m - j0);

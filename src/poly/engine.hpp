@@ -1032,6 +1032,15 @@ protected:
     std::vector<int64_t> use_, prior_;   ///< routed count per (layer, expert): this run, and the profile's
     Stats stats_;
     bool stream_stage_ = false;         ///< opt-in streaming CPU stores into the existing expert upload buffers
+    /// STRATA_POLY_DIRECT_STAGE=1: the experts outside VRAM are registered with the card where the file maps them,
+    /// and stage() copies them from there with no copy into the pinned buffers (register_outside(), on mapper_).
+    bool direct_stage_ = false;
+    std::vector<uint8_t> direct_;                  ///< per (layer, expert): its bytes are registered
+    std::mutex reg_m_;                             ///< guards registered_ (h2d() reads it while mapper_ adds)
+    std::vector<std::pair<uintptr_t, uintptr_t>> registered_;   ///< the registered spans, in order
+    std::atomic<bool> direct_ready_{false};        ///< direct_ and registered_ are complete
+    std::vector<int> bounce_;                      ///< stage(): a call's experts that are not direct_
+    void register_outside(const std::vector<std::pair<int, int>>& outside);
 };
 
 }  // namespace strata::poly

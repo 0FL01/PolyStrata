@@ -75,8 +75,12 @@ RX 6700 XT, TheRock ROCm 7.13, deployed binary `3d6760d8` (sha256 `23294c89…`)
 ## Current Checkpoint
 
 - Closes: R1 (further), then R4.
-- Smallest next action: stage 2 — host stalls of the batched MoE at batch 512 (re-profile below); decide the prompt batch for production with the user (batch 2048 measured +37% PP, −3% TG).
+- Smallest next action: stage 3 — the largest remaining items that are cheap to change: flash kernel at long context, the sequential short convolution, the control projections; then final pair, deploy.
 - Stop or replan if: a stage-2 change does not beat repeated-run variation on the 2K/8K pair.
+
+## Material Decisions
+
+- 2026-11-21: user chose `--prompt-batch 2048` for production (measured +37% PP, −3% TG against 512); stage 2 targets batch 2048.
 
 ## Checkpoint History
 
@@ -87,6 +91,9 @@ RX 6700 XT, TheRock ROCm 7.13, deployed binary `3d6760d8` (sha256 `23294c89…`)
 - 2026-11-21: R1 pair (frozen copy of the restored profile, batch 512): `pp` A 258.1/259.6 → B 443.9/448.6 tok/s (+72%); `pp8192` A 199.3/199.5 → B 445.6/447.2 (×2.24); TG A 23.77/24.41, B 24.11/23.87.
 - 2026-11-21: side effect found and repaired: `bench.py` passed production's `--expert-profile`, so 13 benchmark runs added ~20M of 26.9M counts to the live profile. The file is additive (prior + use); one measured run each (786,432 counts at 2K, 3,145,728 at 8K) was subtracted (10 × 2K, 3 × 8K; 169 counts clamped), leaving 9.63M; the polluted file is kept in scratch. Benchmarks now use a fresh copy of a frozen profile per run.
 - 2026-11-21: stage 2 profile (flash, batch 512, 2K): 4.61 s span, 1.40 s GPU idle — 554 ms waiting for CPU experts before `moe_sum`, 277 ms chained H2D staging, 139 ms rocBLAS first use; kernels: NVFP4 MMQ 1.32 s, Q8_0 MMQ 0.31 s, flash 0.29 s. A layer's ~68 uncached experts (~306 MB) are restaged for every 512-token call. Screens with flash: batch 1024 PP 515.1/475.1 (2K/8K), batch 2048 611.5/600.8; TG batch 512 23.99/23.87 vs 2048 23.23/23.21 (−3.0%, 1,216 vs 1,415 cached experts).
+- 2026-11-21: stage 2 at batch 2048 (8K trace, flash): 13.57 s, idle 1.74 s, 1.31 s of it GPU waiting between staging copies; DMA busy only 2.67 s (~70 GB at ~26 GB/s) — the host copy from the mapping into the pinned buffers is the limit. `STRATA_POLY_STREAM_STAGE=1` screen: 602.7 → 632.2 (8K). Probe: `hipHostRegister(ReadOnly)` on the mmapped GGUF works, DMA 26.6 GB/s, bytes match, ~70 ms/GiB.
+- 2026-11-21: `STRATA_POLY_DIRECT_STAGE=1` (opt-in, engine.cpp): mapper_ registers the uncached experts' page-merged spans (8.0 GiB here); stage() copies registered experts from the mapping and the rest through the pinned buffers, each to its place; h2d() splits copies at registered-span edges; padding of whole-tile steps zeroed. Review (general-purpose, three rounds): accepted partial-page registration breaking cache refills (fixed in h2d), default-path teardown change (removed), stale gap bytes (zeroed); found nothing else. Evidence: with equal expert placement the 1,064-token and 8K top-5 traces are bit-identical with the switch on and off (md5 follows placement only: 1168–1170 cached → `23e6f01d`, 1174–1178 → `1be7960e`). Warm `--serve` (second and third prompt of a process, batch 2048, flash): 8K 610.1/608.6 → 692.2/676.9 tok/s; 2K 641.7/599.2, 636.3/600.1 → 715.0/673.4, 729.4/674.9.
+- 2026-11-21: warm 8K kernel split per prompt (direct staging): NVFP4 MMQ ~4.0 s, flash ~1.82 s, Q8_0 MMQ ~1.08 s, conv ~0.37 s, control `gemm_small` ~0.37 s, mix ~0.26 s; idle ~0.83 s.
 
 ## Completion
 
