@@ -3686,6 +3686,9 @@ void Engine::lin_raw(const Dev& w, const float* x, float* y, int n, const void* 
         kernels::native_quantize_q8_1(x, q8_, w.n_in * n, 1, st_);
         xq = q8_;
     }
+    if (head_warps_ && n == 1 && w.type == GGML_TYPE_Q6_K && w.p == output_.p &&
+        kernels::native_q6_k_mmvq_warps(w.p, xq, y, w.n_in, w.n_out, st_))
+        return;
     // a launch takes up to 8 tokens, and each comes out as it would alone
     const size_t token = kernels::native_q8_1_bytes(w.n_in);
     for (int at = 0; at < n; at += 8)

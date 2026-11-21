@@ -2152,6 +2152,13 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
     target_link_libraries(poly_inkling_attend_test PRIVATE ${_strata_gpu_runtime_target})
     add_test(NAME poly_inkling_attend_test COMMAND poly_inkling_attend_test)
     set_tests_properties(poly_inkling_attend_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+    # native_mmvq_segments() bit for bit against one native_mmvq() a matrix, and timed; needs a card (77 = skipped)
+    add_executable(poly_mmvq_segments_test src/poly/mmvq_segments_test.cu)
+    target_include_directories(poly_mmvq_segments_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+                                                              ${_strata_gpu_include_directories})
+    target_link_libraries(poly_mmvq_segments_test PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+    add_test(NAME poly_mmvq_segments_test COMMAND poly_mmvq_segments_test)
+    set_tests_properties(poly_mmvq_segments_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
   endif()
   target_include_directories(poly_draft_race_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
                                                          ${_strata_gpu_include_directories})

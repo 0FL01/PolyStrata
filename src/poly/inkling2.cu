@@ -410,7 +410,7 @@ void Inkling2::load_geometry() {
     if (flash_) std::fputs("strata-poly: STRATA_INKLING_FLASH=1: fused attention for prompt batches\n", stderr);
     const char* decode = std::getenv("STRATA_INKLING_DECODE");
     decode_ = decode && decode[0] == '1' && decode[1] == '\0';
-    wave_gemv_ = decode_;
+    wave_gemv_ = head_warps_ = decode_;
     if (decode_) std::fputs("strata-poly: STRATA_INKLING_DECODE=1: decode kernels for a few tokens at a time\n", stderr);
     if (!q8() && opt_.kv_format != KvFmt::kFp16)
         throw std::runtime_error("Inkling-2-Mini supports Q8_0 or FP16 KV");
@@ -641,6 +641,8 @@ void Inkling2::assign_scratch() {
         chunks_ = fbuf(inkling::decode_floats());
         taps2_ = fbuf(n * kKv * kTaps);
         attq_ = fbuf((size_t) kStageRows * (kQuery / 32) * 36 / sizeof(float));   // Q8_1: 36 bytes a block of 32
+        kq8_ = fbuf((size_t) (kWidth / 32) * 36 / sizeof(float));
+        vq8_ = fbuf((size_t) (kWidth / 32) * 36 / sizeof(float));
     }
     for (auto& x : input_) x = fbuf(width);
     for (auto& x : depth_) x = fbuf(width);
@@ -796,12 +798,15 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
     const bool mmv = n < kStageRows;
     if (mmv) kernels::native_quantize_q8_1(xq, xq_, kWidth * n, 1, st_);
     const void* shared = mmv ? xq_ : nullptr;
-    lin(b.q, xq, q_, n, shared);
-    lin(b.k, xk, k_, n, streams == 1 ? shared : nullptr);
-    lin(b.v, xv, v_, n, streams == 1 ? shared : nullptr);
-    lin(b.rel, xq, rel_, n, shared);
+    if (fused(n) && n == 1) project(b, xk, xv, streams == 1);
+    else {
+        lin(b.q, xq, q_, n, shared);
+        lin(b.k, xk, k_, n, streams == 1 ? shared : nullptr);
+        lin(b.v, xv, v_, n, streams == 1 ? shared : nullptr);
+        lin(b.rel, xq, rel_, n, shared);
+        lin(b.gate, xq, gate_, n, shared);
+    }
     lin(b.sink, xq, sink_, n);
-    lin(b.gate, xq, gate_, n, shared);
 
     float* hist = state_ + (size_t) visit_ * kConvFloats;
     const auto kv_conv = [&](float* x, float* state, const Dev& w, const Dev& dyn, const float* input) {
@@ -856,6 +861,45 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
 }
 
 bool Inkling2::fused(int n) const { return decode_ && n < kStageRows; }
+
+// A token's q, gate and relative terms of input_[0] (xq_, quantized), and its K and V of the same or of their own
+// inputs: one launch a weight format (kernels::native_mmvq_segments(), the rows bit for bit lin()'s), lin() for what
+// that does not take.
+void Inkling2::project(const Block& b, const float* xk, const float* xv, bool shared_kv) {
+    if (!shared_kv) {
+        kernels::native_quantize_q8_1(xk, kq8_, kWidth, 1, st_);
+        kernels::native_quantize_q8_1(xv, vq8_, kWidth, 1, st_);
+    }
+    struct Part {
+        const Dev* w;
+        const float* x;
+        const void* xq;
+        float* y;
+        bool done;
+    } parts[5] = {{&b.q, input_[0], xq_, q_, false},
+                  {&b.gate, input_[0], xq_, gate_, false},
+                  {&b.rel, input_[0], xq_, rel_, false},
+                  {&b.k, xk, shared_kv ? xq_ : kq8_, k_, false},
+                  {&b.v, xv, shared_kv ? xq_ : vq8_, v_, false}};
+    const auto fits = [](const Dev& w) { return w.n_in == kWidth && w.scale == 1.f; };
+    for (int i = 0; i < 5; ++i) {
+        if (parts[i].done || !fits(*parts[i].w)) continue;
+        kernels::MmvqSegments s;
+        const uint32_t type = parts[i].w->type;
+        for (int j = i; j < 5; ++j)
+            if (!parts[j].done && parts[j].w->type == type && fits(*parts[j].w)) {
+                s.w[s.count] = parts[j].w->p;
+                s.x[s.count] = parts[j].xq;
+                s.y[s.count] = parts[j].y;
+                s.rows[s.count++] = parts[j].w->n_out;
+            }
+        if (!kernels::native_mmvq_segments((int) type, s, kWidth, st_)) continue;
+        for (int j = i; j < 5; ++j)
+            if (parts[j].w->type == type && fits(*parts[j].w)) parts[j].done = true;
+    }
+    for (const Part& p : parts)
+        if (!p.done) lin(*p.w, p.x, p.y, 1, p.xq);
+}
 
 void Inkling2::moe_add(int n) {
     if (fused(n)) cpu_sum_ = true;   // layer_tail() adds it

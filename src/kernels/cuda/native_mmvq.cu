@@ -304,15 +304,14 @@ __device__ __forceinline__ float q5_q8_dot(const Q5KBlock* __restrict__ bq5,
 
 // The generic ncols=1 oracle uses 4 warps and 1 row (or 4 rows for small K),
 // eight weight blocks per K iteration, warp-ascending shared sum, then XOR tree.
+// the kernel's body for its block bx (native_mmvq_segments() runs it for the blocks of several matrices)
 template<bool SmallK>
-__launch_bounds__(WARPS * WARP, 1)
-__global__ void native_q5_k_mmvq_kernel(const Q5KBlock* __restrict__ w,
-                                        const Q81Block* __restrict__ x,
-                                        float* __restrict__ y, int n_in, int n_out) {
+__device__ __forceinline__ void native_q5_k_mmvq_rows(const Q5KBlock* __restrict__ w, const Q81Block* __restrict__ x,
+                                         float* __restrict__ y, int n_in, int n_out, int bx) {
     constexpr int ROWS = SmallK ? WARPS : 1;
     constexpr int BLOCKS_PER_ITER = VDR * WARPS * WARP / QI;
     const int tid = WARP * int(threadIdx.y) + int(threadIdx.x);
-    const int row0 = ROWS * int(blockIdx.x);
+    const int row0 = ROWS * bx;
     const int blocks_per_row = n_in / QK;
     float tmp[ROWS] = {};
     for (int kbx = tid / (QI / VDR); kbx < blocks_per_row; kbx += BLOCKS_PER_ITER) {
@@ -342,6 +341,14 @@ __global__ void native_q5_k_mmvq_kernel(const Q5KBlock* __restrict__ w,
         tmp[i] = warp_sum(tmp[i]);
         if (threadIdx.x == i && row0 + i < n_out) y[row0 + i] = tmp[i];
     }
+}
+
+template<bool SmallK>
+__launch_bounds__(WARPS * WARP, 1)
+__global__ void native_q5_k_mmvq_kernel(const Q5KBlock* __restrict__ w,
+                                         const Q81Block* __restrict__ x,
+                                         float* __restrict__ y, int n_in, int n_out) {
+    native_q5_k_mmvq_rows<SmallK>(w, x, y, n_in, n_out, int(blockIdx.x));
 }
 
 // Exact pinned vec_dot_q2_0_q8_1: each thread handles one 32-element chunk.
@@ -804,15 +811,14 @@ __device__ __forceinline__ float q6_q8_dot(const Q6KBlock* __restrict__ w,
 }
 
 // Q6_K generic MMVQ: QK=256, QI=32, VDR=1, four blocks per iteration.
+// the kernel's body for its block bx (native_mmvq_segments() runs it for the blocks of several matrices)
 template<bool SmallK>
-__launch_bounds__(WARPS * WARP, 1)
-__global__ void native_q6_k_mmvq_kernel(const Q6KBlock* __restrict__ w,
-                                        const Q81Block* __restrict__ x,
-                                        float* __restrict__ y, int n_in, int n_out) {
+__device__ __forceinline__ void native_q6_k_mmvq_rows(const Q6KBlock* __restrict__ w, const Q81Block* __restrict__ x,
+                                         float* __restrict__ y, int n_in, int n_out, int bx) {
     constexpr int ROWS = SmallK ? WARPS : 1;
     constexpr int BLOCKS_PER_ITER = WARPS * WARP / 32;
     const int tid = WARP * int(threadIdx.y) + int(threadIdx.x);
-    const int row0 = ROWS * int(blockIdx.x);
+    const int row0 = ROWS * bx;
     const int blocks_per_row = n_in / 256;
     float tmp[ROWS] = {};
     for (int kbx = tid / 32; kbx < blocks_per_row; kbx += BLOCKS_PER_ITER) {
@@ -840,6 +846,14 @@ __global__ void native_q6_k_mmvq_kernel(const Q6KBlock* __restrict__ w,
         tmp[i] = warp_sum(tmp[i]);
         if (threadIdx.x == i && row0 + i < n_out) y[row0 + i] = tmp[i];
     }
+}
+
+template<bool SmallK>
+__launch_bounds__(WARPS * WARP, 1)
+__global__ void native_q6_k_mmvq_kernel(const Q6KBlock* __restrict__ w,
+                                         const Q81Block* __restrict__ x,
+                                         float* __restrict__ y, int n_in, int n_out) {
+    native_q6_k_mmvq_rows<SmallK>(w, x, y, n_in, n_out, int(blockIdx.x));
 }
 
 // The four 32-element formats use native two-byte loads and VDR=2. The affine
@@ -931,15 +945,14 @@ __device__ __forceinline__ float small_q8_dot(const MXFP4Block* __restrict__ w,
 
 // QI=4 for Q4_0/Q5_0/IQ4_NL/MXFP4 and QI=8 for Q8_0. With VDR=2 this preserves
 // the pinned 64/32-block iteration and 2048/1024-element small-K thresholds.
+// the kernel's body for its block bx (native_mmvq_segments() runs it for the blocks of several matrices)
 template<typename Weight, int Qi, bool SmallK>
-__launch_bounds__(WARPS * WARP, 1)
-__global__ void native_small_mmvq_kernel(const Weight* __restrict__ w,
-                                         const Q81Block* __restrict__ x,
-                                         float* __restrict__ y, int n_in, int n_out) {
+__device__ __forceinline__ void native_small_mmvq_rows(const Weight* __restrict__ w, const Q81Block* __restrict__ x,
+                                         float* __restrict__ y, int n_in, int n_out, int bx) {
     constexpr int ROWS = SmallK ? WARPS : 1;
     constexpr int BLOCKS_PER_ITER = 2 * WARPS * WARP / Qi;
     const int tid = WARP * int(threadIdx.y) + int(threadIdx.x);
-    const int row0 = ROWS * int(blockIdx.x);
+    const int row0 = ROWS * bx;
     const int blocks_per_row = n_in / 32;
     float tmp[ROWS] = {};
     for (int kbx = tid / (Qi / 2); kbx < blocks_per_row; kbx += BLOCKS_PER_ITER) {
@@ -966,6 +979,14 @@ __global__ void native_small_mmvq_kernel(const Weight* __restrict__ w,
         tmp[i] = warp_sum(tmp[i]);
         if (threadIdx.x == i && row0 + i < n_out) y[row0 + i] = tmp[i];
     }
+}
+
+template<typename Weight, int Qi, bool SmallK>
+__launch_bounds__(WARPS * WARP, 1)
+__global__ void native_small_mmvq_kernel(const Weight* __restrict__ w,
+                                         const Q81Block* __restrict__ x,
+                                         float* __restrict__ y, int n_in, int n_out) {
+    native_small_mmvq_rows<Weight, Qi, SmallK>(w, x, y, n_in, n_out, int(blockIdx.x));
 }
 
 // ============================ plan v0.3 P3: ncols = 2..8 (speculative verify, small batches) ============================
@@ -3168,6 +3189,93 @@ void native_iq4_nl_mmvq(const void* weights, const void* x_q8_1, float* y,
 void native_iq4_nl_f32(const void* weights, const float* x, void* scratch_q8_1,
                       float* y, int n_in, int n_out, int ncols, void* stream) {
     small_f32<IQ4NLBlock, 4>(weights, x, scratch_q8_1, y, n_in, n_out, ncols, stream);
+}
+
+namespace {
+// native_mmvq_segments(): block b of the launch is block b - start(j) of segment j's ncols = 1 kernel.
+template<int TYPE>
+__launch_bounds__(WARPS * WARP, 1)
+__global__ void native_mmvq_segments_kernel(MmvqSegments s, int n_in) {
+    int b = int(blockIdx.x), j = 0;
+    while (j < s.count - 1 && b >= s.rows[j]) b -= s.rows[j++];
+    const auto* x = static_cast<const Q81Block*>(s.x[j]);
+    if constexpr (TYPE == 8)
+        native_small_mmvq_rows<Q80Block, 8, false>(static_cast<const Q80Block*>(s.w[j]), x, s.y[j], n_in, s.rows[j], b);
+    else if constexpr (TYPE == 13)
+        native_q5_k_mmvq_rows<false>(static_cast<const Q5KBlock*>(s.w[j]), x, s.y[j], n_in, s.rows[j], b);
+    else
+        native_q6_k_mmvq_rows<false>(static_cast<const Q6KBlock*>(s.w[j]), x, s.y[j], n_in, s.rows[j], b);
+}
+}  // namespace
+
+namespace {
+// native_q6_k_mmvq_warps(): a warp a row, a lane the same part (kqs = lane) of each of the row's blocks in turn.
+template<int ROWS>
+__launch_bounds__(ROWS * WARP, 1)
+__global__ void native_q6_k_warps_kernel(const Q6KBlock* __restrict__ w, const Q81Block* __restrict__ x,
+                                         float* __restrict__ y, int n_in, int n_out) {
+    const int row = int(blockIdx.x) * ROWS + int(threadIdx.y);
+    if (row >= n_out) return;
+    const int nb = n_in / 256;
+    const Q6KBlock* wr = w + std::size_t(row) * nb;
+    float s = 0.0f;
+    for (int kbx = 0; kbx < nb; ++kbx) s += q6_q8_dot(wr + kbx, x + kbx * 8, int(threadIdx.x));
+    s = warp_sum(s);
+    if (threadIdx.x == 0) y[row] = s;
+}
+}  // namespace
+
+bool native_q6_k_mmvq_warps(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, void* stream) {
+    if (n_in <= 0 || n_in % 256 || n_out <= 0) return false;
+    validate_pointer(weights);
+    validate_pointer(x_q8_1);
+    validate_pointer(y);
+    validate_stream(stream);
+    constexpr int rows = 4;
+    native_q6_k_warps_kernel<rows><<<unsigned((n_out + rows - 1) / rows), dim3(WARP, rows), 0,
+                                     static_cast<cudaStream_t>(stream)>>>(static_cast<const Q6KBlock*>(weights),
+                                                                          static_cast<const Q81Block*>(x_q8_1), y,
+                                                                          n_in, n_out);
+    launch_check();
+    return true;
+}
+
+bool native_mmvq_segments(int ggml_type, const MmvqSegments& s, int n_in, void* stream) {
+    if (s.count < 1 || s.count > MmvqSegments::kMost || n_in <= 0) return false;
+    // the formats and shapes whose one-column call is the one-block-a-row kernel run here, and nothing else would
+    // have taken it (a matrix with a packed copy, the wave layout)
+    bool ok = false;
+    switch (ggml_type) {
+    case 8: ok = n_in % 32 == 0 && n_in / 32 >= 2 * WARPS * WARP / 8; break;
+    case 13: ok = n_in % QK == 0 && n_in / QK >= VDR * WARPS * WARP / QI; break;
+    case 14: ok = n_in % 256 == 0 && n_in / 256 >= WARPS * WARP / 32; break;
+    default: break;
+    }
+    for (int j = 0; j < s.count && ok; ++j)
+        ok = !(ggml_type == 8 && q8_packed_registry().count(s.w[j])) &&
+             !(ggml_type == 14 && q6_packed_registry().count(s.w[j]));
+#if defined(STRATA_HIP_GFX906)
+    ok = ok && g_wave_off;
+#endif
+    if (!ok) return false;
+    unsigned blocks = 0;
+    for (int j = 0; j < s.count; ++j) {
+        if (s.rows[j] <= 0) throw std::invalid_argument("native_mmvq_segments: a segment without rows");
+        validate_pointer(s.w[j]);
+        validate_pointer(s.x[j]);
+        validate_pointer(s.y[j]);
+        blocks += unsigned(s.rows[j]);
+    }
+    validate_stream(stream);
+    const auto st = static_cast<cudaStream_t>(stream);
+    const dim3 threads(WARP, WARPS);
+    switch (ggml_type) {
+    case 8: native_mmvq_segments_kernel<8><<<blocks, threads, 0, st>>>(s, n_in); break;
+    case 13: native_mmvq_segments_kernel<13><<<blocks, threads, 0, st>>>(s, n_in); break;
+    default: native_mmvq_segments_kernel<14><<<blocks, threads, 0, st>>>(s, n_in); break;
+    }
+    launch_check();
+    return true;
 }
 
 bool native_mmvq_supported(int ggml_type) noexcept {

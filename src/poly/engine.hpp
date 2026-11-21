@@ -724,6 +724,7 @@ protected:
     /// in a block.  Off for the models whose sums stay in range: it cost LFM2.5 4% of a 30K prompt's read on a 5090.
     bool half_sum_guard_ = false;
     bool wave_gemv_ = false;   ///< lin(): F32 products of a few tokens by gemv_f32_waves() (Inkling's decode switch)
+    bool head_warps_ = false;  ///< lin(): the output head of one row by native_q6_k_mmvq_warps() (Inkling's decode switch)
 
     std::vector<Layer> layers_;   ///< the model's, and after them the draft block
     Dev out_norm_, output_;

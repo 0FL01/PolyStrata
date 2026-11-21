@@ -175,6 +175,23 @@ bool native_mmvq_ids(int ggml_type, const MmvqIds& ids, int count, int n_in, int
 // Q6_K=14, IQ4_NL=20, IQ4_XS=23, MXFP4=39, NVFP4=40, Q2_0=42. Unsupported IDs throw in the byte-count
 // and launch helpers; only the
 // capability query returns false.
+/// Several native_mmvq(ggml_type, w[j], x[j], y[j], n_in, rows[j], 1) of one format and input width in one launch,
+/// each row bit for bit what its own call gives (the same kernel body runs for it): a decode step's projections that
+/// would otherwise each pay a launch.  Q8_0, Q5_K and Q6_K whose one-column call takes a block a row; false, with
+/// nothing launched, for anything else (the caller makes the separate calls then).
+struct MmvqSegments {
+    static constexpr int kMost = 8;
+    int count = 0;
+    const void* w[kMost] = {};
+    const void* x[kMost] = {};
+    float* y[kMost] = {};
+    int rows[kMost] = {};
+};
+bool native_mmvq_segments(int ggml_type, const MmvqSegments& s, int n_in, void* stream);
+/// native_mmvq(14, ...) for one column with a warp a row and no sum across warps: an output head of 200,058 rows took
+/// 1,030-1,150 us on an RX 6700 XT where the one-block-a-row kernel took 1,165-1,315.  Another order of the sums
+/// (strata-poly: every one-row logits call under Inkling's decode switch, a prompt's last token's too).
+bool native_q6_k_mmvq_warps(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, void* stream);
 bool native_mmvq_supported(int ggml_type) noexcept;
 std::size_t native_mmvq_weight_bytes(int ggml_type, int n_in, int n_out);
 void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* y,

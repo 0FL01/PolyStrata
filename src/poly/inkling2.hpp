@@ -68,6 +68,8 @@ private:
     bool cpu_sum_ = false;  // moe_add() left the CPU experts' sum for layer_tail()
     bool fo_clean_ = false; // layer_tail() left fo_ 0 for the next layer's experts (moe_shared())
     void* attq_ = nullptr;  // the attention's output as Q8_1 (attend_decode()), for the output projection
+    void *kq8_ = nullptr, *vq8_ = nullptr;   // K's and V's own inputs as Q8_1 (project())
+    void project(const Block& b, const float* xk, const float* xv, bool shared_kv);
     bool fused(int n) const;   // decode_ and fewer rows than a prompt batch
 
     float *q_ = nullptr, *k_ = nullptr, *v_ = nullptr, *att_ = nullptr, *gate_ = nullptr, *rel_ = nullptr,
