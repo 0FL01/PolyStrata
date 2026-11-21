@@ -192,6 +192,13 @@ bool native_mmvq_segments(int ggml_type, const MmvqSegments& s, int n_in, void* 
 /// 1,030-1,150 us on an RX 6700 XT where the one-block-a-row kernel took 1,165-1,315.  Another order of the sums
 /// (strata-poly: every one-row logits call under Inkling's decode switch, a prompt's last token's too).
 bool native_q6_k_mmvq_warps(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, void* stream);
+/// Opt-in (the engines call them where a guesser runs): a warp a row of Q6_K or Q8_0 for ncols (1..8) Q8_1 rows at
+/// once, y [ncols][n_out]; every weight block is read once for all the rows.  A Q6_K column's sums are
+/// native_q6_k_mmvq_warps()'s.  False where they do not take the shape (or a Q8_0 matrix with a packed copy).
+bool native_q6_k_mmvq_warps_cols(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols,
+                                 void* stream);
+bool native_q8_0_mmvq_warps_cols(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols,
+                                 void* stream);
 bool native_mmvq_supported(int ggml_type) noexcept;
 std::size_t native_mmvq_weight_bytes(int ggml_type, int n_in, int n_out);
 void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* y,

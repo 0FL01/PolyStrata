@@ -4,6 +4,7 @@
 #include "engine.hpp"
 
 #include <array>
+#include <vector>
 
 namespace strata::poly {
 
@@ -21,7 +22,8 @@ protected:
     void run_visits(int n) override;
     void alloc_caches() override;
     void assign_scratch() override;
-    int widest() const override { return 2 * kWidth; }
+    // the drafter's FFN down projection takes rows of 9216 (kDsFfn), its block 8 of them
+    int widest() const override { return draft_ ? std::max(2 * kWidth, kDsFfn) : 2 * kWidth; }
     int streams() const override { return 1; }
     size_t recurrent_floats() const override;
     size_t extra_bytes() const override;
@@ -34,6 +36,9 @@ protected:
     void route(int il, const float* logits, int32_t, int* ids, float* w, float* tmp) const override;
     void moe_shared(const Layer&, int, int n) override;
     void moe_add(int n) override;
+    void load_drafter() override;
+    void draft_step(int32_t token, int i) override;
+    void drafter_kept(int n) override;
 
 private:
     static constexpr int kPhysical = 24, kVisits = 48;
@@ -71,6 +76,7 @@ private:
     void *kq8_ = nullptr, *vq8_ = nullptr;   // K's and V's own inputs as Q8_1 (project())
     void project(const Block& b, const float* xk, const float* xv, bool shared_kv);
     bool fused(int n) const;   // decode_ and fewer rows than a prompt batch
+    float* snap_of(float* state) const;
 
     float *q_ = nullptr, *k_ = nullptr, *v_ = nullptr, *att_ = nullptr, *gate_ = nullptr, *rel_ = nullptr,
           *sink_ = nullptr, *taps_ = nullptr, *scores_ = nullptr, *partial_ = nullptr, *halo_ = nullptr,
@@ -89,6 +95,41 @@ private:
     void depth_mix(const float* query, float* dst, int first, int n);
     void control(const Block& b, int il, int stream, float* in, int n);
     void ring_state(int visit, int64_t pos, const uint8_t* src, uint8_t* dst);
+
+    // The DSpark drafter (--draft-model, a `dflash` GGUF with dspark_hidden_out): Engine::draft_ without a block
+    // layer.  It reads the model's rows entering visits kTap (ds_taps_, every call) and its normed output (hn_ + n_embd_);
+    // the kept tokens' rows go into its own K/V (ds_cache_: layers 0 and 2 rings of kWindow rows, layer 1 every row),
+    // and the last one's mix for the recurrent head into hn_'s first row.
+    static constexpr int kDsLayers = 3, kDsFfn = 9216, kDsRank = 256, kDsBlock = 8;
+    static constexpr int kTap[3] = {5, 23, 41};
+    static constexpr bool ds_swa(int l) { return l != 1; }
+    struct DsLayer {
+        Dev attn_norm, ffn_norm, ctx_norm, q, k, v, o, k_ctx, v_ctx, q_norm, k_norm, k_ctx_norm, gate, up, down;
+    };
+    std::array<DsLayer, kDsLayers> ds_;
+    std::array<Cache, kDsLayers> ds_cache_;
+    Dev ds_out_norm_, ds_mask_, ds_rnn_norm_, ds_joint_, ds_joint_b_;
+    float ds_mix_[kDsLayers + 1][4] = {};   // softmax of dspark_fuse's rows: the layers' and the recurrent head's
+    const uint8_t* ds_w1_ = nullptr;        // markov_w1: F16 rows of kDsRank, in the mapped file
+    std::vector<float> ds_hidden_, ds_hidden_b_;   // dspark_hidden_out [kWidth][kDsRank] and its bias, for prepare_head()
+    float ds_eps_ = 0, ds_cap_ = 0, ds_theta_ = 0;
+    bool ds_head_ready_ = false;
+    float* ds_taps_ = nullptr;              // the rows entering visits kTap of the last call, rows_ apart
+    float *ds_x_ = nullptr, *ds_xa_ = nullptr, *ds_q_ = nullptr, *ds_qr_ = nullptr, *ds_k_ = nullptr,
+          *ds_kr_ = nullptr, *ds_v_ = nullptr, *ds_ao_ = nullptr, *ds_out_ = nullptr, *ds_g_ = nullptr,
+          *ds_u_ = nullptr, *ds_h_ = nullptr, *ds_cur_ = nullptr, *ds_base_ = nullptr, *ds_state_ = nullptr,
+          *ds_w1row_ = nullptr, *ds_jx_ = nullptr, *ds_jo_ = nullptr, *ds_lat_ = nullptr, *ds_att_ = nullptr,
+          *ds_b2_ = nullptr;
+    float* ds_host_ = nullptr;              // pinned: a markov_w1 row, or prepare_head()'s rows, on their way
+    uint16_t* ds_w2_ = nullptr;             // W_head W_hidden_out, half [kDsRank][n_vocab_]
+    int ds_rows_ = 0;                       // the guesses a block has (base rows): min(7, window - 1)
+    int ds_based_ = 0;                      // the block's rows whose head logits ds_base_ holds
+    void load_drafter_shape(const Shards& g);
+    void prepare_head();
+    void ds_block(int32_t token);
+    void ds_base(int to);
+    size_t ds_row_bytes() const { return 2 * (kKey + kKey / 32 * sizeof(uint16_t)); }
+    void ds_ring(int l, int64_t pos, const uint8_t* src, uint8_t* dst);
 };
 
 }  // namespace strata::poly

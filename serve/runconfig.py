@@ -20,7 +20,7 @@ EDITABLE = [
     ("sampling.temperature", ("sampling", "num>=0"),
      "Default temperature for requests that send none (0 = greedy; without it the model card's: 1.0 thinking, 0.7 not)"),
     ("sampling.top_p", ("sampling", "0<x<=1"), "Default top_p for requests that send none"),
-    ("sampling.top_k", ("sampling", "1..64"), "Default top_k for requests that send none (1-64)"),
+    ("sampling.top_k", ("sampling", "1..64"), "Default top_k for requests that send none (1-64; 0 = no limit with strata-poly)"),
     ("sampling.min_p", ("sampling", "0<=x<=1"), "Default min_p for requests that send none"),
     ("reasoning_budget_tokens", "int>=0", "Cap the thinking of every request at this many tokens (0 or empty: no cap)"),
     ("fit_max_tokens", "bool", "Shorten a max_tokens that does not fit the context instead of answering 400"),
@@ -122,7 +122,8 @@ def check(key: str, v, cfg: dict):
         return float(_number(key, v, hi=1, lo_open=True))
     if rule == "0<=x<=1":
         return float(_number(key, v, hi=1))
-    return _number(key, v, whole=True, lo=1, hi=64)
+    from serve.server import poly_engine          # here: server imports this module
+    return _number(key, v, whole=True, lo=0 if poly_engine(cfg) else 1, hi=64)   # strata-poly: 0 is no limit
 
 
 def apply(cfg: dict, changes: dict) -> tuple[dict, list[str]]:

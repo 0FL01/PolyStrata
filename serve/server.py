@@ -1214,8 +1214,14 @@ class StrataEngine:
             if time.time() > deadline:
                 raise EngineDied("the engine did not answer the VRAM command")
 
+    @property
+    def whole_vocab(self) -> bool:
+        """strata-poly draws from the whole vocabulary at top_k=0; the Strata project's engine keeps at most 64."""
+        spawn = getattr(self, "spawn", None)        # a test's bare engine has none
+        return bool(spawn) and poly_engine({"exe": spawn[0]})
+
     @staticmethod
-    def sampling_keys(sampling: dict) -> str:
+    def sampling_keys(sampling: dict, whole_vocab: bool = False) -> str:
         keys = ""
         t = sampling.get("temperature")
         if isinstance(t, (int, float)) and float(t) > 0.0:
@@ -1225,8 +1231,9 @@ class StrataEngine:
             keys += f" top_p={float(tp)!r}"
         tk = sampling.get("top_k")
         if isinstance(tk, int) and not isinstance(tk, bool) and tk >= 0:
-            # the engine's sampled path keeps at most 64 candidates: 0 ("off") and wider lists get all 64
-            keys += f" top_k={tk if 1 <= tk <= 64 else 64}"
+            # the Strata engine's sampled path keeps at most 64 candidates: 0 ("off") and wider lists get all 64;
+            # strata-poly takes 0 as no limit
+            keys += f" top_k={0 if whole_vocab and tk == 0 else tk if 1 <= tk <= 64 else 64}"
         mp = sampling.get("min_p")
         if isinstance(mp, (int, float)) and 0.0 < float(mp) <= 1.0:
             keys += f" min_p={float(mp)!r}"
@@ -1628,7 +1635,7 @@ class StrataEngine:
             raise EngineDied("the engine is unavailable; this request was not sent")
         self.progress, self.progress_ms, self.reused = None, 0, 0
         born = self.gen                                 # the engine process this request is sent to
-        keys = self.sampling_keys(sampling or {})
+        keys = self.sampling_keys(sampling or {}, self.whole_vocab)
         out: list[int] = []
         pending: list[int] = []
         prompt, left = list(ids), int(max_new)
@@ -2015,7 +2022,7 @@ class StrataEngine:
         self.progress, self.progress_ms, self.reused = None, 0, 0
         self.prefill_tok_s_mean = None
         # an image request takes the same sampling keys as text (#75: it used to decode greedily whatever was asked)
-        keys = self.sampling_keys(sampling or {}) + self.turn_key(ids)
+        keys = self.sampling_keys(sampling or {}, self.whole_vocab) + self.turn_key(ids)
         head = f"GENI {int(max_new)}{keys} {embeddings}" if embeddings else f"GEN {int(max_new)}{keys}"
         try:
             self.proc.stdin.write(f"{head} {','.join(str(int(t)) for t in ids)}\n")
@@ -7393,8 +7400,10 @@ def sampling_defaults_from_config(cfg: dict) -> dict:
                 raise SystemExit(f"[strata] config sampling.min_p={value!r}: expected 0 <= min_p <= 1")
             out[key] = float(value)
         elif key == "top_k":
-            if not number or value != int(value) or not 1 <= value <= 64:
-                raise SystemExit(f"[strata] config sampling.top_k={value!r}: the sampled path takes an integer 1..64")
+            lowest = 0 if poly_engine(cfg) else 1   # strata-poly: 0 is no limit
+            if not number or value != int(value) or not lowest <= value <= 64:
+                raise SystemExit(f"[strata] config sampling.top_k={value!r}: the sampled path takes an integer "
+                                 f"{lowest}..64")
             out[key] = int(value)
         elif key == "presence_penalty":
             if not number or value < 0:

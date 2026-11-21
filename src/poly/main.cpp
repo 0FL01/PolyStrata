@@ -97,11 +97,14 @@ public:
             logits = pen_.data();
         }
         if (s.temperature <= 0.f) return strata::poly::most_likely(logits, n_vocab);
+        const size_t k = s.top_k > 0 ? std::min((size_t) s.top_k, (size_t) n_vocab) : (size_t) n_vocab;
+        // Nothing cut (top_k 0 or the whole vocabulary, top_p 1, min_p 0): the draw is over every token, so it needs
+        // no order.  A heap of the whole vocabulary took 19.5 ms a token on a Ryzen 7 5700X, this one pass 0.3 ms.
+        if (k == (size_t) n_vocab && s.top_p >= 1.f && s.min_p <= 0.f) return draw_all(logits, n_vocab, s, rng);
 
         // The k best, the best first and of equals the lower id.  A token is a candidate only when it beats the
         // worst of the k so far, which is the heap's first; most of a vocabulary never does.
         auto by_logit = [](const Cand& a, const Cand& b) { return a.logit != b.logit ? a.logit > b.logit : a.id < b.id; };
-        const size_t k = s.top_k > 0 ? std::min((size_t) s.top_k, (size_t) n_vocab) : (size_t) n_vocab;
         cand_.clear();
         for (int i = 0; i < n_vocab; ++i) {
             if (cand_.size() == k) {
@@ -145,6 +148,71 @@ private:
         int id;
     };
 
+    static constexpr int kSumRun = 4096;
+
+    // e^x for x <= 0 to float precision (relative error ~1e-7): 2^n 2^f, |f| <= 1/2, f's series to the 7th term.  A
+    // loop of it vectorizes where std::exp's calls do not.
+    static float exp_below_0(float x) {
+        if (!(x >= -87.f)) return 0.f;   // below float's range, and -inf (a token logit_bias took out)
+        const float t = x * 1.44269504089f;
+        const float n = (t + 12582912.f) - 12582912.f;   // t rounded to the nearest integer
+        const float f = (t - n) * 0.69314718056f;
+        float p = 1.f / 5040.f;
+        p = p * f + 1.f / 720.f;
+        p = p * f + 1.f / 120.f;
+        p = p * f + 1.f / 24.f;
+        p = p * f + 1.f / 6.f;
+        p = p * f + 0.5f;
+        p = p * f + 1.f;
+        p = p * f + 1.f;
+        const int32_t bits = ((int32_t) n + 127) << 23;
+        float scale;
+        std::memcpy(&scale, &bits, sizeof(scale));
+        return p * scale;
+    }
+
+    // A token with probability softmax(logits / temperature): runs of kSumRun weights and their sums, the draw's run
+    // by the runs' sums, its token by the sums in id order inside it.
+    int draw_all(const float* logits, int n_vocab, const Sampling& s, std::mt19937_64& rng) {
+        float mx = -INFINITY;
+        for (int i = 0; i < n_vocab; ++i) mx = std::max(mx, logits[i]);
+        const float inv = 1.f / s.temperature;
+        // nothing to draw from (every token taken out), or a temperature so small its scale overflows: the most likely
+        if (!std::isfinite(mx) || !std::isfinite(inv)) return strata::poly::most_likely(logits, n_vocab);
+        q_.resize((size_t) n_vocab);
+        runs_.clear();
+        float* q = q_.data();
+        double sum = 0.0;
+        for (int at = 0; at < n_vocab; at += kSumRun) {
+            const int end = std::min(n_vocab, at + kSumRun);
+            for (int i = at; i < end; ++i) q[i] = exp_below_0((logits[i] - mx) * inv);
+            // in doubles, as the scan below adds them: a run's sum is the mass the scan finds in it.  Four sums the
+            // loop can keep apart: one would wait on each add.
+            double lane[4] = {};
+            int i = at;
+            for (; i + 4 <= end; i += 4)
+                for (int j = 0; j < 4; ++j) lane[j] += q[i + j];
+            double run = 0.0;
+            for (; i < end; ++i) run += q[i];
+            for (double v : lane) run += v;
+            runs_.push_back(run);
+            sum += run;
+        }
+        double u = std::uniform_real_distribution<double>(0.0, 1.0)(rng) * sum;
+        size_t r = 0;
+        while (r + 1 < runs_.size() && u >= runs_[r]) u -= runs_[r++];
+        const int at = (int) r * kSumRun, end = std::min(n_vocab, at + kSumRun);
+        double cum = 0.0;
+        int last = at;
+        for (int i = at; i < end; ++i) {
+            if (!(q[i] > 0.f)) continue;
+            cum += q[i];
+            last = i;
+            if (cum > u) return i;
+        }
+        return last;   // u at the very top of the run, by rounding
+    }
+
     static bool penalizes(const Sampling& s) {
         return s.penalty_last_n != 0 &&
                (s.penalty_repeat != 1.f || s.penalty_freq != 0.f || s.penalty_present != 0.f);
@@ -174,6 +242,8 @@ private:
     std::vector<Cand> cand_;
     std::vector<float> pen_;
     std::vector<double> p_;
+    std::vector<float> q_;          // draw_all()'s weights
+    std::vector<double> runs_;      // and their runs' sums
     std::unordered_map<int32_t, int> seen_;
 };
 
@@ -347,6 +417,14 @@ struct Session {
     Guesses guesses;                      // whether the block is asked in a round, and for how many (guesses.hpp)
     int piece_calls = kPiece;             // generate()'s pieces when it is given `between`
 
+    // the most tokens of a window whose guesses come from the block one by one (--draft-max: one more than the
+    // guesses), and STRATA_DRAFT_LOG's file
+    int draft_most = kBlockWindow;
+    FILE* draft_log = [] {
+        const char* p = std::getenv("STRATA_DRAFT_LOG");
+        return p && *p ? std::fopen(p, "w") : nullptr;
+    }();
+
     Session(Engine& e, std::vector<int32_t> eos_ids, const CacheFlags& f, int lookup)
         : engine(e), eos(std::move(eos_ids)), flags(f), kept(e, with_floor(f)),
           most(lookup > 0 || e.drafts() ? std::min<int>(e.max_window(), strata::spec::DraftPolicy::kMaxT) : 1),
@@ -494,7 +572,7 @@ struct Session {
         };
         if (max_new > 0) {
             int32_t w[strata::spec::DraftPolicy::kMaxT], d[strata::spec::DraftPolicy::kMaxT];
-            const int block_window = engine.guesses_at_once() ? most : kBlockWindow;
+            const int block_window = engine.guesses_at_once() ? most : draft_most;
             int32_t t = pick(engine.logits());   // picked, and not shown yet
             while (show(t)) {
                 // t goes into the model now, and with it guesses at what follows when there are any that pay
@@ -514,7 +592,22 @@ struct Session {
                     return guesses.end(in, n, ms_since(round), engine.took_record());
                 };
                 strata::spec::DraftPolicy::Pick use = policy.choose(1, k, match);
-                if (ask) {
+                if (draft_log && engine.drafts() && room) {
+                    // STRATA_DRAFT_LOG: the block's every guess of the round, written beside the token they follow,
+                    // and the token fed alone, so that the guesses can be checked against another implementation's
+                    // at every position of a plain decode
+                    std::fprintf(draft_log, "%lld %d", (long long) engine.pos(), t);
+                    int32_t from = t;
+                    for (int n_d = 0; n_d < std::min(most, block_window) - 1; ++n_d) {
+                        float p = 0.f;
+                        const Clock::time_point asked_at = Clock::now();
+                        from = engine.draft(from, n_d, &p);
+                        std::fprintf(draft_log, " %d:%.4f:%.2f", from, p, ms_since(asked_at));
+                    }
+                    std::fputc('\n', draft_log);
+                    std::fflush(draft_log);
+                    use = {false, 1};
+                } else if (ask) {
                     int n_d = 0;
                     for (int32_t from = t; n_d < std::min(most, block_window) - 1 && guesses.wants(n_d); from = d[n_d++]) {
                         float p = 0.f;
@@ -1169,7 +1262,10 @@ void usage() {
                  "                         (default 3, 0 = never)\n"
                  "  --no-draft             do not run the block that guesses ahead\n"
                  "  --draft-model FILE     a file of the same model to take that block from, when --model has none;\n"
-                 "                         for Gemma 4, its draft model (a gemma4-assistant file)\n"
+                 "                         for Gemma 4, its draft model (a gemma4-assistant file); for\n"
+                 "                         Inkling-2-Mini, its DSpark drafter (needs STRATA_INKLING_DECODE=1)\n"
+                 "  --draft-max N          the most guesses a window takes from a block that makes them one by one\n"
+                 "                         (default 3)\n"
                  "  --draft-vocab N        the block guesses among the vocabulary's first N tokens (default:\n"
                  "                         131072 for Qwen3.6, Ornith and Tiel, all of it for the others; 0 = all)\n"
                  "  --no-graphs            launch a token's kernels one by one (default: a layer's are recorded once\n"
@@ -1271,7 +1367,7 @@ int main(int argc, char** argv) {
     Sampling s;
     bool want_serve = false;
     long long max_new = 32;
-    int top_probs = 0, lookup = 3, image_pad = -1, check = 0;
+    int top_probs = 0, lookup = 3, image_pad = -1, check = 0, draft_max = 0;
     std::string images;
     std::vector<int32_t> ids, eos, follow;
     for (int i = 1; i < argc; ++i) {
@@ -1321,6 +1417,7 @@ int main(int argc, char** argv) {
         }
         else if (a == "--window") o.window = std::atoi(val());
         else if (a == "--lookup") lookup = std::atoi(val());
+        else if (a == "--draft-max") draft_max = std::atoi(val());
         else if (a == "--no-draft") o.draft = false;
         else if (a == "--draft-model") o.draft_model = val();
         else if (a == "--expert-swaps") o.expert_swaps = std::atoi(val());
@@ -1447,6 +1544,7 @@ int main(int argc, char** argv) {
                                      "(--conversation-cache-mib N asks for one anyway)\n");
         }
         Session ss(engine, eos, cache, lookup);
+        if (draft_max > 0) ss.draft_most = std::min(draft_max + 1, strata::spec::DraftPolicy::kMaxT);
         int rc = 0;
         if (want_serve) {
             rc = serve(ss);

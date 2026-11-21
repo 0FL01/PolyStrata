@@ -5,6 +5,7 @@
 // native_mmvq() on the output head's shape (200,058 x 2,304 Q6_K): within 1e-5 of the largest output (it sums in
 // another order), and timed.
 //
+// The few-row kernels a guesser uses (cols()).
 // usage: poly_mmvq_segments_test   (exit 0: all equal, the head within tolerance; 1: not; 77: no card)
 #include "strata/kernels/native_mmvq.hpp"
 
@@ -158,6 +159,84 @@ void timed(std::mt19937& rng, cudaStream_t st) {
     cudaFree(y);
 }
 
+// native_q6_k_mmvq_warps_cols() and native_q8_0_mmvq_warps_cols() on a few rows (a guesser's window and block): a
+// Q6_K column bit for bit native_q6_k_mmvq_warps()'s, a Q8_0 column within 1e-5 of native_mmvq()'s largest output
+// (another order of the sums); and the times against native_mmvq() for the same rows.
+bool cols(std::mt19937& rng, cudaStream_t st, int vocab) {
+    bool ok = true;
+    for (const int type : {14, 8}) {
+        const int n_out = type == 14 ? vocab : 9216;
+        const size_t bytes = strata::kernels::native_mmvq_weight_bytes(type, kIn, n_out);
+        void* w = nullptr;
+        if (cudaMalloc(&w, bytes) != cudaSuccess) {
+            cudaGetLastError();
+            std::puts("cols: no room for the matrix  FAIL");
+            return false;
+        }
+        const auto h = blocks(type, bytes, rng);
+        cudaMemcpy(w, h.data(), bytes, cudaMemcpyHostToDevice);
+        constexpr int kRows = 8;
+        std::vector<float> xf((size_t) kRows * kIn);
+        std::normal_distribution<float> d(0.f, 1.f);
+        for (auto& v : xf) v = d(rng);
+        float *xd = nullptr, *a = nullptr, *b = nullptr;
+        void* x = nullptr;
+        cudaMalloc(&xd, xf.size() * sizeof(float));
+        cudaMemcpy(xd, xf.data(), xf.size() * sizeof(float), cudaMemcpyHostToDevice);
+        const size_t row = (size_t) kIn / 32 * 36;
+        cudaMalloc(&x, kRows * row);
+        cudaMalloc(&a, (size_t) kRows * n_out * sizeof(float));
+        cudaMalloc(&b, (size_t) kRows * n_out * sizeof(float));
+        strata::kernels::native_quantize_q8_1(xd, x, kIn * kRows, 1, st);
+        cudaEvent_t e0, e1;
+        cudaEventCreate(&e0);
+        cudaEventCreate(&e1);
+        for (const int nc : {2, 4, 8}) {
+            float ms_native = 0, ms_cols = 0;
+            for (int rep = 0; rep < 4; ++rep) {
+                cudaEventRecord(e0, st);
+                if (type == 14)   // the reference: a column at a time, a warp a row
+                    for (int c = 0; c < nc; ++c)
+                        strata::kernels::native_q6_k_mmvq_warps(w, (const uint8_t*) x + c * row, a + (size_t) c * n_out,
+                                                                 kIn, n_out, st);
+                else strata::kernels::native_mmvq(type, w, x, a, kIn, n_out, nc, st);
+                cudaEventRecord(e1, st);
+                cudaEventSynchronize(e1);
+                float t = 0;
+                cudaEventElapsedTime(&t, e0, e1);
+                if (rep) ms_native += t;
+                cudaEventRecord(e0, st);
+                const bool took = type == 14 ? strata::kernels::native_q6_k_mmvq_warps_cols(w, x, b, kIn, n_out, nc, st)
+                                             : strata::kernels::native_q8_0_mmvq_warps_cols(w, x, b, kIn, n_out, nc, st);
+                cudaEventRecord(e1, st);
+                cudaEventSynchronize(e1);
+                cudaEventElapsedTime(&t, e0, e1);
+                if (rep) ms_cols += t;
+                ok = ok && took;
+            }
+            std::vector<float> ha((size_t) nc * n_out), hb((size_t) nc * n_out);
+            cudaMemcpy(ha.data(), a, ha.size() * sizeof(float), cudaMemcpyDeviceToHost);
+            cudaMemcpy(hb.data(), b, hb.size() * sizeof(float), cudaMemcpyDeviceToHost);
+            double top = 0, diff = 0;
+            for (size_t i = 0; i < ha.size(); ++i) {
+                top = std::max(top, (double) std::fabs(ha[i]));
+                diff = std::max(diff, (double) std::fabs(ha[i] - hb[i]));
+            }
+            const bool same = type == 14 ? diff == 0 : diff <= 1e-5 * top;
+            ok = ok && same;
+            std::printf("%s %d x %d, %d rows: reference %.1f us, warps_cols %.1f us; difference %.3g of %.3g%s\n",
+                        type == 14 ? "Q6_K" : "Q8_0", n_out, kIn, nc, ms_native * 1e3f / 3, ms_cols * 1e3f / 3, diff, top,
+                        same ? "" : "  FAIL");
+        }
+        cudaFree(w);
+        cudaFree(x);
+        cudaFree(xd);
+        cudaFree(a);
+        cudaFree(b);
+    }
+    return ok;
+}
+
 bool head(std::mt19937& rng, cudaStream_t st) {
     constexpr int kVocab = 200058;
     const size_t bytes = strata::kernels::native_mmvq_weight_bytes(14, kIn, kVocab);
@@ -217,7 +296,7 @@ bool head(std::mt19937& rng, cudaStream_t st) {
     cudaFree(xd);
     cudaFree(a);
     cudaFree(b);
-    return ok;
+    return ok && cols(rng, st, kVocab);
 }
 
 }  // namespace

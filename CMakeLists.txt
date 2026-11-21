@@ -2142,8 +2142,8 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
                                       src/poly/cpu_experts.cpp src/poly/kernels.cu src/poly/kernels_dsv4.cu
                                       src/core/conversation_memory.cpp)
   if(STRATA_ENABLE_HIP)
-    target_sources(strata-poly PRIVATE src/poly/inkling2.cu src/poly/inkling_attend.cu)
-    target_sources(poly_draft_race_test PRIVATE src/poly/inkling2.cu src/poly/inkling_attend.cu)
+    target_sources(strata-poly PRIVATE src/poly/inkling2.cu src/poly/inkling_attend.cu src/poly/inkling_dspark.cu)
+    target_sources(poly_draft_race_test PRIVATE src/poly/inkling2.cu src/poly/inkling_attend.cu src/poly/inkling_dspark.cu)
     # STRATA_INKLING_FLASH: the fused prompt attention against the plain kernels, and both timed; needs a card
     # (77 = skipped)
     add_executable(poly_inkling_attend_test src/poly/inkling_attend_test.cu src/poly/inkling_attend.cu)

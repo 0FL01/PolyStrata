@@ -3,6 +3,7 @@
 #include "inkling2.hpp"
 
 #include "inkling_attend.hpp"
+#include "inkling_dspark.hpp"
 #include "runtime.hpp"
 #include "strata/kernels/gfx_arch.hpp"
 #include "strata/kernels/iq_kernels.hpp"
@@ -127,8 +128,10 @@ __global__ void control_kernel(float* cur, const float* msg, const float* gain, 
 
 // One thread owns one channel and keeps its raw input history across the chunk. In GGUF the static taps
 // run oldest to newest; the input-dependent taps of each KV head start with the current token.
+// With `snap`, a window's (Engine::window()): the state after each of its tokens but the last as well, token t's
+// `stride` floats after token t - 1's, at the place the state has in state_ (Engine::keep() puts one back).
 __device__ __forceinline__ void conv_channel(float* x, float* state, const float* w, const float* dynamic, int width,
-                                             int n, int i) {
+                                             int n, int i, float* snap = nullptr, size_t stride = 0) {
     float* h = state + 3 * i;
     float a = h[0], b = h[1], c = h[2];
     w += 4 * i;
@@ -145,6 +148,12 @@ __device__ __forceinline__ void conv_channel(float* x, float* state, const float
         a = b;
         b = c;
         c = d;
+        if (snap && t + 1 < n) {
+            float* k = snap + (size_t) t * stride + 3 * i;
+            k[0] = a;
+            k[1] = b;
+            k[2] = c;
+        }
     }
     h[0] = a;
     h[1] = b;
@@ -162,27 +171,28 @@ struct Conv {
     float* state;
     const float* w;
     const float* dynamic;
+    float* snap = nullptr;   // conv_channel()'s
 };
 // K's and V's convolutions (kKey channels each) in one launch.
-__global__ void conv2_kernel(Conv k, Conv v, int width, int n) {
+__global__ void conv2_kernel(Conv k, Conv v, int width, int n, size_t stride) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     const bool second = i >= width;
     if (second) i -= width;
     if (i >= width) return;
     const Conv& c = second ? v : k;
-    conv_channel(c.x, c.state, c.w, c.dynamic, width, n, i);
+    conv_channel(c.x, c.state, c.w, c.dynamic, width, n, i, c.snap, stride);
 }
 
 // A static convolution of x (plus `add`, the CPU experts' sum, when there is one) added to the residual r, as
 // axpy(add, 1, x), conv() and axpy(x, 1, r) do. With `depth`, a block of layers starts: depth takes r and r takes x,
 // as axpy(r, 1, depth) and axpy(x, 1, r) without adding do.
 __global__ void conv_add_kernel(float* x, const float* add, float* state, const float* w, float* r, float* depth,
-                                int width, int n, bool clean) {
+                                int width, int n, bool clean, float* snap = nullptr, size_t stride = 0) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= width) return;
     if (add)
         for (int t = 0; t < n; ++t) x[(size_t) t * width + i] = x[(size_t) t * width + i] + add[(size_t) t * width + i];
-    conv_channel(x, state, w, nullptr, width, n, i);
+    conv_channel(x, state, w, nullptr, width, n, i, snap, stride);
     for (int t = 0; t < n; ++t) {
         const size_t at = (size_t) t * width + i;
         if (depth) {
@@ -401,9 +411,11 @@ void Inkling2::load_geometry() {
     for (const char* gcn : {"gfx1030", "gfx1031", "gfx1032", "gfx1033", "gfx1034", "gfx1035", "gfx1036"})
         rdna2 = rdna2 || kernels::gfx_arch_is(p.gcnArchName, gcn);
     if (!rdna2) throw std::runtime_error("Inkling-2-Mini requires a HIP RDNA2 card");
-    if (opt_.batch || !opt_.layer_split.empty() || !opt_.draft_model.empty() || opt_.tail_skip || opt_.skip_weight > 0.f)
-        throw std::runtime_error("Inkling-2-Mini requires one sequence and one card, without draft or expert skipping");
-    opt_.window = 1;
+    if (opt_.batch || !opt_.layer_split.empty() || opt_.tail_skip || opt_.skip_weight > 0.f)
+        throw std::runtime_error("Inkling-2-Mini requires one sequence and one card, without expert skipping");
+    // --draft-model is the DSpark drafter, a model of its own and not a file with a block load_shape() would look
+    // for.  Without it the model checks no guesses: a window of one token.
+    std::unique_ptr<Shards> drafter = std::move(dg_);
     opt_.draft = false;
     const char* flash = std::getenv("STRATA_INKLING_FLASH");
     flash_ = flash && flash[0] == '1' && flash[1] == '\0';
@@ -414,6 +426,8 @@ void Inkling2::load_geometry() {
     if (decode_) std::fputs("strata-poly: STRATA_INKLING_DECODE=1: decode kernels for a few tokens at a time\n", stderr);
     if (!q8() && opt_.kv_format != KvFmt::kFp16)
         throw std::runtime_error("Inkling-2-Mini supports Q8_0 or FP16 KV");
+    const int window = opt_.window;
+    opt_.window = 1;
     load_shape();
 
     const auto need = [](bool ok, const char* key) {
@@ -460,6 +474,81 @@ void Inkling2::load_geometry() {
     n_layer_ = kPhysical;
     looped_ = true;
     clamp_exp_.assign(kPhysical + 1, INFINITY);
+    if (drafter) {
+        // a window's guesses need the short convolutions' state after each of its tokens, which the decode switch's
+        // kernels leave (layer_head(), layer_tail())
+        if (!decode_) throw std::runtime_error("the DSpark drafter of Inkling-2-Mini needs STRATA_INKLING_DECODE=1");
+        // its block of 8 rows goes through the scratch that holds a call's rows
+        if (opt_.prompt_batch < kDsBlock)
+            throw std::runtime_error("the DSpark drafter of Inkling-2-Mini needs --prompt-batch 8 or more");
+        load_drafter_shape(*drafter);
+        dg_ = std::move(drafter);
+        block_ = dg_.get();   // the file the drafter's tensors are read from (home())
+        draft_ = true;
+        block_layer_ = false;
+        cols_kernels_ = true;
+        opt_.draft = true;
+        opt_.window = window > 0 ? std::min(window, kDsBlock) : kDsBlock;
+        ds_rows_ = std::min(kDsBlock - 1, opt_.window - 1);
+        std::fprintf(stderr, "strata-poly: DSpark drafter %s: up to %d guesses a window\n", opt_.draft_model.c_str(),
+                     ds_rows_);
+    }
+}
+
+// The drafter's shape must be the one graph_inkling2 runs for this model (llama.cpp's dspark.cpp): three layers of
+// this width and heads, the 8-token block, taps at visits 5, 23, 41 and the output, a recurrent head of rank 256.
+void Inkling2::load_drafter_shape(const Shards& g) {
+    const std::string file = opt_.draft_model;
+    const auto need = [&](bool ok, const std::string& what) {
+        if (!ok) throw std::runtime_error(file + " is not the DSpark drafter of Inkling-2-Mini: " + what);
+    };
+    const MetaValue* arch = g.get("general.architecture");
+    need(arch && arch->s == "dflash", "its architecture is not 'dflash'");
+    need(g.find("dspark_hidden_out.weight") && g.find("markov_w1.weight") && g.find("joint_proj.weight") &&
+             g.find("dspark_fuse.weight"),
+         "no Inkling2 DSpark head (dspark_hidden_out, markov_w1, joint_proj, dspark_fuse)");
+    const auto must = [&](const char* key) -> const MetaValue& {
+        const MetaValue* v = meta_in(g, key);
+        need(v != nullptr, std::string("no dflash.") + key);
+        return *v;
+    };
+    const auto is = [&](const char* key, uint64_t value) { need(must(key).u == value, std::string("dflash.") + key); };
+    is("block_count", kDsLayers);
+    is("embedding_length", kWidth);
+    is("feed_forward_length", kDsFfn);
+    is("attention.head_count", kHeads);
+    is("attention.head_count_kv", kKv);
+    is("attention.key_length", kHead);
+    is("attention.value_length", kHead);
+    is("rope.dimension_count", kHead);
+    is("block_size", kDsBlock);
+    is("attention.sliding_window", kWindow);
+    is("vocab_size_unpadded", (uint64_t) n_vocab_);
+    need(must("sample_from_anchor").u == 0 && must("attention.causal").u == 0,
+         "it samples from the anchor or is causal");
+    const MetaValue& taps = must("target_layers");
+    need(taps.items.size() == 4 && taps.items[0].u == (uint64_t) kTap[0] && taps.items[1].u == (uint64_t) kTap[1] &&
+             taps.items[2].u == (uint64_t) kTap[2] && taps.items[3].u == (uint64_t) kVisits,
+         "its target_layers are not [5, 23, 41, 48]");
+    const MetaValue& pattern = must("attention.sliding_window_pattern");
+    need(pattern.items.size() == kDsLayers, "dflash.attention.sliding_window_pattern");
+    for (int l = 0; l < kDsLayers; ++l) need((pattern.items[(size_t) l].u != 0) == ds_swa(l), "its window pattern");
+    ds_eps_ = (float) must("attention.layer_norm_rms_epsilon").f;
+    ds_cap_ = (float) must("final_logit_softcapping").f;
+    ds_theta_ = std::pow((float) must("rope.freq_base").f, -2.f / kHead);
+    need(std::isfinite(ds_eps_) && ds_eps_ > 0.f && std::isfinite(ds_cap_) && ds_cap_ > 0.f && ds_theta_ > 0.f,
+         "its epsilon, logit cap or rope base");
+    const TensorInfo* w1 = g.find("markov_w1.weight");
+    need(w1->type == GGML_TYPE_F16 && w1->shape.size() == 2 && w1->shape[0] == (uint64_t) kDsRank &&
+             w1->shape[1] >= (uint64_t) n_vocab_,
+         "markov_w1 is not F16 [256, vocabulary]");
+    const TensorInfo* fuse = g.find("dspark_fuse.weight");
+    need(fuse->type == kTypeF32 && fuse->elements() == 4 * (kDsLayers + 1), "dspark_fuse is not F32 [4, 4]");
+    const TensorInfo* hidden = g.find("dspark_hidden_out.weight");
+    const TensorInfo* hidden_b = g.find("dspark_hidden_out.bias");
+    need(hidden->type == GGML_TYPE_F16 && hidden->elements() == (uint64_t) kDsRank * kWidth && hidden_b &&
+             hidden_b->type == kTypeF32 && hidden_b->elements() == (uint64_t) kWidth,
+         "dspark_hidden_out is not F16 [256, 2304] with an F32 bias");
 }
 
 void Inkling2::begin_pass() {
@@ -525,11 +614,65 @@ void Inkling2::load_layer(int il) {
     }
 }
 
+// The drafter's weights (both passes of load(): the first adds up the arena).  The recurrent head's token table and
+// hidden_out stay on the host: a step reads one row of the table, and hidden_out goes into W' (prepare_head()).
+void Inkling2::load_drafter() {
+    const Shards& g = *dg_;
+    const auto up = [&](const std::string& name, int64_t n_in, int64_t n_out, Want want) {
+        const TensorInfo* t = g.find(name);
+        if (!t) throw std::runtime_error(opt_.draft_model + " has no " + name);
+        return upload(t, name, n_in, n_out, want);
+    };
+    for (int l = 0; l < kDsLayers; ++l) {
+        DsLayer& L = ds_[(size_t) l];
+        const auto name = [&](const char* n) { return "blk." + std::to_string(l) + "." + n; };
+        L.attn_norm = up(name("attn_norm.weight"), kWidth, 1, kF32);
+        L.ffn_norm = up(name("ffn_norm.weight"), kWidth, 1, kF32);
+        L.ctx_norm = up(name("dflare_norm.weight"), kWidth, 1, kF32);
+        L.q = up(name("attn_q.weight"), kWidth, kQuery, kAnyMat);
+        L.k = up(name("attn_k.weight"), kWidth, kKey, kAnyMat);
+        L.v = up(name("attn_v.weight"), kWidth, kKey, kAnyMat);
+        L.o = up(name("attn_output.weight"), kQuery, kWidth, kAnyMat);
+        L.k_ctx = up(name("attn_k_ctx.weight"), kWidth, kKey, kAnyMat);
+        L.v_ctx = up(name("attn_v_ctx.weight"), kWidth, kKey, kAnyMat);
+        L.q_norm = up(name("attn_q_norm.weight"), kHead, 1, kF32);
+        L.k_norm = up(name("attn_k_norm.weight"), kHead, 1, kF32);
+        L.k_ctx_norm = up(name("attn_k_ctx_norm.weight"), kHead, 1, kF32);
+        L.gate = up(name("ffn_gate.weight"), kWidth, kDsFfn, kAnyMat);
+        L.up = up(name("ffn_up.weight"), kWidth, kDsFfn, kAnyMat);
+        L.down = up(name("ffn_down.weight"), kDsFfn, kWidth, kAnyMat);
+    }
+    ds_out_norm_ = up("output_norm.weight", kWidth, 1, kF32);
+    ds_mask_ = up("mask_embd.weight", kWidth, 1, kF32);
+    ds_rnn_norm_ = up("dspark_norm.weight", kWidth, 1, kF32);
+    ds_joint_ = up("joint_proj.weight", 2 * kDsRank + 2 * kWidth, 3 * kDsRank, kF32);
+    ds_joint_b_ = up("joint_proj.bias", 3 * kDsRank, 1, kF32);
+
+    const auto host = [&](const char* name) {
+        const TensorInfo* t = g.find(name);
+        g.payload(*t);
+        return g.data(*t);
+    };
+    const float* fuse = (const float*) host("dspark_fuse.weight");
+    for (int r = 0; r <= kDsLayers; ++r) {   // a row's weights over the four taps: softmax(dspark_fuse[r])
+        float most = -INFINITY, sum = 0.f;
+        for (int j = 0; j < 4; ++j) most = std::max(most, fuse[r * 4 + j]);
+        for (int j = 0; j < 4; ++j) sum += ds_mix_[r][j] = std::exp(fuse[r * 4 + j] - most);
+        for (int j = 0; j < 4; ++j) ds_mix_[r][j] /= sum;
+    }
+    ds_w1_ = host("markov_w1.weight");
+    const uint16_t* hidden = (const uint16_t*) host("dspark_hidden_out.weight");
+    ds_hidden_.resize((size_t) kWidth * kDsRank);
+    for (size_t i = 0; i < ds_hidden_.size(); ++i) ds_hidden_[i] = ggml_fp16_to_fp32(hidden[i]);
+    const float* bias = (const float*) host("dspark_hidden_out.bias");
+    ds_hidden_b_.assign(bias, bias + kWidth);
+}
+
 size_t Inkling2::recurrent_floats() const { return (size_t) kVisits * kConvFloats; }
 size_t Inkling2::kv_bytes() const {
     return 2 * (q8() ? kKey + (kKey / 32) * sizeof(uint16_t) : kKey * sizeof(uint16_t));
 }
-size_t Inkling2::card_row_bytes() const { return kVisits / kBlock * kv_bytes(); }
+size_t Inkling2::card_row_bytes() const { return kVisits / kBlock * kv_bytes() + (draft_ ? ds_row_bytes() : 0); }
 
 void Inkling2::alloc_caches() {
     ring_ = std::min(opt_.max_context, kWindow + rows_ - 1);
@@ -548,6 +691,16 @@ void Inkling2::alloc_caches() {
             } else p.data = (uint8_t*) kv_alloc(stride, 1);
         }
     }
+    if (!draft_) return;
+    // the drafter's K/V, Q8_0 whatever --kv is: its window layers keep the last kWindow positions, the other every one
+    for (int l = 0; l < kDsLayers; ++l)
+        for (int j = 0; j < 4; ++j) {
+            const size_t stride = j % 2 ? kKey / 32 * sizeof(uint16_t) : kKey;
+            auto& p = ds_cache_[(size_t) l].planes[j];
+            p = {nullptr, stride};
+            p.data = ds_swa(l) ? (uint8_t*) seq_alloc((size_t) kWindow * stride, "DSpark window KV")
+                               : (uint8_t*) kv_alloc(stride, 1);
+        }
 }
 
 void Inkling2::save_card_rows(int64_t first, int64_t n, uint8_t* dst) {
@@ -561,6 +714,12 @@ void Inkling2::save_card_rows(int64_t first, int64_t n, uint8_t* dst) {
             dst += bytes;
         }
     }
+    if (draft_)
+        for (const auto& p : ds_cache_[1].planes) {
+            const size_t bytes = (size_t) n * p.stride;
+            ck(cudaMemcpy(dst, p.data + first * p.stride, bytes, cudaMemcpyDeviceToHost), "save DSpark rows");
+            dst += bytes;
+        }
 }
 
 void Inkling2::load_card_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n) {
@@ -576,10 +735,17 @@ void Inkling2::load_card_rows(const uint8_t* src, int64_t from, int64_t count, i
             src += (size_t) count * p.stride;
         }
     }
+    if (draft_)
+        for (const auto& p : ds_cache_[1].planes) {
+            ck(cudaMemcpy(p.data + first * p.stride, src + (first - from) * p.stride, (size_t) n * p.stride,
+                          cudaMemcpyHostToDevice), "load DSpark rows");
+            src += (size_t) count * p.stride;
+        }
 }
 
 size_t Inkling2::extra_bytes() const {
-    return (kVisits - kVisits / kBlock) * (size_t) std::min(opt_.max_context, kWindow - 1) * kv_bytes();
+    return (kVisits - kVisits / kBlock) * (size_t) std::min(opt_.max_context, kWindow - 1) * kv_bytes() +
+           (draft_ ? 2 * (size_t) std::min(opt_.max_context, kWindow) * ds_row_bytes() : 0);
 }
 
 void Inkling2::ring_state(int visit, int64_t pos, const uint8_t* src, uint8_t* dst) {
@@ -599,7 +765,35 @@ void Inkling2::ring_state(int visit, int64_t pos, const uint8_t* src, uint8_t* d
     }
 }
 
+// A drafter window layer's last kWindow rows before `pos`, from the ring (dst) or into it (src): a plane after another,
+// the oldest row first, zeros before the sequence's first row.
+void Inkling2::ds_ring(int l, int64_t pos, const uint8_t* src, uint8_t* dst) {
+    const int64_t keep = std::min(opt_.max_context, kWindow);
+    const int64_t first = std::max<int64_t>(0, pos - keep);
+    for (const auto& p : ds_cache_[(size_t) l].planes) {
+        if (dst) std::memset(dst, 0, (size_t) (keep - (pos - first)) * p.stride);
+        for (int64_t i = first; i < pos;) {
+            const int64_t at = i % kWindow, n = std::min(pos - i, kWindow - at);
+            const size_t off = (size_t) (i - (pos - keep)) * p.stride, bytes = (size_t) n * p.stride;
+            if (dst) ck(cudaMemcpy(dst + off, p.data + at * p.stride, bytes, cudaMemcpyDeviceToHost), "save DSpark");
+            else ck(cudaMemcpy(p.data + at * p.stride, src + off, bytes, cudaMemcpyHostToDevice), "load DSpark");
+            i += n;
+        }
+        if (dst) dst += keep * p.stride;
+        else src += keep * p.stride;
+    }
+}
+
 void Inkling2::save_layer(int il, int64_t pos, uint8_t* dst) {
+    if (draft_ && il == kPhysical - 1) {   // the drafter's rings, behind the model's
+        uint8_t* at = dst + state_n_ * sizeof(float) +
+                      (kVisits - kVisits / kBlock) * (size_t) std::min(opt_.max_context, kWindow - 1) * kv_bytes();
+        for (int l = 0; l < kDsLayers; ++l)
+            if (ds_swa(l)) {
+                ds_ring(l, pos, nullptr, at);
+                at += (size_t) std::min(opt_.max_context, kWindow) * ds_row_bytes();
+            }
+    }
     for (int i = 0; i < kVisits; ++i) if (physical(i) == il) {
         const size_t at = (size_t) i * kConvFloats;
         ck(cudaMemcpy(dst + at * sizeof(float), state_ + at, kConvFloats * sizeof(float), cudaMemcpyDeviceToHost),
@@ -617,6 +811,12 @@ void Inkling2::load_extra(const uint8_t* src, int64_t pos) {
         ring_state(i, pos, src, nullptr);
         src += one;
     }
+    if (draft_)
+        for (int l = 0; l < kDsLayers; ++l)
+            if (ds_swa(l)) {
+                ds_ring(l, pos, src, nullptr);
+                src += (size_t) std::min(opt_.max_context, kWindow) * ds_row_bytes();
+            }
 }
 
 void Inkling2::assign_scratch() {
@@ -654,6 +854,33 @@ void Inkling2::assign_scratch() {
     rank_ = fbuf(n * kRank);
     gain_ = fbuf(width);
     forget_ = fbuf(width);
+    if (!draft_) return;
+    ds_taps_ = fbuf(3 * width);
+    const size_t b = kDsBlock;
+    ds_x_ = fbuf(b * kWidth);
+    ds_xa_ = fbuf(b * kWidth);
+    ds_q_ = fbuf(b * kQuery);
+    ds_qr_ = fbuf(b * kQuery);
+    ds_k_ = fbuf(b * kKey);
+    ds_kr_ = fbuf(b * kKey);
+    ds_v_ = fbuf(b * kKey);
+    ds_ao_ = fbuf(b * kQuery);
+    ds_out_ = fbuf(b * kWidth);
+    ds_g_ = fbuf(b * kDsFfn);
+    ds_u_ = fbuf(b * kDsFfn);
+    ds_h_ = fbuf(b * kDsFfn);
+    ds_cur_ = fbuf(b * kWidth);
+    ds_base_ = fbuf((b - 1) * (size_t) n_vocab_);
+    ds_state_ = fbuf(kDsRank);
+    ds_w1row_ = fbuf(kDsRank);
+    ds_jx_ = fbuf(2 * kDsRank + 2 * kWidth);
+    ds_jo_ = fbuf(3 * kDsRank);
+    ds_lat_ = fbuf(kDsRank);
+    ds_att_ = fbuf(dspark::attend_floats());
+    ds_b2_ = fbuf((size_t) n_vocab_);
+    ds_w2_ = (uint16_t*) fbuf(((size_t) kDsRank * n_vocab_ + 1) / 2);
+    if (!ds_host_) ds_host_ = (float*) hmalloc(b * kWidth * sizeof(float), "pinned memory");
+    ds_head_ready_ = false;
 }
 
 void Inkling2::conv(float* x, float* state, const float* w, const float* dynamic, int width, int n) {
@@ -775,6 +1002,12 @@ void Inkling2::run_visits(int n) {
             axpy(prelude_, 1.f, r_, n * kWidth, false, st_);
             depth_n_ = 1;
         }
+        if (draft_)   // the drafter's taps: the residual entering visits 5, 23 and 41 (drafter_kept())
+            for (int j = 0; j < 3; ++j)
+                if (visit_ == kTap[j])
+                    ck(cudaMemcpyAsync(ds_taps_ + (size_t) j * rows_ * kWidth, r_, (size_t) n * kWidth * sizeof(float),
+                                       cudaMemcpyDeviceToDevice, cs(st_)),
+                       "DSpark taps");
         layer(physical(visit_), n);
     }
 }
@@ -820,8 +1053,8 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
             lin(b.vproj, xv, taps2_, n);
         }
         conv2_kernel<<<div_up(2 * kKey, kThreads), kThreads, 0, cs(st_)>>>(
-            Conv{k_, hist, fp(b.kconv), swa ? nullptr : taps_}, Conv{v_, hist + 3 * kKey, fp(b.vconv), swa ? nullptr : taps2_},
-            kKey, n);
+            Conv{k_, hist, fp(b.kconv), swa ? nullptr : taps_, snap_of(hist)},
+            Conv{v_, hist + 3 * kKey, fp(b.vconv), swa ? nullptr : taps2_, snap_of(hist + 3 * kKey)}, kKey, n, rec_n_);
         HeadNorms h{{{q_, fp(b.qclip), kHead, kHeads, qk_clip_, floor}, {k_, nullptr, kHead, kKv, qk_clip_, 0},
                      {v_, nullptr, kHead, kKv, 0.f, 0}, {rel_, fp(b.rclip), kRelative, kHeads, r_clip_, floor}}};
         head_norms_kernel<<<dim3(2 * kHeads + 2 * kKv, n), kThreads, 0, cs(st_)>>>(h, rms_eps_, pos_, alpha_);
@@ -846,7 +1079,7 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
     if (fused(n))
         conv_add_kernel<<<div_up(kWidth, kThreads), kThreads, 0, cs(st_)>>>(
             ao_, nullptr, hist + 6 * kKey, fp(b.aconv), r_, il % kBlock == 0 ? depth_[depth_n_++] : nullptr, kWidth, n,
-            false);
+            false, snap_of(hist + 6 * kKey), rec_n_);
     else conv(ao_, hist + 6 * kKey, fp(b.aconv), nullptr, kWidth, n);
     if (fused(n)) {   // conv_add_kernel() did the rest
     } else if (il % kBlock == 0) {
@@ -861,6 +1094,13 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
 }
 
 bool Inkling2::fused(int n) const { return decode_ && n < kStageRows; }
+
+// A window's states after its tokens (Engine::snap_at_, a token's rec_n_ floats after the one before), at the place
+// `state` has in state_; null outside a window.  The window takes every token's (snap_tokens(): a place for each).
+float* Inkling2::snap_of(float* state) const {
+    if (!windowed_ || !snap_bits_) return nullptr;
+    return snap_at_ + (state - state_);
+}
 
 // A token's q, gate and relative terms of input_[0] (xq_, quantized), and its K and V of the same or of their own
 // inputs: one launch a weight format (kernels::native_mmvq_segments(), the rows bit for bit lin()'s), lin() for what
@@ -910,7 +1150,8 @@ void Inkling2::layer_tail(Layer&, int il, int n) {
     float* hist = state_ + (size_t) visit_ * kConvFloats + 6 * kKey + 3 * kWidth;
     if (fused(n)) {
         conv_add_kernel<<<div_up(kWidth, kThreads), kThreads, 0, cs(st_)>>>(
-            fo_, cpu_sum_ ? h_cpu_ : nullptr, hist, fp(blocks_[il].fconv), r_, nullptr, kWidth, n, true);
+            fo_, cpu_sum_ ? h_cpu_ : nullptr, hist, fp(blocks_[il].fconv), r_, nullptr, kWidth, n, true, snap_of(hist),
+            rec_n_);
         cpu_sum_ = false;
         fo_clean_ = true;
         dbg("l_out", visit_, r_, kWidth);
@@ -941,6 +1182,123 @@ void Inkling2::moe_shared(const Layer&, int, int n) {
     // the previous layer's fused tail left fo_ 0 for the same rows
     if (!(fused(n) && fo_clean_)) zero_vram(fo_, (size_t) n * kWidth * sizeof(float));
     fo_clean_ = false;
+}
+
+// The kept tokens' rows into the drafter's K/V, at pos() on: each layer's mix of the four taps, normed, through its
+// context projections (keys normed and turned, as graph_inkling2's injection does), as Q8_0; then the recurrent
+// head's mix of the last token's taps into hn_'s first row.  The call's scratch (input_, q_, k_, v_) is free by now.
+void Inkling2::drafter_kept(int n) {
+    if (n <= 0) return;
+    const size_t plane = (size_t) rows_ * kWidth;
+    dspark::Taps t{{ds_taps_, ds_taps_ + plane, ds_taps_ + 2 * plane, hn_ + n_embd_}, {}};
+    float* x = input_[0];
+    for (int l = 0; l < kDsLayers; ++l) {
+        const DsLayer& L = ds_[(size_t) l];
+        std::copy(ds_mix_[l], ds_mix_[l] + 4, t.w);
+        dspark::mix_taps(t, fp(L.ctx_norm), x, 0, n, ds_eps_, cs(st_));
+        lin(L.k_ctx, x, k_, n);
+        lin(L.v_ctx, x, v_, n);
+        head_norm_rope(k_, kHead, fp(L.k_ctx_norm), q_, kHead, kKv, kHead, ds_theta_, pos_, n, ds_eps_, st_);
+        Cache& c = ds_cache_[(size_t) l];
+        const bool ring = ds_swa(l);
+        int64_t at = ring ? pos_ % kWindow : pos_;
+        for (int done = 0; done < n;) {
+            const int m = ring ? (int) std::min<int64_t>(n - done, kWindow - at) : n - done;
+            store_q8(q_ + (size_t) done * kKey, (int8_t*) c.planes[0].data, (uint16_t*) c.planes[1].data, kKey, at, m,
+                     st_);
+            store_q8(v_ + (size_t) done * kKey, (int8_t*) c.planes[2].data, (uint16_t*) c.planes[3].data, kKey, at, m,
+                     st_);
+            done += m;
+            at = ring ? 0 : at + m;
+        }
+    }
+    std::copy(ds_mix_[kDsLayers], ds_mix_[kDsLayers] + 4, t.w);
+    dspark::mix_taps(t, fp(ds_rnn_norm_), hn_, n - 1, 1, ds_eps_, cs(st_));
+}
+
+// W' = W_head W_hidden_out and b' = W_head b_hidden_out, so that a step scores the vocabulary from its 256 latents
+// and not from a 2304-wide correction (ninfer-3090 does the same).  Once, at the first guess: the head's rows a few
+// columns of hidden_out at a time, through wlogits_.
+void Inkling2::prepare_head() {
+    const int rows = std::min(kDsBlock, opt_.window);
+    for (int j0 = 0; j0 < kDsRank; j0 += rows) {
+        const int m = std::min(rows, kDsRank - j0);
+        for (int r = 0; r < m; ++r)
+            for (int i = 0; i < kWidth; ++i)
+                ds_host_[(size_t) r * kWidth + i] = ds_hidden_[(size_t) i * kDsRank + (size_t) (j0 + r)];
+        ck(cudaMemcpyAsync(ds_xa_, ds_host_, (size_t) m * kWidth * sizeof(float), cudaMemcpyHostToDevice, cs(st_)),
+           "DSpark head");
+        lin(output_, ds_xa_, wlogits_, m);
+        dspark::to_half(wlogits_, ds_w2_ + (size_t) j0 * n_vocab_, n_vocab_, m, n_vocab_, cs(st_));
+        ck(cudaStreamSynchronize(cs(st_)), "DSpark head");
+    }
+    std::copy(ds_hidden_b_.begin(), ds_hidden_b_.end(), ds_host_);
+    ck(cudaMemcpyAsync(ds_xa_, ds_host_, kWidth * sizeof(float), cudaMemcpyHostToDevice, cs(st_)), "DSpark head");
+    lin(output_, ds_xa_, ds_b2_, 1);
+    ck(cudaStreamSynchronize(cs(st_)), "DSpark head");
+    ds_head_ready_ = true;
+}
+
+// The block at the anchor `token`, the token at pos() that is picked and not fed: its embedding as the model takes it
+// and seven masks, through the three layers (each query sees the drafter's rows before pos() and the block), the
+// output norm, and the head's logits of the rows that guess.  The recurrent state starts at zero.
+void Inkling2::ds_block(int32_t token) {
+    const int64_t a = pos_;
+    input(token, a, ds_host_);
+    ck(cudaMemcpyAsync(ds_out_, ds_host_, kWidth * sizeof(float), cudaMemcpyHostToDevice, cs(st_)), "DSpark");
+    rms_norm(ds_out_, fp(token_norm_), ds_x_, kWidth, 1, rms_eps_, st_);
+    dspark::fill_rows(fp(ds_mask_), ds_x_ + kWidth, kWidth, kDsBlock - 1, cs(st_));
+    for (int l = 0; l < kDsLayers; ++l) {
+        const DsLayer& L = ds_[(size_t) l];
+        rms_norm(ds_x_, fp(L.attn_norm), ds_xa_, kWidth, kDsBlock, ds_eps_, st_);
+        lin(L.q, ds_xa_, ds_q_, kDsBlock);
+        lin(L.k, ds_xa_, ds_k_, kDsBlock);
+        lin(L.v, ds_xa_, ds_v_, kDsBlock);
+        head_norm_rope(ds_q_, kHead, fp(L.q_norm), ds_qr_, kHead, kHeads, kHead, ds_theta_, a, kDsBlock, ds_eps_, st_);
+        head_norm_rope(ds_k_, kHead, fp(L.k_norm), ds_kr_, kHead, kKv, kHead, ds_theta_, a, kDsBlock, ds_eps_, st_);
+        const Cache& c = ds_cache_[(size_t) l];
+        const bool ring = ds_swa(l);
+        dspark::attend(ds_qr_, ds_kr_, ds_v_, {(int8_t*) c.planes[0].data, (uint16_t*) c.planes[1].data},
+                       {(int8_t*) c.planes[2].data, (uint16_t*) c.planes[3].data},
+                       ring ? std::max<int64_t>(0, a - kWindow) : 0, a, ring ? kWindow : 0, ds_att_, ds_ao_, cs(st_));
+        lin(L.o, ds_ao_, ds_out_, kDsBlock);
+        axpy(ds_out_, 1.f, ds_x_, kDsBlock * kWidth, true, st_);
+        rms_norm(ds_x_, fp(L.ffn_norm), ds_xa_, kWidth, kDsBlock, ds_eps_, st_);
+        lin(L.gate, ds_xa_, ds_g_, kDsBlock);
+        lin(L.up, ds_xa_, ds_u_, kDsBlock);
+        swiglu_clamp(ds_g_, ds_u_, ds_h_, kDsBlock * kDsFfn, INFINITY, st_);
+        lin(L.down, ds_h_, ds_out_, kDsBlock);
+        axpy(ds_out_, 1.f, ds_x_, kDsBlock * kWidth, true, st_);
+    }
+    rms_norm(ds_x_, fp(ds_out_norm_), ds_cur_, kWidth, kDsBlock, ds_eps_, st_);
+    ck(cudaMemsetAsync(ds_state_, 0, kDsRank * sizeof(float), cs(st_)), "DSpark");
+    ds_based_ = 0;
+}
+
+// The head's logits of the block's rows 1 .. to (before the recurrent bias): the first three at once (a round
+// mostly asks that many, --draft-max), the rest together when a round asks for a fourth.
+void Inkling2::ds_base(int to) {
+    if (to <= ds_based_) return;
+    const int first = ds_based_, n = (first ? ds_rows_ : std::max(to, std::min(ds_rows_, 3))) - first;
+    lin(output_, ds_cur_ + (size_t) (first + 1) * kWidth, ds_base_ + (size_t) first * n_vocab_, n);
+    ds_based_ = first + n;
+}
+
+// Guess i + 1 of the block (Engine::draft()): the recurrent head's step from the token before it, the anchor for the
+// first guess and guess i after it; its logits into logits_.
+void Inkling2::draft_step(int32_t token, int i) {
+    if (!ds_head_ready_) prepare_head();
+    if (i < 0 || i >= ds_rows_) throw std::logic_error("draft: the DSpark block has no more guesses");
+    if (i == 0) ds_block(token);
+    float* row = ds_host_ + kWidth;   // past the anchor's embedding, which may still be on its way
+    const uint16_t* w1 = (const uint16_t*) ds_w1_ + (size_t) token * kDsRank;
+    for (int j = 0; j < kDsRank; ++j) row[j] = ggml_fp16_to_fp32(w1[j]);
+    ck(cudaMemcpyAsync(ds_w1row_, row, kDsRank * sizeof(float), cudaMemcpyHostToDevice, cs(st_)), "DSpark");
+    dspark::joint(ds_state_, ds_w1row_, ds_cur_ + (size_t) (i + 1) * kWidth, hn_, ds_jx_, cs(st_));
+    lin(ds_joint_, ds_jx_, ds_jo_, 1);
+    dspark::recur(ds_jo_, fp(ds_joint_b_), ds_state_, ds_lat_, cs(st_));
+    ds_base(i + 1);
+    dspark::head(ds_base_ + (size_t) i * n_vocab_, ds_b2_, ds_w2_, ds_lat_, logits_, n_vocab_, ds_cap_, cs(st_));
 }
 
 void Inkling2::output_rows(int first, int rows, float* h) {

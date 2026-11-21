@@ -71,6 +71,9 @@ class Apply(unittest.TestCase):
                 runconfig.apply(CFG, changes)
         with self.assertRaises(ValueError):                              # one bad value: nothing is applied
             runconfig.apply(CFG, {"fit_max_tokens": True, "sampling.top_k": 0})
+        # strata-poly takes top_k 0 (no limit)
+        new, _ = runconfig.apply({**CFG, "exe": "/x/strata-poly-ec320c9d"}, {"sampling.top_k": 0})
+        self.assertEqual(new["sampling"]["top_k"], 0)
         with self.assertRaises(ValueError):
             runconfig.apply({**CFG, "vision": {"gpu": True}}, {"lazy_load": True})
 

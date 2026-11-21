@@ -3240,6 +3240,153 @@ bool native_q6_k_mmvq_warps(const void* weights, const void* x_q8_1, float* y, i
     return true;
 }
 
+namespace {
+// native_q6_k_mmvq_warps_cols() / native_q8_0_mmvq_warps_cols(): NC activation rows at once, kColWarps warps a
+// block of kColRows weight rows, a warp a row at a time; the NC rows' Q8_1 blocks are copied to LDS once a block,
+// so a weight block is read once and its activations from LDS.
+constexpr int kColWarps = 8, kColRows = 64;
+
+template<int NC>
+__device__ __forceinline__ const Q81Block* stage_cols(const Q81Block* __restrict__ x, int xb, Q81Block* xs) {
+    const int* from = reinterpret_cast<const int*>(x);
+    int* to = reinterpret_cast<int*>(xs);
+    const int n = NC * xb * int(sizeof(Q81Block) / sizeof(int));
+    for (int i = int(threadIdx.y) * WARP + int(threadIdx.x); i < n; i += kColWarps * WARP) to[i] = from[i];
+    __syncthreads();
+    return xs;
+}
+
+// A column's sums are native_q6_k_warps_kernel's: the same lane parts, q6_q8_dot_impl's expression and order.
+template<int NC>
+__launch_bounds__(kColWarps * WARP, 1)
+__global__ void native_q6_k_warps_cols_kernel(const Q6KBlock* __restrict__ w, const Q81Block* __restrict__ x,
+                                              float* __restrict__ y, int n_in, int n_out) {
+    extern __shared__ Q81Block q6_cols_x[];
+    const int nb = n_in / 256, xb = n_in / 32, iqs = int(threadIdx.x);
+    const Q81Block* xs = stage_cols<NC>(x, xb, q6_cols_x);
+    const int bq8_offset = 4 * (iqs / 16) + (iqs % 16) / 8;
+    const int scale_offset = 8 * (iqs / 16) + (iqs % 16) / 4;
+    const int vh_shift = 2 * ((iqs % 16) / 8);
+    for (int r = int(threadIdx.y); r < kColRows; r += kColWarps) {
+        const int row = int(blockIdx.x) * kColRows + r;
+        if (row >= n_out) break;
+        const Q6KBlock* wr = w + std::size_t(row) * nb;
+        float s[NC] = {};
+        for (int kbx = 0; kbx < nb; ++kbx) {
+            const Q6KBlock* b = wr + kbx;
+            const int vl = load_int_b2(b->ql, iqs);
+            const int vh = load_int_b2(b->qh, 8 * (iqs / 16) + iqs % 8) >> vh_shift;
+#pragma unroll
+            for (int c = 0; c < NC; ++c) {
+                const Q81Block* xc = xs + c * xb + kbx * 8;
+                int u[2];
+                float d8[2];
+#pragma unroll
+                for (int i = 0; i < 2; ++i) {
+                    u[i] = reinterpret_cast<const int*>(xc[bq8_offset + 2 * i].qs)[iqs % 8];
+                    d8[i] = __low2float(xc[bq8_offset + 2 * i].ds);
+                }
+                s[c] += q6_q8_dot_impl(vl, vh, u, b->scales + scale_offset, b->d, d8);
+            }
+        }
+#pragma unroll
+        for (int c = 0; c < NC; ++c) {
+            const float t = warp_sum(s[c]);
+            if (threadIdx.x == 0) y[std::size_t(c) * n_out + row] = t;
+        }
+    }
+}
+
+// Q8_0: eight lanes a block (a 4-byte group each), four blocks a step.
+template<int NC>
+__launch_bounds__(kColWarps * WARP, 1)
+__global__ void native_q8_0_warps_cols_kernel(const Q80Block* __restrict__ w, const Q81Block* __restrict__ x,
+                                              float* __restrict__ y, int n_in, int n_out) {
+    extern __shared__ Q81Block q8_cols_x[];
+    const int nb = n_in / 32, part = int(threadIdx.x) % 8, sub = int(threadIdx.x) / 8;
+    const Q81Block* xs = stage_cols<NC>(x, nb, q8_cols_x);
+    for (int r = int(threadIdx.y); r < kColRows; r += kColWarps) {
+        const int row = int(blockIdx.x) * kColRows + r;
+        if (row >= n_out) break;
+        const Q80Block* wr = w + std::size_t(row) * nb;
+        float s[NC] = {};
+        for (int kb = sub; kb < nb; kb += 4) {
+            const Q80Block* b = wr + kb;
+            const int v = load_int_b2(b->qs, part);
+            const float dw = __half2float(b->d);
+#pragma unroll
+            for (int c = 0; c < NC; ++c) {
+                const Q81Block* xc = xs + c * nb + kb;
+                const int u = reinterpret_cast<const int*>(xc->qs)[part];
+                s[c] += dw * __low2float(xc->ds) * float(STRATA_DP4A(v, u, 0));
+            }
+        }
+#pragma unroll
+        for (int c = 0; c < NC; ++c) {
+            const float t = warp_sum(s[c]);
+            if (threadIdx.x == 0) y[std::size_t(c) * n_out + row] = t;
+        }
+    }
+}
+
+constexpr std::size_t kColsLds = 64 * 1024;   // a block's LDS on RDNA2
+}  // namespace
+
+#define STRATA_WARPS_COLS(KERNEL, BLOCK, NC)                                                                          \
+    case NC:                                                                                                         \
+        KERNEL<NC><<<unsigned((n_out + kColRows - 1) / kColRows), dim3(WARP, kColWarps), lds, st>>>(                \
+            static_cast<const BLOCK*>(weights), static_cast<const Q81Block*>(x_q8_1), y, n_in, n_out);               \
+        break;
+
+bool native_q6_k_mmvq_warps_cols(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols,
+                                 void* stream) {
+    const std::size_t lds = std::size_t(ncols) * (n_in / 32) * sizeof(Q81Block);
+    if (n_in <= 0 || n_in % 256 || n_out <= 0 || ncols < 1 || ncols > 8 || lds > kColsLds) return false;
+    validate_pointer(weights);
+    validate_pointer(x_q8_1);
+    validate_pointer(y);
+    validate_stream(stream);
+    const cudaStream_t st = static_cast<cudaStream_t>(stream);
+    switch (ncols) {
+        STRATA_WARPS_COLS(native_q6_k_warps_cols_kernel, Q6KBlock, 1)
+        STRATA_WARPS_COLS(native_q6_k_warps_cols_kernel, Q6KBlock, 2)
+        STRATA_WARPS_COLS(native_q6_k_warps_cols_kernel, Q6KBlock, 3)
+        STRATA_WARPS_COLS(native_q6_k_warps_cols_kernel, Q6KBlock, 4)
+        STRATA_WARPS_COLS(native_q6_k_warps_cols_kernel, Q6KBlock, 5)
+        STRATA_WARPS_COLS(native_q6_k_warps_cols_kernel, Q6KBlock, 6)
+        STRATA_WARPS_COLS(native_q6_k_warps_cols_kernel, Q6KBlock, 7)
+        STRATA_WARPS_COLS(native_q6_k_warps_cols_kernel, Q6KBlock, 8)
+    }
+    launch_check();
+    return true;
+}
+
+bool native_q8_0_mmvq_warps_cols(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols,
+                                 void* stream) {
+    const std::size_t lds = std::size_t(ncols) * (n_in / 32) * sizeof(Q81Block);
+    if (n_in <= 0 || n_in % 128 || n_out <= 0 || ncols < 1 || ncols > 8 || lds > kColsLds ||
+        q8_packed_registry().count(weights))
+        return false;
+    validate_pointer(weights);
+    validate_pointer(x_q8_1);
+    validate_pointer(y);
+    validate_stream(stream);
+    const cudaStream_t st = static_cast<cudaStream_t>(stream);
+    switch (ncols) {
+        STRATA_WARPS_COLS(native_q8_0_warps_cols_kernel, Q80Block, 1)
+        STRATA_WARPS_COLS(native_q8_0_warps_cols_kernel, Q80Block, 2)
+        STRATA_WARPS_COLS(native_q8_0_warps_cols_kernel, Q80Block, 3)
+        STRATA_WARPS_COLS(native_q8_0_warps_cols_kernel, Q80Block, 4)
+        STRATA_WARPS_COLS(native_q8_0_warps_cols_kernel, Q80Block, 5)
+        STRATA_WARPS_COLS(native_q8_0_warps_cols_kernel, Q80Block, 6)
+        STRATA_WARPS_COLS(native_q8_0_warps_cols_kernel, Q80Block, 7)
+        STRATA_WARPS_COLS(native_q8_0_warps_cols_kernel, Q80Block, 8)
+    }
+    launch_check();
+    return true;
+}
+#undef STRATA_WARPS_COLS
+
 bool native_mmvq_segments(int ggml_type, const MmvqSegments& s, int n_in, void* stream) {
     if (s.count < 1 || s.count > MmvqSegments::kMost || n_in <= 0) return false;
     // the formats and shapes whose one-column call is the one-block-a-row kernel run here, and nothing else would

@@ -1633,6 +1633,20 @@ class SamplingKeys(unittest.TestCase):
         for bad in (-1, True, 2.5, "20"):
             self.assertFalse([k for k in self.keys(temperature=0.7, top_k=bad) if k.startswith("top_k=")], bad)
 
+    def test_top_k_off_for_poly(self):
+        # strata-poly draws from the whole vocabulary at top_k=0; a wide list still gets 64
+        keys = lambda **s: StrataEngine.sampling_keys(s, whole_vocab=True).split()
+        self.assertIn("top_k=0", keys(temperature=1.0, top_k=0))
+        self.assertIn("top_k=10", keys(temperature=1.0, top_k=10))
+        self.assertIn("top_k=64", keys(temperature=1.0, top_k=100))
+
+    def test_config_top_k_0(self):
+        from serve.server import sampling_defaults_from_config
+        poly = {"exe": "/x/strata-poly-ec320c9d", "sampling": {"temperature": 1.0, "top_p": 1.0, "top_k": 0, "min_p": 0.0}}
+        self.assertEqual(sampling_defaults_from_config(poly), {"temperature": 1.0, "top_p": 1.0, "top_k": 0, "min_p": 0.0})
+        with self.assertRaises(SystemExit):
+            sampling_defaults_from_config({"exe": "/x/strata", "sampling": {"top_k": 0}})
+
     def test_tune_keys(self):
         k = self.keys(temperature=0, strata_tune={"pcie_frac": 0.2, "spec_min_p": 0.7})
         self.assertIn("pcie_frac=0.2", k)

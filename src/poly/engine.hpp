@@ -413,6 +413,10 @@ protected:
     /// model's output for the token before pos(); the second is this step's to leave and the next step's to read.
     /// The engine's own runs the draft block.
     virtual void draft_step(int32_t token, int i);
+    /// A guesser of its own that is no block layer: the call that ran last has kept its first n tokens (eval(), or
+    /// keep() after a window), at pos() on, and hn_ + n_embd_ still holds their outputs.  Draft_rows() calls it once
+    /// it has left hn_'s first row; the guesser may put what it needs of the last of them there instead.
+    virtual void drafter_kept(int n) { (void) n; }
     /// The floats of every recurrent layer's state together.  They are state_'s first.
     virtual size_t recurrent_floats() const = 0;
     /// Whether the recurrent layers leave their state after any tokens of a call, and not only after its first
@@ -725,6 +729,7 @@ protected:
     bool half_sum_guard_ = false;
     bool wave_gemv_ = false;   ///< lin(): F32 products of a few tokens by gemv_f32_waves() (Inkling's decode switch)
     bool head_warps_ = false;  ///< lin(): the output head of one row by native_q6_k_mmvq_warps() (Inkling's decode switch)
+    bool cols_kernels_ = false;   ///< lin(): Q6_K and Q8_0 for 2 to 8 rows a warp a row, each block read once (a guesser)
 
     std::vector<Layer> layers_;   ///< the model's, and after them the draft block
     Dev out_norm_, output_;

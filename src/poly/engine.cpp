@@ -3055,7 +3055,8 @@ void Engine::shared_scratch() {
     const size_t n = (size_t) rows_, e = n * n_embd_;
     const size_t ff = n * std::max({n_ff_, n_ff_shexp_, 2 * n_ff_exp_});
     // the draft block works in it too (draft_input()); read() keeps two calls' rows in it
-    r_ = fbuf(std::max(streams(), draft_ ? 3 : 1) * (size_t) (read_rows_ > rows_ ? 2 : 1) * rows_ * n_embd_);
+    // the draft block's input halves and residual (draft_input()); a looped model's guesser has its own buffers
+    r_ = fbuf(std::max(streams(), draft_ && !looped_ ? 3 : 1) * (size_t) (read_rows_ > rows_ ? 2 : 1) * rows_ * n_embd_);
     cur_ = fbuf(e);
     xn_ = fbuf(e);
     ao_ = fbuf(e);
@@ -3688,6 +3689,15 @@ void Engine::lin_raw(const Dev& w, const float* x, float* y, int n, const void* 
     }
     if (head_warps_ && n == 1 && w.type == GGML_TYPE_Q6_K && w.p == output_.p &&
         kernels::native_q6_k_mmvq_warps(w.p, xq, y, w.n_in, w.n_out, st_))
+        return;
+    // A guesser's windows and its own block: a few rows, each weight block read once for all of them.  The Q6_K head
+    // for any of them (Inkling's 4-token window: 2.0 ms a round against native_mmvq()'s 3.8, RX 6700 XT); Q8_0 only
+    // for eight rows of a tall matrix (the drafter's block: 132 against 185 us at 9216 x 2304; at four rows 84
+    // against 65, and with fewer rows of output the launch has too few blocks for the card).
+    if (cols_kernels_ && n >= 2 && n <= 8 &&
+        ((w.type == GGML_TYPE_Q6_K && kernels::native_q6_k_mmvq_warps_cols(w.p, xq, y, w.n_in, w.n_out, n, st_)) ||
+         (w.type == GGML_TYPE_Q8_0 && n == 8 && w.n_out >= 8192 &&
+          kernels::native_q8_0_mmvq_warps_cols(w.p, xq, y, w.n_in, w.n_out, n, st_))))
         return;
     // a launch takes up to 8 tokens, and each comes out as it would alone
     const size_t token = kernels::native_q8_1_bytes(w.n_in);
@@ -5631,7 +5641,7 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
     ck(cudaStreamSynchronize(cs(st_)), "read");
     if (n_swap_ > 0) follow(0);
     const size_t e_row = (size_t) n_embd_, r_row = (size_t) streams() * e_row, r_bytes = r_row * sizeof(float);
-    const size_t part = (size_t) std::max(streams(), draft_ ? 3 : 1) * rows_ * e_row;   // a call's rows of r_
+    const size_t part = (size_t) std::max(streams(), draft_ && !looped_ ? 3 : 1) * rows_ * e_row;   // a call's rows of r_
     const float scale = embed_scale();
     float* const r0 = r_;
     const int64_t pos0 = pos_;
@@ -5909,6 +5919,7 @@ void Engine::draft_rows(const int32_t* tokens, int first, int n) {
         block_rows(pos_ + first, n - first);
     }
     copy2(hn_ + (size_t) n * e, hn_, n_embd_, nullptr, nullptr, 0, st_);
+    if (!block_layer_) drafter_kept(n);
     ahead_pos_ = -1;
 }
 
