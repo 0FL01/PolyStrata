@@ -20,8 +20,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: "оптимизировать инференс движок, цель поднять скорость prefill".
   - Acceptance: A/B/B/A on the same fixtures (`pp` 2,048 and `pp8192`), same binary family and production settings; B beats A in every pair at both lengths.
   - Primary evidence: `bench.py` runs under `rdna2-rnd/scripts/run_guarded.py`.
-  - Status: pending
-  - Evidence:
+  - Status: verified
+  - Evidence: final pair in Checkpoint History (2K ×2.54, 8K ×3.55 cold; ×2.8 and ×3.6 warm).
 - R2: Output stays correct.
   - Source: previous Inkling contracts (coherent text, tool replay); RECON plan validation list.
   - Acceptance: kernel test against the existing attention kernels within 1e-4 relative and no NaN; at a fixed 1,064-token prefix all top-1 IDs match the current engine (largest top-probability change reported); 1-, 32- and 512-row reads give the same IDs; restore at 4,096 after SWA ring wrap matches a cold read; decode fixture IDs unchanged.
@@ -32,7 +32,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: "не забывать ревью через саб агентов делать, это очень важно".
   - Acceptance: each engine diff reviewed before commit; findings with a reachable failure scenario fixed or refuted with evidence.
   - Primary evidence: review results recorded in Checkpoint History.
-  - Status: pending
+  - Status: verified
+  - Evidence: three reviewed diffs (attention, direct staging, tuning/convolution), seven rounds; accepted findings fixed and retested, refuted ones recorded with the reason.
   - Evidence:
 - R4: Commit, push, deploy.
   - Source: "коммит пуш деплой в прод потом".
@@ -74,8 +75,8 @@ RX 6700 XT, TheRock ROCm 7.13, deployed binary `3d6760d8` (sha256 `23294c89…`)
 
 ## Current Checkpoint
 
-- Closes: R1 (further), then R4.
-- Smallest next action: stage 3 — the largest remaining items that are cheap to change: flash kernel at long context, the sequential short convolution, the control projections; then final pair, deploy.
+- Closes: R4.
+- Smallest next action: push `main`, deploy `6f3b6872` with batch 2048 and both switches, live HTTP checks.
 - Stop or replan if: a stage-2 change does not beat repeated-run variation on the 2K/8K pair.
 
 ## Material Decisions
@@ -94,6 +95,8 @@ RX 6700 XT, TheRock ROCm 7.13, deployed binary `3d6760d8` (sha256 `23294c89…`)
 - 2026-11-21: stage 2 at batch 2048 (8K trace, flash): 13.57 s, idle 1.74 s, 1.31 s of it GPU waiting between staging copies; DMA busy only 2.67 s (~70 GB at ~26 GB/s) — the host copy from the mapping into the pinned buffers is the limit. `STRATA_POLY_STREAM_STAGE=1` screen: 602.7 → 632.2 (8K). Probe: `hipHostRegister(ReadOnly)` on the mmapped GGUF works, DMA 26.6 GB/s, bytes match, ~70 ms/GiB.
 - 2026-11-21: `STRATA_POLY_DIRECT_STAGE=1` (opt-in, engine.cpp): mapper_ registers the uncached experts' page-merged spans (8.0 GiB here); stage() copies registered experts from the mapping and the rest through the pinned buffers, each to its place; h2d() splits copies at registered-span edges; padding of whole-tile steps zeroed. Review (general-purpose, three rounds): accepted partial-page registration breaking cache refills (fixed in h2d), default-path teardown change (removed), stale gap bytes (zeroed); found nothing else. Evidence: with equal expert placement the 1,064-token and 8K top-5 traces are bit-identical with the switch on and off (md5 follows placement only: 1168–1170 cached → `23e6f01d`, 1174–1178 → `1be7960e`). Warm `--serve` (second and third prompt of a process, batch 2048, flash): 8K 610.1/608.6 → 692.2/676.9 tok/s; 2K 641.7/599.2, 636.3/600.1 → 715.0/673.4, 729.4/674.9.
 - 2026-11-21: warm 8K kernel split per prompt (direct staging): NVFP4 MMQ ~4.0 s, flash ~1.82 s, Q8_0 MMQ ~1.08 s, conv ~0.37 s, control `gemm_small` ~0.37 s, mix ~0.26 s; idle ~0.83 s.
+- 2026-11-21: stage 3. Flash kernel (test, 512-row window call): base-2 softmax and DPP8 sums 1.85 → 1.54 ms, K/V a block ahead 1.50, 16 tokens a block 1.42 (32 keys spilled: 1.87; 8 tokens 1.79); full at 32K 56.4 → 42.6 ms. Prompt convolutions in 64-token spans: bit-identical top-5 trace (`839d993c`, all experts on CPU, flash off). Review (general-purpose): accepted the scale read of out-of-range keys in the prefetch (now zero) and a sink overflowing in base 2 (clamped); nothing in the convolution. Model check (all experts on CPU): flash keeps the 8 top-1 IDs, largest top-1 probability change 0.031 against the deployed binary. SWA restore at 4,096 with batch 2048, flash and direct staging = cold replay. Committed `6f3b6872`. The control projections (`gemm_small`, ~3%) were left: shared code, and a BLAS product would change their sums.
+- 2026-11-21: final pair. A = deployed `3d6760d8` with its settings (batch 512, NVFP4 MMQ); B = `6f3b6872` with batch 2048, `STRATA_INKLING_FLASH=1`, `STRATA_POLY_DIRECT_STAGE=1`, NVFP4 MMQ; same frozen profile copy per run. Cold CLI: `pp` 256.6/257.9 → 653.6/654.6 tok/s (×2.54); `pp8192` 198.3/198.6 → 704.6/702.6 (×3.55); TG 23.81/24.25 → 23.34/23.36 (−2.9%, 1,169 vs 1,367 cached experts). Warm `--serve` (two measured prompts each): 2K 268.3/260.5 → 768.7/698.6; 8K 200.9/199.6 → 733.3/720.0; short prompts 94: 169.2/111.8 → 188.5/129.7, 300: 309.2/239.4 → 381.7/306.9, 1,000: 312.5/290.0 → 593.0/532.8. A process's first prompt while the 8.2 GiB are being registered is slower (94 tokens 76–78 vs 115–119 tok/s). R1 verified.
 
 ## Completion
 
