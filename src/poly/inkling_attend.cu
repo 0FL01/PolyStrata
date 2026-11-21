@@ -514,6 +514,143 @@ template <bool Q8> __global__ void decode_kernel(const float* q, const float* re
     }
 }
 
+// attend_decode() with Q8_0 K/V: a block a chunk of keys and every K/V group, a wave a group, so the block reads each
+// key's whole row of the cache (8 groups of 128 bytes) at once. In a wave eight lanes take a key, 16 dimensions a
+// lane (one 16-byte load of K and one of V, inside one Q8_0 block), so a wave's load is four keys' 128-byte rows
+// whole; decode_kernel read a key a thread, 1,024 bytes apart across the threads. The eight lanes add their parts of
+// the 3 heads' scores and relative terms by shuffles; each group of eight lanes keeps its own running
+// maximum, sum and values, and the four groups of a wave fold together at the end. Same output as decode_kernel
+// (decode_combine_kernel reads it), other sums.
+constexpr int kAttWaves = kKv, kAttThreads = 32 * kAttWaves, kAttUnroll = 2;
+__global__ void __launch_bounds__(kAttThreads)
+decode_q8_kernel(const float* q, const float* rel, const float* table, KvView k, KvView v, int64_t pos, int window,
+                 int ring, int chunk, float* part) {
+    const int c = blockIdx.x, row = blockIdx.y, g = threadIdx.x / 32, lane = threadIdx.x & 31;
+    const int sub = lane & 7, quad = lane >> 3;   // the 16 dimensions of the lane, and which of four keys
+    const int64_t end = pos + row + 1, start = oldest(end, window);
+    const int count = (int) (end - start), first = c * chunk, last = min(first + chunk, count);
+    const size_t qh0 = (size_t) row * kHeads + g * kGroup;
+    float qr[kGroup][16], rr[kGroup][2];
+#pragma unroll
+    for (int r = 0; r < kGroup; ++r) {
+        const float4* qv = reinterpret_cast<const float4*>(q + (qh0 + r) * kHead + 16 * sub);
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const float4 x = qv[j];
+            qr[r][4 * j] = x.x;
+            qr[r][4 * j + 1] = x.y;
+            qr[r][4 * j + 2] = x.z;
+            qr[r][4 * j + 3] = x.w;
+        }
+        rr[r][0] = rel[(qh0 + r) * kRelative + 2 * sub];
+        rr[r][1] = rel[(qh0 + r) * kRelative + 2 * sub + 1];
+    }
+    float m[kGroup], l[kGroup], acc[kGroup][16];
+#pragma unroll
+    for (int r = 0; r < kGroup; ++r) {
+        m[r] = -INFINITY;
+        l[r] = 0.f;
+#pragma unroll
+        for (int j = 0; j < 16; ++j) acc[r][j] = 0.f;
+    }
+    const int8_t* kd = reinterpret_cast<const int8_t*>(k.data);
+    const int8_t* vd = reinterpret_cast<const int8_t*>(v.data);
+    const __half* ksc = reinterpret_cast<const __half*>(k.scales);
+    const __half* vsc = reinterpret_cast<const __half*>(v.scales);
+    for (int i0 = first; i0 < last; i0 += 4 * kAttUnroll) {
+        int4 kw[kAttUnroll], vw[kAttUnroll];
+        float ks[kAttUnroll], vs[kAttUnroll];
+        // every key's loads before any is used
+#pragma unroll
+        for (int u = 0; u < kAttUnroll; ++u) {
+            const int i = i0 + 4 * u + quad;
+            if (i < last) {
+                const int64_t key = start + i;
+                const size_t at = ((size_t) (ring ? key % ring : key) * kKv + g) * kHead + 16 * sub;
+                kw[u] = *reinterpret_cast<const int4*>(kd + at);
+                vw[u] = *reinterpret_cast<const int4*>(vd + at);
+                ks[u] = __half2float(ksc[at / 32]);
+                vs[u] = __half2float(vsc[at / 32]);
+            }
+        }
+#pragma unroll
+        for (int u = 0; u < kAttUnroll; ++u) {
+            const int i = i0 + 4 * u + quad;
+            if (i >= last) continue;   // a whole group of eight lanes: the shuffles below stay inside it
+            const int64_t key = start + i, delta = end - 1 - key;
+            const int kwords[4] = {kw[u].x, kw[u].y, kw[u].z, kw[u].w};
+            const int vwords[4] = {vw[u].x, vw[u].y, vw[u].z, vw[u].w};
+            float sc[kGroup];
+#pragma unroll
+            for (int r = 0; r < kGroup; ++r) {
+                float d = 0.f;
+#pragma unroll
+                for (int x = 0; x < 4; ++x)
+#pragma unroll
+                    for (int y = 0; y < 4; ++y) d += qr[r][4 * x + y] * (float) (int8_t) (kwords[x] >> (8 * y));
+                sc[r] = d * ks[u] * 0.08838834764831845f;
+            }
+            if (delta < kExtent) {
+                const float* tb = table + delta * kRelative + 2 * sub;
+                const float b0 = tb[0], b1 = tb[1];
+#pragma unroll
+                for (int r = 0; r < kGroup; ++r) sc[r] += rr[r][0] * b0 + rr[r][1] * b1;
+            }
+#pragma unroll
+            for (int r = 0; r < kGroup; ++r)
+#pragma unroll
+                for (int o = 4; o > 0; o >>= 1) sc[r] += __shfl_xor(sc[r], o, 32);
+            float val[16];
+#pragma unroll
+            for (int x = 0; x < 4; ++x)
+#pragma unroll
+                for (int y = 0; y < 4; ++y) val[4 * x + y] = (float) (int8_t) (vwords[x] >> (8 * y)) * vs[u];
+#pragma unroll
+            for (int r = 0; r < kGroup; ++r) {
+                const float next = fmaxf(m[r], sc[r]);
+                // every score so far -inf (overflowed terms): the exponentials are 0, as attend_plain() gives them
+                const float base = next == -INFINITY ? 0.f : next;
+                const float keep = expf(m[r] - base), p = expf(sc[r] - base);
+                m[r] = next;
+                l[r] = l[r] * keep + p;
+#pragma unroll
+                for (int j = 0; j < 16; ++j) acc[r][j] = acc[r][j] * keep + p * val[j];
+            }
+        }
+    }
+    // the wave's four groups of keys into one (lanes 8 and 16 apart hold the same dimensions)
+#pragma unroll
+    for (int r = 0; r < kGroup; ++r) {
+        float top = fmaxf(m[r], __shfl_xor(m[r], 8, 32));
+        top = fmaxf(top, __shfl_xor(top, 16, 32));
+        const float base = top == -INFINITY ? 0.f : top;
+        const float f = expf(m[r] - base);
+        float sum = l[r] * f;
+        sum += __shfl_xor(sum, 8, 32);
+        sum += __shfl_xor(sum, 16, 32);
+#pragma unroll
+        for (int j = 0; j < 16; ++j) {
+            float a = acc[r][j] * f;
+            a += __shfl_xor(a, 8, 32);
+            a += __shfl_xor(a, 16, 32);
+            acc[r][j] = a;
+        }
+        m[r] = top;
+        l[r] = sum;
+    }
+    if (quad != 0) return;
+    float* dst = part + (((size_t) row * kKv + g) * gridDim.x + c) * kChunkFloats;
+#pragma unroll
+    for (int r = 0; r < kGroup; ++r) {
+#pragma unroll
+        for (int j = 0; j < 16; ++j) dst[r * (kHead + 2) + 2 + 16 * sub + j] = acc[r][j];
+        if (sub == 0) {
+            dst[r * (kHead + 2)] = m[r];
+            dst[r * (kHead + 2) + 1] = l[r];
+        }
+    }
+}
+
 // A chunk with no keys left -inf, 0 and zeros. The sink as probs_kernel takes it, -inf (no sink) included.
 struct Q81 {
     __half2 ds;
@@ -596,15 +733,23 @@ void attend_decode(const Attend& a, float* scratch, cudaStream_t st, void* q8) {
     const int64_t end = a.pos + a.n;
     const int span = (int) (a.window ? std::min<int64_t>(a.window, end) : end);
     const int most = std::max(1, kDecodeBlocks / (kKv * a.n));
-    const int chunk = div_up(div_up(span, most), kThreads) * kThreads;
-    const dim3 grid(div_up(span, chunk), kKv, a.n);
-    if (a.k.scales)
-        decode_kernel<true><<<grid, kThreads, 0, st>>>(a.q, a.rel, a.table, a.k, a.v, a.pos, a.window, a.ring, chunk,
-                                                       scratch);
-    else
+    int chunks = 0;
+    if (a.k.scales) {
+        // up to kAttChunks chunks of at least kAttMin keys (whole steps of a wave's keys): enough blocks to keep the
+        // card's memory busy at long spans, and few steps a block at short ones
+        constexpr int kAttChunks = 128, kAttMin = 32, kStep = 4 * kAttUnroll;
+        const int chunk = std::max(kAttMin, div_up(div_up(span, std::min(most, kAttChunks)), kStep) * kStep);
+        chunks = div_up(span, chunk);
+        decode_q8_kernel<<<dim3(chunks, a.n), kAttThreads, 0, st>>>(a.q, a.rel, a.table, a.k, a.v, a.pos, a.window,
+                                                                   a.ring, chunk, scratch);
+    } else {
+        const int chunk = div_up(div_up(span, most), kThreads) * kThreads;
+        const dim3 grid(div_up(span, chunk), kKv, a.n);
+        chunks = (int) grid.x;
         decode_kernel<false><<<grid, kThreads, 0, st>>>(a.q, a.rel, a.table, a.k, a.v, a.pos, a.window, a.ring, chunk,
                                                         scratch);
-    decode_combine_kernel<<<dim3(kHeads, a.n), kHead, 0, st>>>(scratch, (int) grid.x, a.sink, a.gate, a.out,
+    }
+    decode_combine_kernel<<<dim3(kHeads, a.n), kHead, 0, st>>>(scratch, chunks, a.sink, a.gate, a.out,
                                                                static_cast<Q81*>(q8));
     check("Inkling decode attention");
 }

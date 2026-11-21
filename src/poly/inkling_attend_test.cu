@@ -238,6 +238,8 @@ int main() {
         {"decode: full, sink above", 60000, 1, false, true, 16.f, false, true},
         {"decode: window, no sink", 1023, 2, true, true, -INFINITY, false, true},
         {"decode: one key above 190K", 190000, 1, false, true, 0.f, true, true},
+        {"decode: full, 31 rows 190K", 190000, 31, false, true, 0.f, false, true},
+        {"decode: 31 rows, spike 190K", 190000, 31, false, true, 0.f, true, true},
     };
     bool ok = true;
     for (const Case& c : cases) ok = run(c, scores, partial, tiles, false) && ok;

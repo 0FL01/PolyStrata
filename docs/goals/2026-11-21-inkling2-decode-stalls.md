@@ -40,15 +40,17 @@ or a proven blocker; record the evidence and smallest unlock.
     outputs bit for bit those of the per-stream launches (unit test and parity fixture with the switch on); traced
     launches a token fewer; paired forced decode faster than R1's build.
   - Primary evidence: a unit test, the parity fixture, rocprofv3 trace, A/B runs.
-  - Status: verified (trace of the launch count pending)
+  - Status: verified
   - Evidence: `poly_segments_f32_test` all passed (bitwise); parity fixture with CPU experts identical to `32b3fc6f`
-    with the switch on and off; stage-1 pair below.
+    with the switch on and off; stage-1 pair below; traced launches 1,578 -> 1,166 a token (with stage 2).
 - R3: Decode attention closer to the card's bandwidth.
   - Source: plan stage 3 (16K full-attention visit 355-658 us for ~35.6 MB of KV, ~95 GB/s).
   - Acceptance: with cold KV, a full-attention decode visit at 16K takes clearly less than now; results within the
     existing kernel test's tolerance; the short-context visit not slower; 16K decode end to end faster.
   - Primary evidence: `poly_inkling_attend_test` (extended with a cold-cache timing), trace, 16K A/B.
-  - Status: open
+  - Status: verified
+  - Evidence: `decode_q8_kernel` (stage 2 below): cold 16K 1.061 -> 0.438 ms, 190K 6.73 -> 2.20 ms, 200 keys
+    0.037 -> 0.025 ms; test PASS (largest relative difference 2.3e-5, was 3.0e-5); 16K decode +13% over stage 1.
 - R4: Smaller fusions on the decode path.
   - Source: plan stage 4.
   - Acceptance: any of conv2 + head norms + K/V store, decode attention + combine, expert activation + Q8_1 that is
@@ -114,9 +116,8 @@ tok/s, 16K 30.87 -> 32.65 (16K prefill 679.7 -> 662.2, one run); stream 0 alone 
 
 ## Current State
 
-- Resolved: R1, R2; R4 in part (conv2 + head norms + K/V store fused); R3 first step (no speed-up worth the name).
-- Next: R3 (decode attention reading K/V coalesced), then R4's rest and R5. Card shared with the user's game: GPU
-  runs only when it is idle.
+- Resolved: R1, R2, R3; R4 in part (conv2 + head norms + K/V store fused).
+- Next: R4's rest (attention + combine, expert activation + Q8_1), R5.
 
 ## Material Decisions
 
@@ -142,3 +143,16 @@ tok/s, 16K 30.87 -> 32.65 (16K prefill 679.7 -> 662.2, one run); stream 0 alone 
   Reviews (general-purpose): stage R1/R2 - weighted tie-breaks accepted, no R2 defect; stage R4/R3 - an all-NaN block's
   scale (seed the maximum at 0 as store2_q8_kernel does) and the test's flush buffer accepted and fixed; an `llround`
   overflow at profile counts of 2^62 and an unchecked test stream creation rejected (not reachable in use).
+- 2026-11-21: stage 2 (R3). `decode_q8_kernel` for Q8_0 K/V (FP16 keeps decode_kernel): a block a chunk of keys and
+  every K/V group, a wave a group, eight lanes a key with 16 dimensions a lane, so a wave's loads are four keys'
+  128-byte rows whole (decode_kernel read a key a thread, 1,024 bytes apart); up to 128 chunks of at least 32 keys;
+  the combine unchanged. Attention test, cold caches, old -> new kernel: at 200 keys 0.037 -> 0.025 ms, window
+  0.055 -> 0.041, 16K 1.061 -> 0.438, 190K 6.733 -> 2.197; hot 16K 0.245 -> 0.106. All cases PASS; added 31 rows at
+  190K: 1.8e-6 of the largest, with a spike key 3.4e-5 (the flash path's spike case at that position: 4.1e-5).
+  Parity fixture (CPU experts): switch off identical to `32b3fc6f`; on: 8/8 top-1 equal, largest top-1 probability
+  change 0.018. Paired, interleaved (A = `32b3fc6f`, B = stage 1 `7d9de842`, C = stage 2; the machine slower than in
+  stage 1's runs): forced A 35.82 / 36.87, B 41.66 / 41.51, C 41.74 / 41.86 tok/s; after 16,384 tokens A 29.94 /
+  29.75, C 36.25 / 35.64, and in a second series B 33.47 / 34.99, C 39.32 / 38.32 (+13% over stage 1). Trace (forced):
+  1,166 launches a token (1,578 in RECON), attention 12.4 us a visit. Review (general-purpose): rounding over very
+  long chunks (31 rows at 200K, constructed inputs: 1.46e-4) rejected on the measured random and spike cases above;
+  an overflow from +-2e38 relative-table entries rejected (the model's table is small).
