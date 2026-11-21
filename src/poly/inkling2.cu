@@ -489,8 +489,20 @@ void Inkling2::control(const Block& b, int il, int stream, float* in, int n) {
 }
 
 void Inkling2::run_visits(int n) {
-    rms_norm(r_, fp(token_norm_), cur_, kWidth, n, rms_eps_, st_);
-    axpy(cur_, 1.f, r_, n * kWidth, false, st_);
+    // Engine::input already put the projected patches in r_. Only token embeddings take the learned norm.
+    const auto norm_text = [&](int first, int count) {
+        const size_t at = (size_t) first * kWidth;
+        rms_norm(r_ + at, fp(token_norm_), cur_ + at, kWidth, count, rms_eps_, st_);
+        axpy(cur_ + at, 1.f, r_ + at, count * kWidth, false, st_);
+    };
+    int first = 0;
+    for (const Image& im : images_) {   // sorted, non-overlapping; a prompt chunk can cut through a picture
+        if (im.at >= pos_ + n) break;
+        if (im.at + im.n <= pos_) continue;
+        if (im.at > pos_ + first) norm_text(first, (int) (im.at - pos_) - first);
+        first = (int) std::min<int64_t>(n, im.at + im.n - pos_);
+    }
+    if (first < n) norm_text(first, n - first);
     depth_n_ = 0;
     for (visit_ = 0; visit_ < kVisits; ++visit_) {
         if (visit_ == kStart) axpy(r_, 1.f, prelude_, n * kWidth, false, st_);

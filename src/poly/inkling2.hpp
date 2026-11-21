@@ -9,6 +9,7 @@ namespace strata::poly {
 
 class Inkling2 final : public Engine {
 public:
+    bool sees() const override { return true; }
     size_t card_row_bytes() const override;
     void save_card_rows(int64_t first, int64_t n, uint8_t* dst) override;
     void load_card_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n) override;

@@ -746,7 +746,10 @@ class ConvCacheLog:
 
 def poly_engine(cfg: dict) -> bool:
     """The run config starts strata-poly (the engine of the models PolyStrata adds), not the Strata project's."""
-    return Path(str(cfg.get("exe") or "")).stem.lower() in ("strata-poly", "strata-glm")   # its name before 10-05
+    # Installed builds may carry the short commit hash; strata-glm was the name before 10-05.
+    path = Path(str(cfg.get("exe") or ""))
+    return path.stem.lower() in ("strata-poly", "strata-glm") or re.fullmatch(
+        r"strata-poly-[0-9a-f]{8}(?:[0-9a-f]{4})?(?:\.exe)?", path.name.lower()) is not None
 
 
 def conversation_slots(engine) -> int | None:
@@ -832,7 +835,7 @@ class StrataEngine:
     @property
     def disk_sessions(self) -> bool:
         """SAVE / RESTORE: the Strata project's engine has them, strata-poly does not (issue 114)."""
-        return Path(str(self.spawn[0])).stem.lower() not in ("strata-poly", "strata-glm")
+        return not poly_engine({"exe": self.spawn[0]})
 
     def __init__(self, exe: str, args: list[str], cwd: str | None = None, log: str | None = None,
                  env: dict | None = None, lazy: bool = False, cpus: list[int] | None = None, _attempt: int = 0):
@@ -3380,8 +3383,13 @@ class Service:
         # the template leaves that to the program
         # A template that writes the marker alone (MiniCPM-V 4.7's, like Gemma 4's) has no token before it to tell
         # an image's marker from the same text in a message: the first ones are the images (prepare()).
-        self.image_marks = ("<|image|>", None, ("<|image>", "<image|>")) if self.call_format == "gemma" else \
-            (IMAGE_PAD, VISION_START if VISION_START in getattr(self.template, "source", VISION_START) else None, None)
+        if self.call_format == "inkling":
+            self.image_marks = ("<|unused_200054|>", "<|content_image|>", None)
+        elif self.call_format == "gemma":
+            self.image_marks = ("<|image|>", None, ("<|image>", "<image|>"))
+        else:
+            start = VISION_START if VISION_START in getattr(self.template, "source", VISION_START) else None
+            self.image_marks = (IMAGE_PAD, start, None)
         # #567: a prompt re-encodes only what follows the last special token it shares with a recent prompt (the
         # same ids as a full encode: tools/strata_tokenizer.py PromptEncoder).  Tokenizers without resume points
         # encode in full.

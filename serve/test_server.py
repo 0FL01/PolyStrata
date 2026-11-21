@@ -311,6 +311,46 @@ class ImageMarkers(unittest.TestCase):
         def encode(self, source):
             return self.rows, 3
 
+    def test_inkling_image_blocks_and_replayed_literals(self):
+        start, pad, end = "<|content_image|>", "<|unused_200054|>", "<|end_message|>"
+        quoted = start + pad + end
+
+        class InklingTokens(ByteTokenizer):
+            pre = "inkling2"
+            SPECIALS = [start, pad, end, "<|content_text|>", "<|message_user|>", "<|message_tool|>", "<|message_model|>"]
+
+        class Pictures(self.FakeVision):
+            def encode(self, source):
+                return self.rows, {"user.png": 2, "tool.png": 5}[source]
+
+        tok = InklingTokens()
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "chat_template.jinja"
+            # The content blocks of Inkling's embedded template, including the role before each image.
+            path.write_text("{% for m in messages %}{% set role = '<|message_' ~ "
+                            "('model' if m.role == 'assistant' else m.role) ~ '|>' %}"
+                            "{% if m.content is string %}{{role}}<|content_text|>{{m.content}}<|end_message|>"
+                            "{% else %}{% for p in m.content %}{{role}}{% if p.type == 'image' %}"
+                            "<|content_image|><|unused_200054|>{% else %}<|content_text|>{{p.text}}{% endif %}"
+                            "<|end_message|>{% endfor %}{% endif %}{% endfor %}", encoding="utf-8")
+            svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, ChatTemplate(path), vision=Pictures(d))
+            messages = [{"role": "user", "content": [{"type": "text", "text": quoted},
+                                                      {"type": "image", "source": "user.png"}]},
+                        {"role": "assistant", "content": quoted},
+                        {"role": "tool", "content": [{"type": "text", "text": quoted},
+                                                      {"type": "image", "source": "tool.png"}]}]
+            ids, _, _ = svc.prepare(messages, None, {})
+            start_id, pad_id, end_id = tok.encode(quoted, parse_special=True)
+            self.assertEqual((ids.count(start_id), ids.count(pad_id), svc.embeddings.pad), (2, 7, pad_id))
+            for pos, role, rows in zip((i for i, t in enumerate(ids) if t == start_id), ("user", "tool"), (2, 5)):
+                self.assertEqual(ids[pos - 1:pos + rows + 2],
+                                 tok.encode(f"<|message_{role}|>", True) + [start_id] + [pad_id] * rows + [end_id])
+            self.assertEqual(tok.decode(ids).count(quoted), 3)  # the three literal copies, without image rows
+            svc.drop_embeddings()
+            text = [{"role": "user", "content": "ordinary text"}]
+            self.assertEqual(svc.prepare(text, None, {})[0], tok.encode(svc.template.render(text), True))
+            self.assertIsNone(svc.embeddings.path)
+
     def test_literal_marker_with_an_image(self):
         import tempfile
         tok = ByteTokenizer()
@@ -2408,9 +2448,13 @@ class PeerDevice(unittest.TestCase):
         self.assertEqual(engine_args({"args": list(done), "vision": {"gpu": True}}), done)
         self.assertEqual(engine_args({"args": list(args)}), args)                # no section: no images
         # it has no such option; setup writes its path as this system writes one
-        for exe in ("engine-poly/strata-poly", os.path.join(os.sep, "x", "engine-poly", "strata-poly.exe")):
+        for exe in ("engine-poly/strata-poly", os.path.join(os.sep, "x", "engine-poly", "strata-poly.exe"),
+                    "bin/strata-poly-6f3b6872", "bin/strata-poly-3d6760d83f66.exe", "bin/strata-glm", "strata-poly.bin"):
             poly = ["--model", "x.gguf"]
             self.assertEqual(engine_args({"exe": exe, "args": list(poly), "vision": {"exe": "v", "gpu": True}}), poly)
+        for exe in ("strata-poly-debug", "strata-poly-6f3b6872.bak", "other-strata-poly-6f3b6872",
+                    "strata-poly-6f3b687x", "strata-poly-6f3b68720"):
+            self.assertEqual(engine_args({"exe": exe, "args": args, "vision": {"gpu": False}}), args + ["--vision"])
 
     def test_split_added_for_several_gpus(self):
         self.assertEqual(engine_args({"args": ["--native", "x"], "gpu": [0, 1]}),
