@@ -66,7 +66,7 @@ or a proven blocker; record the evidence and smallest unlock.
     fixtures; the measurement is recorded.
   - Primary evidence: A/B over draft lengths.
   - Status: verified
-  - Evidence: --draft-max N (default 3). Temperature 1.0, two seeds, tok/s: tool 38.05 -> k1 41.37, k2 43.66, k3 44.39, k5 41.48; code 35.17 -> 43.31, 41.87, 43.97, 44.95 (39.0/50.9); json 37.51 -> 38.45, 38.52, 37.70, 39.69. k5 is no better than k3 within its spread: 3.
+  - Evidence: --draft-max N (default 3). Temperature 1.0, two seeds, tok/s: tool 38.05 -> k1 41.37, k2 43.66, k3 44.39, k5 41.48; code 35.17 -> 43.31, 41.87, 43.97, 44.95 (39.0/50.9); json 37.51 -> 38.45, 38.52, 37.70, 39.69. k5 is no better than k3 within its spread: 3. Prose, three seeds, `32b3fc6f`: EN 37.23 -> k1 36.65, k2 35.83, k3 36.51; RU 37.43 -> 35.48, 34.74, 35.11 - a shorter draft does not take the loss away (the drafter's presence and its first guess stay).
 - R6: Faster end to end, reviewed, committed, deployed.
   - Source: plan stage 4-5; user ("коммит пуш, ревью через саб агентов general", "Жду результат").
   - Acceptance: paired A/B vs the production binary at the fixed sampling on code, tool, json, prose, ru (short)
