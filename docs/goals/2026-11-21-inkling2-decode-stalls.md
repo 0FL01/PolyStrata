@@ -130,6 +130,7 @@ tok/s, 16K 30.87 -> 32.65 (16K prefill 679.7 -> 662.2, one run); stream 0 alone 
 ## Material Decisions
 
 - 2026-11-21: plan approved; prefill trade-off of R1 accepted; no deployment in this goal.
+- 2026-11-21: after completion the user asked to deploy ("деплой").
 
 ## Checkpoint History
 
@@ -181,6 +182,11 @@ tok/s, 16K 30.87 -> 32.65 (16K prefill 679.7 -> 662.2, one run); stream 0 alone 
   B 46.71 / 46.25 / 46.47 tok/s (+14.2%); 128 tokens after 16,384: A 33.03 / 33.51, B 41.03 / 40.86 (+23%), prefill
   16K A 707.7 / 705.5, B 685.0 / 684.7 (-3.1%, accepted). Final binary: parity fixture identical to `32b3fc6f` with
   the switch off and to stage 2 with it on (CPU experts); forced 46.79 tok/s. Not deployed (user).
+- 2026-11-21: deployed on the user's request. `strata.service` runs `strata-poly-ab8507f1` (the tested binary, same
+  SHA-256 as the build at `ab8507f1`) with the production config otherwise unchanged; rollback
+  `before-ab8507f1.json.bak` + `strata-poly-32b3fc6f`. `/health` 200, `/v1/models` without the key 401; live agent
+  round trip passed (tool call ID, tool result `cobalt-73`, reasoning and text, cancel then `MARBLE`); its requests
+  decoded at 46.5-49.8 tok/s (38.1-41.8 with `32b3fc6f`); no GPU fault in the kernel journal.
 
 ## Completion
 
