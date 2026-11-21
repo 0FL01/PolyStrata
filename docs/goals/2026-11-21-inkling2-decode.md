@@ -1,6 +1,6 @@
 # Goal: faster Inkling-2-Mini decode on RDNA2
 
-Status: active
+Status: complete
 Source: user requests of 2026-11-21: plan after RECON with profiling to raise decode substantially (an architecture
 rewrite is welcome for a multiple), then "copy the plan into a goal and implement iteratively", lower the VRAM reserve
 from 3 GiB to 2 GiB unless prefill drops significantly (Pareto), review with general-purpose sub-agents, commit, push
@@ -29,8 +29,8 @@ or a proven blocker; record the evidence and smallest unlock.
   - Acceptance: paired cold A/B (A = installed `90b7ec72` + prod config, B = candidate) on the forced 94+96 fixture and
     the 16K-context decode fixture; B clearly above A beyond run-to-run variation. Targets are context, not a gate.
   - Primary evidence: `~/.cache/claude-inkling-dec` fixtures (`drun.sh`, `bench.py tg`) A1/B1/B2/A2.
-  - Status: pending
-  - Evidence:
+  - Status: verified
+  - Evidence: final pair below: forced decode ×1.76, 16K decode ×1.76.
 - R2: Coherent output and unchanged default path.
   - Source: AGENTS.md (opt-in, default byte-identical); previous Inkling goals' qualification.
   - Acceptance: switches off = same IDs/bytes as `90b7ec72`; switches on = top-1 IDs match on the fixed 1,064-token
@@ -38,23 +38,27 @@ or a proven blocker; record the evidence and smallest unlock.
     new kernels pass their unit test against the existing path; live agent round trip (tool call ID, reasoning/text,
     cancel then `MARBLE`).
   - Primary evidence: bench `parity`, `poly_inkling_attend_test` (or a new decode test), `test-agent.py`.
-  - Status: pending
-  - Evidence:
+  - Status: verified
+  - Evidence: default path identical to `90b7ec72` (parity fixture, CPU experts) after every stage; decode on: 8/8
+    top-1 IDs, largest top-1 probability change 0.033 (GPU experts) / 0.057 (CPU experts); unit test PASS; SWA
+    ring-wrap rewind equal; live agent round trip on the deployed service passed. One-row and chunked paths: calls
+    of 2–31 rows take the fused multi-row kernels (unit-tested at 7 and 31 rows), a token the same ones.
 - R3: VRAM reserve 3072 → 2048 MiB unless prefill drops significantly.
   - Source: user, 2026-11-21 ("снижай лимит с 3гб до 2гб если prefill значительно не падает ... по паррето").
   - Acceptance: 2K/8K cold prefill and decode measured at both reserves on the candidate; 2048 deployed unless prefill
     falls by a significant margin (more than a few percent beyond variation) without a matching decode gain.
   - Primary evidence: paired runs at both reserves.
-  - Status: pending
-  - Evidence:
+  - Status: verified
+  - Evidence: ABBA in the stage-2 entry (prefill rises at 2048); deployed with 2048.
 - R4: Reviewed, committed, pushed and deployed.
   - Source: user ("коммит пуш, ревью через саб агентов general - делать, это важно").
   - Acceptance: each code stage reviewed by a general-purpose sub-agent, accepted findings fixed; task commits on
     `origin/main`; service runs the qualified binary/config with a rollback copy; authenticated single-model API, 401
     without key, one real request.
   - Primary evidence: review results in this file, `git log origin/main`, service log and API checks.
-  - Status: pending
-  - Evidence:
+  - Status: verified
+  - Evidence: two general-purpose reviews (stage 1; stages 3–4), findings in the history; `84f183b3`, `5903fe61` on
+    `origin/main`; service runs `strata-poly-5903fe61`, rollback `before-5903fe61.json.bak` + `strata-poly-90b7ec72b863`.
 
 ### Constraints
 
@@ -96,18 +100,10 @@ experts 5.0 ms (~200 GB/s), small kernels ~3 ms, Q8_0 projections 6 ms and LM he
 4. Gated: NVFP4 slot MMVQ tuning if experts are on the critical path; lookup speculation only if agent-workload
    acceptance exceeds ~1.3 tokens/step (reasoning measured 1.00–1.02).
 
-## Current Checkpoint
-
-- Closes: R1, R2, R4
-- Smallest next action: final cold A/B pair (installed `90b7ec72` + prod config against the candidate + new config) on
-  the forced decode fixture, 16K decode and 2K/8K prefill; live agent check; deploy with a rollback copy.
-- Expected evidence: B above A beyond run-to-run variation; agent round trip passes.
-- Stop or replan if: a guard fault, or B not faster.
-
 ## Current State
 
-- Resolved: RECON, stages 1–4 (decode kernels; swaps and reserve as configuration; NVFP4 slot rows).
-- Next: final A/B, deployment.
+- Resolved: all outcomes. Not measured: a filled 200K context; decode beyond 16K end to end (attention kernel alone
+  at 190K: 11.8 → 5.2 ms a full layer).
 
 ## Material Decisions
 
@@ -153,9 +149,27 @@ experts 5.0 ms (~200 GB/s), small kernels ~3 ms, Q8_0 projections 6 ms and LM he
   Attention unit test PASS; SWA ring-wrap rewind at 3,072 equal. Review: accepted the slot switch reaching prompt
   batches without MMQ and outliving the engine — now set for a decode call's duration only (RAII in run_visits).
 
+## Final pair
+
+RX 6700 XT / Ryzen 7 5700X, cold processes, fresh copies of the same frozen expert profile. A: installed `90b7ec72`
+with the production config of the time (batch 2048, reserve 3072, `--expert-swaps 0`, flash and direct staging).
+B: `5903fe61` with `STRATA_INKLING_DECODE=1`, `--expert-swaps 64`, `--vram-reserve-mib 2048`, otherwise the same.
+
+| Fixture | A1 / A2 | B1 / B2 | Change |
+|---|---:|---:|---:|
+| Decode, 96 forced tokens after 94 | 21.76 / 21.97 | 38.47 / 38.36 | ×1.76 |
+| Decode, 128 tokens after 16,384 | 18.02 / 17.45 | 31.81 / 30.65 | ×1.76 |
+| Prefill 2,048 | 646.9 / 652.8 | 700.7 / 710.9 | +8.6% |
+| Prefill 8,192 | 679.2 / 691.1 | 733.5 / 718.3 | +6.0% |
+
+Experts in VRAM 1,122–1,131 (A) and 1,355–1,365 (B); VRAM hits in decode 60% (A) and 83–85% (B). The deployed
+service's live agent requests decoded at 35.7–41.2 tok/s; guard minimum 1,980 MiB free, no faults.
+
 ## Completion
 
-- Resolved outcomes:
-- Commands and artifacts:
-- Constraint and diff-scope check:
-- Final status:
+- Resolved outcomes: R1–R4 verified.
+- Commands and artifacts: `poly_inkling_attend_test`; scratch fixtures under `~/.cache/claude-inkling-dec` and
+  `~/.cache/claude-inkling-pp` (outside Git); `test-agent.py` against the production config.
+- Constraint and diff-scope check: opt-in switch, default path identical; RDNA2 only; same GGUF, Q8_0 KV, 200K
+  context; no expert skipping; benchmarks on profile copies; server on 127.0.0.1 with its key (401 without).
+- Final status: complete.
