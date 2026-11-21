@@ -1,6 +1,6 @@
 # Goal: faster Inkling-2-Mini prefill on RDNA2
 
-Status: active
+Status: complete
 Source: user requests of 2026-11-21: raise `Inkling-2-Mini` prefill speed; follow the RECON plan below iteratively; review code through general-purpose subagents (stressed as very important); commit, push and deploy to production afterwards. Production downtime is allowed.
 Last updated: 2026-11-21
 
@@ -26,7 +26,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: previous Inkling contracts (coherent text, tool replay); RECON plan validation list.
   - Acceptance: kernel test against the existing attention kernels within 1e-4 relative and no NaN; at a fixed 1,064-token prefix all top-1 IDs match the current engine (largest top-probability change reported); 1-, 32- and 512-row reads give the same IDs; restore at 4,096 after SWA ring wrap matches a cold read; decode fixture IDs unchanged.
   - Primary evidence: `poly_inkling_attend_test`; `bench.py parity`-style forced runs.
-  - Status: verified for the stage-1 diff (see history)
+  - Status: verified
+  - Evidence: Checkpoint History — kernel test (stage 1 and 3), CPU-placement top-1 traces, bit-identical direct staging and convolution, SWA restore at 4,096 for batch 512 and 2048.
   - Evidence:
 - R3: Code reviewed by general-purpose subagents.
   - Source: "не забывать ревью через саб агентов делать, это очень важно".
@@ -39,8 +40,8 @@ Complete the frozen Required Outcomes using the listed Change Envelope and Prima
   - Source: "коммит пуш деплой в прод потом".
   - Acceptance: task commits on `origin/main`; `strata.service` runs the qualified binary/config with a rollback copy; authenticated model listing and a live streamed tool round trip pass.
   - Primary evidence: `git ls-remote`, `systemctl --user is-active strata`, live HTTP checks.
-  - Status: pending
-  - Evidence:
+  - Status: verified
+  - Evidence: `origin/main` at the pushed task commits; `strata.service` active with `strata-poly-6f3b6872`; live checks below.
 
 ### Constraints
 
@@ -75,9 +76,7 @@ RX 6700 XT, TheRock ROCm 7.13, deployed binary `3d6760d8` (sha256 `23294c89…`)
 
 ## Current Checkpoint
 
-- Closes: R4.
-- Smallest next action: push `main`, deploy `6f3b6872` with batch 2048 and both switches, live HTTP checks.
-- Stop or replan if: a stage-2 change does not beat repeated-run variation on the 2K/8K pair.
+- None: complete.
 
 ## Material Decisions
 
@@ -100,7 +99,7 @@ RX 6700 XT, TheRock ROCm 7.13, deployed binary `3d6760d8` (sha256 `23294c89…`)
 
 ## Completion
 
-- Resolved outcomes:
-- Commands and artifacts:
-- Constraint and diff-scope check:
-- Final status:
+- Resolved outcomes: R1–R4 verified.
+- Commands and artifacts: commits `550d04d7` (fused attention), `28f84a00` (direct staging), `6f3b6872` (tuning, convolution spans), pushed to `origin/main`. Production config `~/.config/strata/inkling2-mini/strata-inkling-2-mini.json`: `exe` `strata-poly-6f3b6872`, `--prompt-batch 2048`, env `STRATA_HIP_NVFP4_MMQ=1`, `STRATA_INKLING_FLASH=1`, `STRATA_POLY_DIRECT_STAGE=1`; everything else unchanged. Rollback: `before-6f3b6872.json.bak` and `strata-poly-3d6760d83f66` in the same directory. After restart the engine logged both switches and 8.2 GiB registered; authenticated listing gave only `inkling-2-mini` with 200,000 context, unauthenticated 401; the live agent check on port 8080 passed reasoning/text streaming, a JSON tool call and its reply by call ID (`cobalt-73`), and a fresh `MARBLE` after a disconnect; guard minimum 3,019 MiB free, no faults.
+- Constraint and diff-scope check: one card and sequence, same GGUF, Q8_0 K/V, 200,000 context and client limits unchanged; no expert skipping; attention stays FP32. New paths are opt-in; with them unset the engine is bit-identical to the deployed binary on the CPU-placement trace. The direct staging keeps 8.2 GiB of the file cache pinned while the server runs. Not measured: a filled 200K window; the long-context gain was measured up to 8K end to end and 32K in the kernel test.
+- Final status: complete.
