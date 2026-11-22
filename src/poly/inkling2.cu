@@ -874,6 +874,72 @@ void Inkling2::ds_ring(int l, int64_t pos, const uint8_t* src, uint8_t* dst) {
     }
 }
 
+void Inkling2::save_card_state(uint8_t* dst) {
+    static const bool pack = [] {
+        const char* p = std::getenv("STRATA_INKLING_STATE_PACK");
+        return p && p[0] == '1' && p[1] == '\0';
+    }();
+    if (pack && looped_ && try_pack_state(dst)) {
+        static const bool logged = [] {
+            std::fputs("strata-poly: STRATA_INKLING_STATE_PACK=1: packed checkpoints in expert stage\n", stderr);
+            return true;
+        }();
+        (void) logged;
+        return;
+    }
+    Engine::save_card_state(dst);
+}
+
+bool Inkling2::try_pack_state(uint8_t* dst) {
+    // save_state() joined st_. Use only the complete one-card, non-DSpark layout and the expert stage's
+    // currently mapped capacity; never allocate or widen it here.
+    if (!dst || draft_ || !direct_stage_ || !stage_ || split_ || next_ || recording_ ||
+        lo_ != 0 || hi_ != n_layer_ || n_layer_ != kPhysical || layers_.size() != kPhysical ||
+        state_n_ != rec_n_ || rec_n_ != (size_t) kVisits * kConvFloats || !state_ ||
+        ring_ <= 0 || pos_ < 0 || pos_ > opt_.max_context)
+        return false;
+    const size_t state_bytes = state_n_ * sizeof(float), bytes = card_state_bytes();
+    if (stage_bytes_ < bytes) return false;
+    const int64_t keep = std::min(opt_.max_context, kWindow - 1);
+    const int64_t first = std::max<int64_t>(0, pos_ - keep);
+    const size_t one = (size_t) keep * kv_bytes();
+    if (bytes != state_bytes + (kVisits - kVisits / kBlock) * one ||
+        ring_ != std::min(opt_.max_context, kWindow + rows_ - 1))
+        return false;
+    for (int i = 0; i < kVisits; ++i) if (local(i))
+        for (int j = 0; j < 4; ++j) {
+            const auto& p = caches_[i].planes[j];
+            const size_t stride = j % 2 ? (q8() ? kKey / 32 * sizeof(uint16_t) : 0)
+                                       : kKey * (q8() ? 1 : sizeof(uint16_t));
+            if (p.stride != stride || (stride && !p.data)) return false;
+        }
+
+    // stage_ no longer holds weights, including if an enqueue below throws. clear() retains capacity.
+    staged_.clear();
+    staged_il_ = -1;
+    ck(cudaMemsetAsync(stage_, 0, bytes, cs(st_)), "pack Inkling state padding");
+    ck(cudaMemcpyAsync(stage_, state_, state_bytes, cudaMemcpyDeviceToDevice, cs(st_)),
+       "pack Inkling convolution state");
+    for (int i = 0; i < kVisits; ++i) if (local(i)) {
+        uint8_t* plane = stage_ + state_bytes + (i - i / kBlock) * one;
+        for (const auto& p : caches_[i].planes) if (p.stride) {
+            // Same source row, destination padding and oldest-first order as ring_state().
+            for (int64_t row = first; row < pos_;) {
+                const int64_t at = row % ring_, count = std::min(pos_ - row, ring_ - at);
+                const size_t off = (size_t) (row - (pos_ - keep)) * p.stride;
+                ck(cudaMemcpyAsync(plane + off, p.data + at * p.stride, (size_t) count * p.stride,
+                                   cudaMemcpyDeviceToDevice, cs(st_)), "pack Inkling SWA state");
+                row += count;
+            }
+            plane += (size_t) keep * p.stride;
+        }
+    }
+    ck(cudaMemcpyAsync(dst, stage_, bytes, cudaMemcpyDeviceToHost, cs(st_)), "save packed Inkling state");
+    ck(cudaStreamSynchronize(cs(st_)), "save packed Inkling state");
+    // No caller can start its next prefetch or narrow/unmap stage_ until all copies above have completed.
+    return true;
+}
+
 void Inkling2::save_layer(int il, int64_t pos, uint8_t* dst) {
     if (draft_ && il == kPhysical - 1) {   // the drafter's rings, behind the model's
         uint8_t* at = dst + state_n_ * sizeof(float) +

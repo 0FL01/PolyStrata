@@ -804,6 +804,22 @@ Eight standalone geometries are bitwise against old Flash; 14 plain-reference ca
 FP16 and long attention. Fixed-placement 8K plus eight forced steps match the old printed top-10 traces.
 64K is measured model prefill; the longer kernel-only cases do not establish 200K model throughput.
 
+`STRATA_INKLING_STATE_PACK=1` (opt-in) packs a checkpoint in the existing expert staging buffer, then
+makes one bulk D2H. It keeps the old state bytes and checkpoint positions; no GPU allocation, host pinning,
+stream or worker is added. The fast path requires one card, direct staging, no DSpark and enough currently
+mapped stage capacity. Other cases use the old serializer. Staged-weight metadata is invalidated before
+the buffer is overwritten, and all copies finish before it can be reused.
+
+Against `172e3620` with the five optimizations above enabled, actual-build HTTP A/B/B/A and reverse B/A/A/B
+used an 8K warmup and two fresh 8229-token prompts plus 16 output tokens per process, with zero cached input.
+The reverse confirmation measured mean TTFT 10.015 -> 9.915 s (1.00% lower), paired reductions 0.65%/1.35%,
+A/A drift 0.38%. The first order was also positive but had 3.75% drift, so its 2.83% mean is not a precise
+expectation. Bare engine 94/2K/8K/32K repeat-two screen was inconclusive; no general throughput claim.
+Plain CPU timing, without rocprof, measured about 48 -> 28 ms per 92.9-MB checkpoint. Actual complete Q8
+and FP16 state images match the old serializer, including short padding and Q8 SWA wrap/restore; forced
+model traces match the old golden. Same RX 6700 XT/5700X/HIP7.13 and production settings as above, clocks
+and cache placement unlocked. The production binary contains no byte-comparison or timer instrumentation.
+
 ## gfx906 (Instinct MI50 / MI60, Radeon VII): wave64, built from source
 
 gfx906 is wave64 and has no WMMA and no packed byte arithmetic, so the wave32 backend above refuses it. A separate opt-in build compiles the CUDA sources as HIP through a small compat layer

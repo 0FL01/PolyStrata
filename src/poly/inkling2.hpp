@@ -27,6 +27,7 @@ protected:
     int streams() const override { return 1; }
     size_t recurrent_floats() const override;
     size_t extra_bytes() const override;
+    void save_card_state(uint8_t* dst) override;
     void save_layer(int il, int64_t pos, uint8_t* dst) override;
     void load_extra(const uint8_t* src, int64_t pos) override;
     void layer_head(Layer& L, int il, int n) override;
@@ -102,6 +103,7 @@ private:
     void depth_mix(const float* query, float* dst, int first, int n);
     void control(const Block& b, int il, int stream, float* in, int n);
     void ring_state(int visit, int64_t pos, const uint8_t* src, uint8_t* dst);
+    bool try_pack_state(uint8_t* dst);
 
     // The DSpark drafter (--draft-model, a `dflash` GGUF with dspark_hidden_out): Engine::draft_ without a block
     // layer.  It reads the model's rows entering visits kTap (ds_taps_, every call) and its normed output (hn_ + n_embd_);

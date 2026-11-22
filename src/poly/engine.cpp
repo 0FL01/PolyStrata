@@ -3324,10 +3324,14 @@ void Engine::refreeze_experts() {
 void Engine::save_state(uint8_t* dst) {
     OnCard here(device_, split_);
     ck(cudaStreamSynchronize(cs(st_)), "save state");
+    save_card_state(dst);
+    if (next_) next_->save_state(dst + card_state_bytes());
+}
+
+void Engine::save_card_state(uint8_t* dst) {
     for (int il = 0; il < (int) layers_.size(); ++il)
         if (runs(il)) save_layer(il, pos_, dst);
     save_last(dst);
-    if (next_) next_->save_state(dst + card_state_bytes());
 }
 
 // What the state has that is no layer's: the model's output for the last token, which the draft block pairs the

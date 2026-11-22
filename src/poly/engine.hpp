@@ -476,6 +476,8 @@ protected:
     /// the state (save_state(), load_state()).  load_extra() gets the position the state is for.
     virtual size_t extra_bytes() const { return 0; }
     virtual void load_extra(const uint8_t* src, int64_t pos) { (void) src, (void) pos; }
+    /// One card's checkpoint after save_state() selected the card and joined st_. The default saves each layer.
+    virtual void save_card_state(uint8_t* dst);
     /// Layer il's part of what save_state() writes, to its place in dst: the layer's recurrent state, and what
     /// extra_bytes() counts for it, as they are once the layer has run every token before `pos`.  The card is
     /// done with the layer when this is called.  save_state() is this for every layer; read() calls it for a

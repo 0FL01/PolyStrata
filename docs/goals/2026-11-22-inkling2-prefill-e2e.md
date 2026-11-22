@@ -146,10 +146,11 @@ scheduling changes hide most DMA. These are hypotheses, not required implementat
 ## Current checkpoint
 
 - Progresses: R2; R1 verified by P1.
-- Next: retained baseline is **`af66c57e`**, actual build `1cc5d022...`, with prefetch, down-tail, batch-KV
-  release and selective2x2 F32 enabled. OWNED16 actual-root parity/native/32K HTTP ABBA pass: promote it,
-  reprofile, then qualify the clean packed-checkpoint hook. F32's32K HTTP gain is verified; its8K API screen
-  remains inconclusive. Empty-grid MMQ cost is small; no compact-grid mechanism is justified by that screen.
+- Next: retained baseline is **`172e3620`**, actual build `79efbccc...`, with prefetch, down-tail, batch-KV
+  release, selective2x2 F32 and OWNED16 enabled. Actual PACK qualifies~1%API8Kafterreverse-orderconfirmation;
+  promote it and then test the faulting cost exposed by plain snapshot timing. F32's32K HTTP gain is verified;
+  its8K API screen remains inconclusive.
+  Empty-grid MMQ cost is small; no compact-grid mechanism is justified by that screen. Production is pending.
   Actual-root VMM frozen restore and unfrozen HTTP ABBA passed. SiTU remains unshipped; production not deployed.
   The query16 lane-owned attention, packed checkpoints and selective2x2 F32 projections remain model candidates;
   rebase them on each retained baseline. Do not disable checkpoints or merely move measured work afterDONE.
@@ -507,6 +508,67 @@ scheduling changes hide most DMA. These are hypotheses, not required implementat
   NULLmarks have no savedBlob but still determinebatcharithmetic/progress/cancelpolls; retention simulation
   itself mustkeepallcandidates. SkippingNULLandbalancing cannotborrowacrossreal8192without changingcache
   semantics or historicalstatecapture. No code changed or speedclaimed; oldread-balance remainsNOOP here.
+- 2026-11-22: OWNED16 committed/pushed as**172e3620**. This is the next baseline, not a pending attention
+  experiment. Actualbuild79ef is unchanged after the commit; no tag-only rebuild was attributed to a gain.
+  Run its retained profile before PACK's full consistent Engine/derived-header build. PACK remains an opt-in
+  hypothesis: byte-format evidence from the earlier nonvirtual prototype does not qualify this new wiring
+  or establish performance. Preserve actual-source base serializer and test fallback/short calls separately.
+- 2026-11-22: retained attentionprofile `attention-retained-trace` measured8/32K: span8779.98/42479.14ms,
+  kernelunion8347.43/40843.29, overlap2091.39/8410.11, NVFP43894.97/15585.27,
+  Flash1386.57/12948.04, F32small207.56/837.96. PriorF32profile Flash1456.31/13602.86: about4.8%lower
+  dispatchtime, consistent with microbench; separateprofiles/notisolatedwallpairs. Checkpoint D2H->D2H
+  idle136.99/222.93ms remains, so PACK is the remaining concrete candidate. Guardclean.
+- 2026-11-22: common-input MMQ packing headroom measured from that retainedprofile, not inferred from all
+  quantize time. At8K: dense2304 960calls/56.365ms, O3072 192/16.828, routedgate192/63.976,
+  down1152 380/44.964; total182.132ms. At32K:3840/228.529,768/71.213,768/261.083,1504/183.772.
+  Widthclassification uses actualblock128 andgrid=(rows,ceil(paddedwidth/512),1): CSVX/128isrows,Y3/5/6
+  is1152/2304/3072 input. The templatefalse meansscatter=false, NOTids-null; no classesleftunknown.
+  Even deletingALLdensequant includingnonreusableO givesonly73.193ms/0.834%span at8K and299.742ms/0.706%
+  at32K. Reusingonlyidenticalinput+layout(Q/rel/gate, K/Vwhenone-stream, notO), keepingthefastestexisting
+  packpergroup, hasoptimisticdispatchbudget**32.848ms/0.374%** and**132.981ms/0.313%**. Thisignoresnewreuse
+  overhead/overlap, not a wall-speedup. Defercache/API/reorderingcomplexity below observedE2Enoise; earlier
+  SiTU'slargerlocal savingfailedrepeatableactualqualification. No reusefeaturewasimplemented.
+- 2026-11-22: provisionalactualPACK wiring is built, notpromoted: pure09304bb12aa01446d44892263ef7af837cb16dfb1b9cd834c6e7e8ef4ead00ae,
+  separateDIAG4866f5d97d7acf1fdc0a0e209f00b41c7192936f43192d52231df3f92e5db519. Fourreviewedfilesonly;
+  protectedvirtualdefaultisoldphysical-loop/save_last. All10headerusers recompiled,9vtables384->392,
+  DIAGnewABIconsistent; purecontrolrelinkexact. No VERIFYflag/vectorinproduction.
+  RawfatbinsareNOTequal: onlyInklingCUIDnames/loaderstrings/hash tables(diagnosticalsosymbolordering)
+  differ. All29modules' code/constants/data/kernelnotes/resources/programheaders match; dynamic symbols
+  matchaftername/ordernormalization. Reviewedmetadataexception, not a falsifiedraw-byte-equalityclaim.
+  DIAGfullmemcmp runsinsideprivateFASTsuccessafterbulkD2H+sync, usingqualifiedactualbase serializer;
+  fallbackcannotemitPASS. GPUbyte/wrap/F16/golden/fallbackqualificationrunning. No performanceorproduction
+  deploymentclaim untilactual-rootE2E. PrivatewrapprofileoverridewasmovedAFTERdiagnosticargs toisolateit.
+- 2026-11-22: actualPACK qualification passed (`guard-pack-production-qualification`, nofault): Q8full
+  92875776Bmemcmp at93/2048/4096/6144/8192, FP16full171442176B at93/2048; allrecordsfast=1,
+  stagecapacity700710912B. NewconsistentDIAG wrap atpivot4096, zero-resident/cpu-share0 validationonly,
+  alsofast-verified6/4104/4199 andrestored/fullsixIDs[152717,13,198,33306,361,220]. Pure8K+8forcedtop10
+  matchesoldgolden withallretainedflags1/PACK1. Purestage-mib32 fallsback(noactivation),94/2049requestshealthy.
+  PurehasnoVERIFYcode; diagnosticresultsarenotperformancetimings. Actualsame-pure-binary unfrozenABBA
+  94/2048/8192/32768, repeat2/warm8K, is next tocheckshortregressionsandrealgain beforeanycommit.
+- 2026-11-22: PACKpure CPPABBA completed94/2K/8K/32K repeat2: meanthroughput**+.039/+.073/-.323/+.132%**,
+  everylengthhasopposite-signpairs, so NOrepeatableCPPwin. Allguards clean; raw `pack-e2e-production-*`.
+  Diagnostictrace0/1 warm8->8K gives span8771.04->8654.99ms, idle349.38->256.01, kernel8327.56->8309.55,
+  overlap2084.65->2081.99. D2H->D2H idle143.81->57.22ms, newcopyBuffer->D2H38.26ms. That supports a
+  copy-gap mechanism UNDERTHEPROFILER but doesnotqualifyproduction; oldmanyAPIcallbacksmayamplifyit.
+  No newpinned/prefault/allocationfeaturefromthisguess. Spill'sfirstheap isnewnothrowuint8[], notzero-filled.
+- 2026-11-22: PACKactualAPI8K ABBA, warm+2fresh8229prompt/16output,cached0: A1[10018.068,10018.068],
+  B1[9892.468,9935.728], B2[9872.629,9967.431], A2[10442.234,10344.820]ms. Mean10205.797->9917.064,
+  -2.829%latency, pairedreductions1.038/4.556%, Adrift3.748%; allfourcorrespondingcasespositive/guardsclean.
+  Actualchatfixturehasmorecheckpoints thanbareCPP; native-tail/cachevarianceandAdrift makeexactmeanunsafe.
+  Beforepromotion, prepareplainCPUserializerwalltimer(noROCprof, privateoneC++object/newconsistentABI),
+  optionalrusagefaultdeltas, aroundonlyactualsave_card_stateafterinitialsync. Distinguishrealcopycostsaving
+  fromprofiler-distortion instead of declaring the profiled116ms an unprofiled win. Pure source unchanged.
+- 2026-11-22: plainserializer timer(noROCprof, privatehostobjectbb7fc199...; allGPUfatbinexactpure093)
+  warm-excluded8K's4snapshots: old47.953ms/call vsPACK27.817ms/call, about80.54mssaved/request.
+  Everyactualmeasured93Mimage alsoincurs22674minor faults/0major; thismatchespagecount butprocess-wide
+  countersalonecannotattributeeachfault. Copycostimprovementisreal, notjustROCprofAPIcallbacks.
+  ReverseAPI B3/A3/A4/B4: B3[9923.104,9937.717], A3[9998.250,9993.104],
+  A4[10042.956,10025.048], B4[9905.107,9892.697]ms. Meanold10014.840->new9914.656ms,
+  **-1.000%TTFT**, pairs0.653/1.346%, Adrift0.383%; allfourcorrespondingcasespositive/guardsclean.
+  RetainPACKasAPIcheckpointwin, not a bare-engine throughputclaim. Nextcommit/pushthenbaseline.
+  Remaining concrete hypothesis: per-current-output firsttouch in existingCPUworkers could parallelize
+  thefaulting nowdominatingfastsave. Source-onlyprep; no newpin/allocation/thread/queue orprefaulted6Blob
+  upfrontRAMincrease. TestsameolddataformatandactualE2E beforeadopting; pure093 currentlyunchanged.
 
 ## Completion
 
