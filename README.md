@@ -20,13 +20,15 @@ using one Radeon GPU. Frequently used expert weights stay in VRAM; the CPU runs 
 Measured separately on an **RX 6700 XT (12 GiB, `gfx1031`)** with a Ryzen 7 5700X, 32 GiB of RAM, TheRock HIP 7.13,
 and Unsloth's `UD-IQ4_XS` GGUF. Both benchmarks used Q8_0 KV and no DSpark drafter.
 
-| Prompt length | Before the latest prefill changes | With the latest prefill changes |
-| ---: | ---: | ---: |
-| 2,048 tokens | 764 tok/s | **992 tok/s** |
-| 8,192 tokens | 736 tok/s | **937 tok/s** |
-| 16,384 tokens | 695 tok/s | **883 tok/s** |
-| 32,768 tokens | 628 tok/s | **780 tok/s** |
-| 65,536 tokens | 518 tok/s | **628 tok/s** |
+| Benchmark | Before (tok/s) | After (tok/s) |
+| --- | ---: | ---: |
+| Prefill: 2,048 tokens | 764 | **992** |
+| Prefill: 8,192 tokens | 736 | **937** |
+| Prefill: 16,384 tokens | 695 | **883** |
+| Prefill: 32,768 tokens | 628 | **780** |
+| Prefill: 65,536 tokens | 518 | **628** |
+| Decode: short agent requests over HTTP | 38.1–41.8 | **46.5–49.8** |
+| Decode: 128 output tokens after a 16,384-token prompt | 33.3 | **41.0** |
 
 **Prompt reading (prefill):** 21–30% faster from `ab8507f1` to `cb75238a` with the prefill opt-ins enabled. Both
 builds used an 8K warm-up and fresh, uncached prompts. For an uncached 8,229-token HTTP prompt, the first streamed
@@ -34,8 +36,9 @@ reasoning or answer text arrived in **9.79 s instead of 12.65 s** (23% sooner). 
 capacity setting; prefill throughput was measured up to 65,536 tokens.
 [Prefill measurements and settings](docs/goals/2026-11-22-inkling2-prefill-e2e.md#final-measured-account).
 
-**Answer writing (decode):** at `ab8507f1`, live short agent requests ran at **46.5–49.8 tok/s**. In a separate
-paired run, decode after a 16K prompt went from **33.3 to 41.0 tok/s** versus `32b3fc6f`.
+**Answer writing (decode):** these rows use the earlier baseline `32b3fc6f` and the decode changes that landed in
+`ab8507f1`, not the later prefill changes. The short agent requests were measured on the live server; the 16K
+result comes from a separate paired engine benchmark.
 [Decode measurements](docs/goals/2026-11-21-inkling2-decode-stalls.md#checkpoint-history).
 [DSpark is optional](docs/goals/2026-11-21-inkling2-dspark.md#completion); it did not meet the speed target and
 was left off.
