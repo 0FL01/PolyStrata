@@ -497,6 +497,10 @@ void Inkling2::load_geometry() {
     const char* flash = std::getenv("STRATA_INKLING_FLASH");
     flash_ = flash && flash[0] == '1' && flash[1] == '\0';
     if (flash_) std::fputs("strata-poly: STRATA_INKLING_FLASH=1: fused attention for prompt batches\n", stderr);
+    const char* prefetch = std::getenv("STRATA_INKLING_PREFETCH");
+    prefetch_early_ = prefetch && prefetch[0] == '1' && prefetch[1] == '\0';
+    if (prefetch_early_)
+        std::fputs("strata-poly: STRATA_INKLING_PREFETCH=1: prompt experts queued before router readback\n", stderr);
     const char* decode = std::getenv("STRATA_INKLING_DECODE");
     decode_ = decode && decode[0] == '1' && decode[1] == '\0';
     wave_gemv_ = head_warps_ = situ_q8_ = decode_;

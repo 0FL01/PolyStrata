@@ -740,6 +740,15 @@ read at 48.5 tok/s with the switch off and 159.3 with it on at `--prompt-batch 2
 These are same-host single-run measurements. Growing KV leaves more experts resident on short prefixes than
 `--kv-whole`, but that advantage shrinks as live context grows.
 
+`STRATA_INKLING_PREFETCH=1` (opt-in) queues a prompt batch's expert uploads before the router's readback, rather
+than after it. On the RX 6700 XT / Ryzen 7 5700X, TheRock HIP 7.13, Inkling-2-Mini-UD-IQ4_XS, batch 2048 and
+Q8_0 KV growing at a 200,000-token capacity, four starts in A/B/B/A order (an 8K warmup, then fresh 2K/8K/16K
+requests, no reused tokens, no `STRATA_FREEZE_EXPERTS`) measured 2K 760-763 -> 902-937 tok/s, 8K 733-738 ->
+899-900 and 16K 682-688 -> 826-838. The same-profile code/prose 8K screens measured 734 -> 896 and 731 -> 899.
+This changes the upload order, not the expert products or attention arithmetic; decode keeps its existing path.
+The switch is off by default. These measurements do not cover a filled 200K context. Evidence and subsequent
+experiments: [the end-to-end prefill goal](goals/2026-11-22-inkling2-prefill-e2e.md).
+
 ## gfx906 (Instinct MI50 / MI60, Radeon VII): wave64, built from source
 
 gfx906 is wave64 and has no WMMA and no packed byte arithmetic, so the wave32 backend above refuses it. A separate opt-in build compiles the CUDA sources as HIP through a small compat layer

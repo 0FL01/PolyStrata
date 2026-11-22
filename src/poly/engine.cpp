@@ -4534,6 +4534,31 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     // STRATA_POLY_STAGED_TILES: per size class and round, the staged experts' first rows (tb), and the same counted
     // from the round's first row (tb + n_tile * tile_row)
     int32_t* tb = cb + kClasses * ((size_t) n_expert_ + 1);
+    int n_ahead = 0;
+    bool mine = false, early = false;
+    const auto prefetch = [&] {
+        // A previous call can have left this layer's experts in the buffer. Otherwise upload the predicted round
+        // before the CPU sees this call's routing; ev_free_ still protects the previous visit's weights.
+        if (ahead) plan_ahead(L, il);
+        n_ahead = ahead ? (int) L.ahead.size() : 0;
+        mine = ahead && staged_il_ == il &&
+               (staged_ == L.ahead || (freeze_experts_ ? true : 2 * route_ms_ < ahead_ms_));
+        early = n_ahead > 0 && !mine;
+        if (early) {
+            const Clock::time_point t = Clock::now();
+            ck(cudaStreamWaitEvent(cs(up_), (cudaEvent_t) ev_free_, 0), "expert staging");
+            stage(L, L.ahead.data(), n_ahead, up_);
+            ck(cudaEventRecord((cudaEvent_t) ev_ahead_, cs(up_)), "expert staging");
+            if (!freeze_experts_) {
+                ahead_ms_ = ms_since(t);
+                if (!prefetch_early_)
+                    route_ms_ = cudaEventQuery((cudaEvent_t) ev_) == cudaSuccess ? 0 : ahead_ms_;
+            }
+        }
+    };
+    // On gfx1031, copies queued after the router D2H stayed behind it even on up_: the 8K prompt paid ~2.2 s
+    // without overlap. Queue them first, while this visit's attention is still pending. Only Inkling opts in.
+    if (prefetch_early_) prefetch();
     router_scores(L, n);
     // Routed on the card, a batch hands the host its picks: the host took longer to route a batch of 1,024 tokens
     // than the card took for its experts.
@@ -4560,25 +4585,11 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     // A small call on its own copies only the experts it routes to.  With another launch's experts the batched
     // kernels would split its sums another way, so it cannot take what a call before it left.  In a read of
     // several calls it copies ahead as the others do, and the copy is theirs too.
-    if (ahead) plan_ahead(L, il);
-    const int n_ahead = ahead ? (int) L.ahead.size() : 0;
-    // Under a freeze the staging decisions are the measured times', and those are the machine's, not the
-    // request's: a frozen answer takes the staging as it finds it, which is what the first token saw.
-    const bool mine = ahead && staged_il_ == il &&
-                      (staged_ == L.ahead || (freeze_experts_ ? true : 2 * route_ms_ < ahead_ms_));
-    const bool early = n_ahead > 0 && !mine;
-    if (early) {
-        const Clock::time_point t = Clock::now();
-        // the buffer is free once the layer before has read it
-        ck(cudaStreamWaitEvent(cs(up_), (cudaEvent_t) ev_free_, 0), "expert staging");
-        stage(L, L.ahead.data(), n_ahead, up_);
-        ck(cudaEventRecord((cudaEvent_t) ev_ahead_, cs(up_)), "expert staging");
-        if (!freeze_experts_) {   // the measured times are the machine's, not the request's: keep them out of a freeze
-            ahead_ms_ = ms_since(t);
-            // out already: how long before is not known until a call waits for it
-            route_ms_ = cudaEventQuery((cudaEvent_t) ev_) == cudaSuccess ? 0 : ahead_ms_;
-        }
-    }
+    if (!prefetch_early_) prefetch();
+    // Unlike the upload, this feedback must observe this call's ev_, not its previous recording. A freeze keeps
+    // machine timings out of the staging decisions, as on the original path.
+    if (prefetch_early_ && early && !freeze_experts_)
+        route_ms_ = cudaEventQuery((cudaEvent_t) ev_) == cudaSuccess ? 0 : ahead_ms_;
 
     const Clock::time_point t0 = Clock::now();
     ck(cudaEventSynchronize((cudaEvent_t) ev_), "router");
