@@ -23,6 +23,10 @@ offers the same steps as tools.
 - Build the affected HIP target and run the closest relevant checks on RDNA2; report the GPU tested. See
   [docs/AMD_HIP.md](docs/AMD_HIP.md) for build and validation.
 - Work on `main` and push task commits to `origin/main` unless the user directs otherwise.
+- Give every commit a clear subject and a body separated by a blank line. In the body, explain what changed
+  and why, naming the affected code paths or flags where relevant. Use bullets for distinct changes.
+  Say what was checked and what stayed unchanged. For performance changes, give before/after numbers with
+  the baseline, hardware, and test conditions; include any measured regressions.
 - Text taken from the Strata project names that project. After merging from it,
   `python tools/polystrata_names.py` writes PolyStrata again; its first lines say what it leaves alone.
 - Setup's own tests run without a GPU or downloads: `python tools/test_setup_<name>.py` (for example
