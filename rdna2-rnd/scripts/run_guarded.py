@@ -10,6 +10,14 @@ import threading
 import time
 
 
+def journal_text(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list) and all(type(x) is int and 0 <= x <= 255 for x in value):
+        return bytes(value).decode("utf-8", errors="replace")
+    raise TypeError("unexpected journal text field type")
+
+
 class Guard:
     def __init__(self, directory):
         self.directory = Path(directory)
@@ -49,8 +57,8 @@ class Guard:
             (self.directory / f"{scope}.jsonl").write_text(p.stdout)
             for line in p.stdout.splitlines():
                 entry = json.loads(line)
-                msg = entry.get("MESSAGE", "").lower()
-                source = entry.get("_COMM", "") + entry.get("SYSLOG_IDENTIFIER", "")
+                msg = journal_text(entry.get("MESSAGE", "")).lower()
+                source = journal_text(entry.get("_COMM", "")) + journal_text(entry.get("SYSLOG_IDENTIFIER", ""))
                 fault = ("amdgpu" in msg and any(x in msg for x in ("fault", "reset", "timeout")))
                 fault |= any(x in msg for x in ("out of memory:", "oom-kill:", "killed process"))
                 fault |= ("kwin" in source.lower() and any(x in msg for x in ("memory", "fault", "reset")))

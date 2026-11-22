@@ -146,9 +146,9 @@ scheduling changes hide most DMA. These are hypotheses, not required implementat
 ## Current checkpoint
 
 - Progresses: R2; R1 verified by P1.
-- Next: retained baseline is **`172e3620`**, actual build `79efbccc...`, with prefetch, down-tail, batch-KV
-  release, selective2x2 F32 and OWNED16 enabled. Actual PACK qualifies~1%API8Kafterreverse-orderconfirmation;
-  promote it and then test the faulting cost exposed by plain snapshot timing. F32's32K HTTP gain is verified;
+- Next: retained baseline is **`c9bb85d9`**, actual build `09304bb1...`, with prefetch, down-tail, batch-KV,
+  selective2x2 F32, OWNED16 and PACK enabled. Test the faulting cost exposed by plain snapshot timing as
+  one remaining concrete private prototype, then final original-vs-final/production. F32's32K HTTP gain is verified;
   its8K API screen remains inconclusive.
   Empty-grid MMQ cost is small; no compact-grid mechanism is justified by that screen. Production is pending.
   Actual-root VMM frozen restore and unfrozen HTTP ABBA passed. SiTU remains unshipped; production not deployed.
@@ -569,6 +569,27 @@ scheduling changes hide most DMA. These are hypotheses, not required implementat
   Remaining concrete hypothesis: per-current-output firsttouch in existingCPUworkers could parallelize
   thefaulting nowdominatingfastsave. Source-onlyprep; no newpin/allocation/thread/queue orprefaulted6Blob
   upfrontRAMincrease. TestsameolddataformatandactualE2E beforeadopting; pure093 currentlyunchanged.
+- 2026-11-22: PACK committed/pushedas**c9bb85d9**, nextbaseline093pure. Existingpack-trace1 isalreadythe
+  exactretainedcode/all6flags profile; commit/docs didnotrequireanunchanged rerun. No byte/timerinstrumentation
+  shipped. Source-only firsttouch extension uses onlycurrentfuture-outputBlob; Spillallocatesnewheap and
+  inside() allocatesnewuncommitteddue states. ExistingWorkers.run returnsafteralljobs and supportsnestedcalls;
+  threads() canidentifyserialpool. CandidatewriteszeroonlybeforethealreadycompleteD2Hoverwrite, no unread
+  byte loads, 4KiBsteps/2MiBjobspluslastbyte coverunalignedend. Source/availability/indexproof andlocalCPU
+  timing precede anyadoption; no newworker/allocation/pin/queue or up-front6-stateRAMpolicy permitted.
+- 2026-11-22: privatepage-touch flavors built outsideGit. PlainTIMER6fcb44a8... includesdispatch/faulting/join
+  andsave: warm-excluded8K4calls mean27.433->13.546ms, same22674minor/0majorfaults; shortpos93
+  27.246->11.960ms. Faultsarenotexcluded/reduced, workparallelized. ActualDIAG52c647ae... fullQ8/FP16
+  comparison/controlledSWAwrap+restore andPURE2979b765... 8Kforcedgolden passed; guardsclean.
+  APIandshort94/2K ABBA nowtestactualEE. Privateprefillfixturemaxsize nowincludeswarmup, fixingthe
+  short-onlysweep'swarm8Kcapacity; earlierdatasetsallhadmax(lengths)>=warmup andarenotretimed/changed.
+  NoRootcodechangeoradditionalpermanentflag. Prototypeonly; local2xsnapshotwinisnotanEEclaim.
+- 2026-11-22: R2safety-gateblocker: page-touchAPI B2interruptedbyGuardmonitor/final-check `.lower()`onlist,
+  notamdgpu fault. Two desktopVLCflatpak MESSAGErecordsare120-bytebinaryarrays; fullsavedkernel/desktop
+  rereadwithUTF8replacementdecodedthem, nofault/reset/timeout/OOM/kwinmemoryevent, minfree1969.99MiB,
+  noengineleftalive. A1/B1finishedbutthisABBAisnotqualified/spliced. Do notstoptheuser'sVLC.
+  MinimalenvelopeadditionforR2/R3: `rdna2-rnd/scripts/run_guarded.py` mustdecodejournald'sknownbyte-array
+  textform for MESSAGE/source fields, keepunknownformsfatal. Rawjournals/faultpatterns/floor/termination
+  unchanged. CPUreplay+invalidtypechecks andguarded`true`verify beforefreshABBAunderexistingdesktopload.
 
 ## Completion
 
