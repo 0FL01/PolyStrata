@@ -146,9 +146,11 @@ scheduling changes hide most DMA. These are hypotheses, not required implementat
 ## Current checkpoint
 
 - Progresses: R2; R1 verified by P1.
-- Next: **promote the qualified KV aggregate-wait improvement**, actual build `e4555437...`, against prior
-  baseline `914336f6`; then profile the retained baseline and rebase the selective2x2 F32 model. Actual-root
-  frozen restore and unfrozen HTTP ABBA passed. SiTU remains unshipped.
+- Next: retained baseline is **`53348354`**, actual build `e4555437...`, with prefetch, down-tail and batch
+  KV release enabled. Selective2x2 F32 temporary-model parity and8/16/32K ABBA pass; its exact single-file
+  patch passes actual-root native/golden and32K HTTP ABBA. Promote this qualified opt-in with the8K API
+  caveat, reprofile, then rebase OWNED16 attention and packed-checkpoint hypotheses onto the retained
+  baseline. Actual-root VMM frozen restore and unfrozen HTTP ABBA passed. SiTU remains unshipped.
   The query16 lane-owned attention, packed checkpoints and selective2x2 F32 projections remain model candidates;
   rebase them on each retained baseline. Do not disable checkpoints or merely move measured work afterDONE.
 - Replan on: failure to retain the effect without freeze, correctness mismatch, or fresh profile showing another
@@ -419,6 +421,48 @@ scheduling changes hide most DMA. These are hypotheses, not required implementat
   observed, and no claim it must be identical under external VRAM activity or timeout. All guards clean,
   both B logs confirm actual batch activation. Raw `kv-api-production-*`, summary JSON and telemetry.
   Retain this opt-in; production deployment is still pending. Next commit/push, reprofile, then F32 model.
+- 2026-11-22: VMM improvement committed/pushed as `53348354`; this is the next baseline, not an uncommitted
+  experiment. Post-change trace `kv-retained-trace` (warm32K, then fresh8/16/32K) has no hardware fault:
+  8Kspan9082.97ms/kernel8571.36/NVFP43885.66/Flash1455.71/smallF32374.55;
+  16Kspan19278.40/kernel18391.05/NVFP47737.94/Flash4227.44/smallF32749.42;
+  32Kspan43696.28/kernel42003.16/NVFP415559.21/Flash13588.40/smallF321497.47.
+  NVFP4 includes both legacy MMQ-40 and native tail. Copy overlap remains2100.53/4124.13/8445.89ms;
+  kernel/copy intervals are unions, not additive wall shares. First-request warmup includes load/JIT and is
+  not used as steady throughput. Full attention approaches NVFP4 cost at32K; F32's measured2x2 saving still
+  makes it the cheaper next model experiment. Separate HIP API analysis checks that the polling is gone.
+- 2026-11-22: retained-profile HIP API confirms32KVreservations unchanged, **zero polling sleeps**:
+  trim19.727ms wall (18.334insideHIP), subsequent refill16.188ms, experts1293->1353. Start->RESUME about62.9ms
+  versus3.57s before. Only two100-sleep series remain, one arena shrink per32K,109.409/109.188ms each
+  (~0.25% of that request); no stage lending/widen groups occur for this looped Linux HIP path. Do not
+  refactor the general allocator for these small residual waits while larger tested candidates remain.
+- 2026-11-22: selective F32 model rebased on53348354, control relink exactlye455. Only canonicalkernels.o
+  replaced; modelSHA48450c7eb5f1da13358543aaf074af0377202782b68d7190afac614d361189c3. All141old GPUkernels
+  unchanged; sole added6444Bkernel matches standalone. Actual API off/on16casespass; zero-resident8K+8forced
+  top10traces both equal oldgolden. Unfrozen8/16/32K ABBA (warm8K, fresh profiles, no reuse):
+  A1[8984.5,19362.1,43621.9], B1[8793.8,18925.4,42845.6], B2[8788.3,19048.3,42715.8],
+  A2[8946.8,19227.8,43474.8]ms. Throughput gains**+1.99/+1.62/+1.79%**, bothpairspositiveeachlength;
+  Adrift0.42/0.69/0.34%. All guards clean, actual B activation banners. Rootkernels.cu now exactly the
+  qualified opt-in source (89additions), actual build pending. Raw `gemm-e2e-533-*`; no F32 commit yet.
+- 2026-11-22: actual-root F32 build `1cc5d022f7bca930f7e997c3c05a67ea4a14197dd6072a540bc4c4509174ee5d`
+  passes old8K+8forced top10golden. Native proof confirms141oldkernels and new6444Bkernel unchanged from
+  qualified code; all28otherGPUbundles exact. Wholefatbin initially differed367bytes: one generatedCUID,
+  symbol ordering and SysV/GNUhash tables. Constructive renaming/table rebuilding reproduces the complete
+  canonical fatbin exactly; this is metadata, not assumed shader equality. ggml-base still embeds914336f6.
+  Actual-root8K HTTP ABBA (8229prompt+16output, cached0):
+  A1[10267.787,10263.200], B1[10402.055,10213.146], B2[10212.840,10063.215],
+  A2[10251.006,10275.033]ms TTFT. Mean**-0.40%latency**, pairs**+0.41%slower/-1.22%faster**;
+  this does NOT establish a repeatable8K API gain. The engine's own prompt times also vary, so it is not
+  merely SSE framing. Next: same actual ELF, warm8K then two fresh32K requests perprocess, to test whether
+  larger measured GPU savings survive real API/short-tail costs. Raw `gemm-api-production-*`; unshipped.
+- 2026-11-22: actual-root F32 large HTTP qualification passes. Same1cc5ELF, original production settings,
+  P1/TAIL/BATCHfixed1, only F32flag0/1, noFREEZE; warm8229 then fresh32805/32805token prompts, output16,
+  cached0. TTFTms A1[45549.116,45231.835], B1[44673.831,44739.403],
+  B2[44661.264,44484.476], A2[46004.142,45962.035]. Mean45686.782->44639.743ms,
+  **-2.292%latency/+2.346%throughput**, pairedlatencyreductions1.507/3.067%, Adrift1.306%.
+  All four corresponding32K cases are faster; all guards clean. This qualifies a real long API-prefill win,
+  not an8K API guarantee. Keep the512gate because short kernel32/77caseslost1.6-1.8x. No new buffers,
+  defaultold141kernels/resources and FP32term order preserved. Raw `gemm-api32-production-*`, summaryJSON.
+  Next: commit/pushF32, profile, then continue surviving OWNED16 and packed-state candidates.
 
 ## Completion
 

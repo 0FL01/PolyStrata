@@ -773,6 +773,22 @@ on average, within its 0.11% A/A drift. This is a context-shrink improvement, no
 No GPU kernel or format changes: the complete HIP fatbin matches `914336f6`. Checkpoint rewind/full-read
 checks used fixed placement separately; unfrozen placement is not a bitwise numerical control.
 
+`STRATA_HIP_SMALL_GEMM_2X2=1` (opt-in, gfx1031) runs the small FP32 projections with four outputs per thread
+and the existing K64 prefetch order. It applies only to single-group products with at least 512 rows and
+shapes 2304 -> {24,32,64} or 4608 -> 64. Other calls, including short rows, keep the old selector. Each
+output keeps the same FP32 FMA order; no new buffers or precision changes. All 141 existing GPU kernels
+retain their machine bytes and resources when this option is off.
+
+Against `53348354`, with prefetch, down-tail and batch-KV release enabled on the same hardware/settings,
+unfrozen A/B/B/A with an 8K warmup measured throughput gains of 2.0%, 1.6% and 1.8% for fresh 8K/16K/32K
+engine requests, with both pairs positive at each length. The actual build's HTTP A/B/B/A (8K warmup,
+then two fresh 32805-token prompts per process, 16 output tokens, zero cached input) measured mean TTFT
+45.687 -> 44.640 s: 2.29% lower latency, paired reductions 1.51% and 3.07%. A/A drift was 1.31%; clocks and
+expert placement were not fixed. The separate 8229-token HTTP screen was inconclusive (0.4% lower mean
+TTFT, mixed pairs), not a repeatable 8K API speed claim. Kernel tests are bitwise against the old implementation;
+fixed-placement 8K plus eight forced steps match the old printed top-10 traces. The 32/77-row kernel
+experiments were slower and are deliberately excluded by the 512-row gate.
+
 ## gfx906 (Instinct MI50 / MI60, Radeon VII): wave64, built from source
 
 gfx906 is wave64 and has no WMMA and no packed byte arithmetic, so the wave32 backend above refuses it. A separate opt-in build compiles the CUDA sources as HIP through a small compat layer

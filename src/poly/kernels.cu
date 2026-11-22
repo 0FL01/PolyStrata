@@ -12,6 +12,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #if defined(STRATA_USE_HIP)
+#include "strata/kernels/gfx_arch.hpp"
 #include "hip_prefill_gemm.cuh"
 #include "hip_split_attend.cuh"
 #include "hip_value_split.cuh"
@@ -21,6 +22,7 @@
 #include <climits>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
@@ -212,6 +214,87 @@ gemm_tile_kernel(const float* __restrict__ w, const float* __restrict__ x, float
             if (t < rows && o < n_out) y[size_t(t) * n_out + o] = acc[i][j];
         }
 }
+
+#if defined(STRATA_USE_HIP)
+namespace small_gemm_2x2 {
+constexpr int SMALL_TOK = 16, SMALL_OUT = 32, SMALL_K = 64, SMALL_THREADS = 128;
+
+__global__ void __launch_bounds__(SMALL_THREADS)
+gemm_small_2x2_kernel(const float* __restrict__ w, const float* __restrict__ x, float* __restrict__ y, int n_in, int n_out,
+                  int rows) {
+    constexpr int THREADS = SMALL_THREADS, XS = SMALL_TOK * SMALL_K / THREADS, WS = SMALL_OUT * SMALL_K / THREADS;
+    __shared__ float sx[SMALL_TOK][SMALL_K + 1], sw[SMALL_OUT][SMALL_K + 1];
+    const int t0 = blockIdx.x * SMALL_TOK, o0 = blockIdx.y * SMALL_OUT;
+    const int tt = 2 * (threadIdx.x / 16), oo = 2 * (threadIdx.x % 16);
+    // the next step's inputs and weights, read while this one is worked on
+    float xr[XS], wr[WS];
+    const auto fetch = [&](int k0) {
+        for (int j = 0; j < XS; ++j) {
+            const int i = threadIdx.x + j * THREADS, t = t0 + i / SMALL_K, k = k0 + i % SMALL_K;
+            xr[j] = t < rows && k < n_in ? x[size_t(t) * n_in + k] : 0.0f;
+        }
+        for (int j = 0; j < WS; ++j) {
+            const int i = threadIdx.x + j * THREADS, o = o0 + i / SMALL_K, k = k0 + i % SMALL_K;
+            wr[j] = o < n_out && k < n_in ? w[size_t(o) * n_in + k] : 0.0f;
+        }
+    };
+    fetch(0);
+    float acc00 = 0.0f, acc01 = 0.0f, acc10 = 0.0f, acc11 = 0.0f;
+    for (int k0 = 0; k0 < n_in; k0 += SMALL_K) {
+        for (int j = 0; j < XS; ++j) {
+            const int i = threadIdx.x + j * THREADS;
+            sx[i / SMALL_K][i % SMALL_K] = xr[j];
+        }
+        for (int j = 0; j < WS; ++j) {
+            const int i = threadIdx.x + j * THREADS;
+            sw[i / SMALL_K][i % SMALL_K] = wr[j];
+        }
+        __syncthreads();
+        if (k0 + SMALL_K < n_in) fetch(k0 + SMALL_K);
+#pragma unroll 16
+        for (int c = 0; c < SMALL_K; ++c) {
+            const float x0 = sx[tt][c], x1 = sx[tt + 1][c];
+            const float w0 = sw[oo][c], w1 = sw[oo + 1][c];
+            acc00 = fmaf(x0, w0, acc00);
+            acc01 = fmaf(x0, w1, acc01);
+            acc10 = fmaf(x1, w0, acc10);
+            acc11 = fmaf(x1, w1, acc11);
+        }
+        __syncthreads();
+    }
+    const int t = t0 + tt, o = o0 + oo;
+    if (t < rows && o < n_out) y[size_t(t) * n_out + o] = acc00;
+    if (t < rows && o + 1 < n_out) y[size_t(t) * n_out + o + 1] = acc01;
+    if (t + 1 < rows && o < n_out) y[size_t(t + 1) * n_out + o] = acc10;
+    if (t + 1 < rows && o + 1 < n_out) y[size_t(t + 1) * n_out + o + 1] = acc11;
+}
+
+bool use(int n_in, int n_out, int rows) {
+    if (rows < 512 || !((n_in == 2304 && (n_out == 24 || n_out == 32 || n_out == 64)) ||
+                        (n_in == 4608 && n_out == 64)))
+        return false;
+    static const bool enabled = [] {
+        const char* value = std::getenv("STRATA_HIP_SMALL_GEMM_2X2");
+        if (!value || value[0] != '1' || value[1] != '\0') return false;
+        int device = 0;
+        cudaDeviceProp prop{};
+        cudaError_t error = cudaGetDevice(&device);
+        if (error == cudaSuccess) error = cudaGetDeviceProperties(&prop, device);
+        if (error != cudaSuccess)
+            throw std::runtime_error(std::string("small GEMM 2x2 device: ") + cudaGetErrorString(error));
+        if (!kernels::gfx_arch_is(prop.gcnArchName, "gfx1031")) return false;
+        std::fputs("strata-poly: STRATA_HIP_SMALL_GEMM_2X2=1: K64-prefetch 2x2 F32 GEMM on gfx1031 (rows>=512, qualified shapes)\n", stderr);
+        return true;
+    }();
+    return enabled;
+}
+
+void launch(const float* w, const float* x, float* y, int n_in, int n_out, int rows, cudaStream_t stream) {
+    gemm_small_2x2_kernel<<<dim3((rows + SMALL_TOK - 1) / SMALL_TOK, (n_out + SMALL_OUT - 1) / SMALL_OUT),
+                            SMALL_THREADS, 0, stream>>>(w, x, y, n_in, n_out, rows);
+}
+}  // namespace small_gemm_2x2
+#endif
 
 // Where a row's Q8_1 blocks would keep a sum past the halves' range: a power of two to divide the row by, 1 for
 // most.  The test is on runs of 16 (Q2_K's blocks keep sums of 16, the others of 32) against a quarter of 65504,
@@ -2861,6 +2944,12 @@ void gemm_f32(void* blas, const float* w, const float* x, float* y, int n_in, in
     if (groups == 1 && n_out <= 8 * SMALL_OUT) {
         cudaStream_t stream = nullptr;
         blas_ck(cublasGetStream(h, &stream), "cublasGetStream");
+#if defined(STRATA_USE_HIP)
+        if (small_gemm_2x2::use(n_in, n_out, rows)) {
+            small_gemm_2x2::launch(w, x, y, n_in, n_out, rows, stream);
+            return;
+        }
+#endif
         if (n_out > 2 * SMALL_OUT)
             gemm_tile_kernel<<<dim3((rows + TILE_TOK - 1) / TILE_TOK, (n_out + TILE_OUT - 1) / TILE_OUT),
                                TILE_TOK * TILE_OUT / 16, 0, stream>>>(w, x, y, n_in, n_out, rows);
