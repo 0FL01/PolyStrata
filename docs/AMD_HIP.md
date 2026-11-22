@@ -749,6 +749,14 @@ This changes the upload order, not the expert products or attention arithmetic; 
 The switch is off by default. These measurements do not cover a filled 200K context. Evidence and subsequent
 experiments: [the end-to-end prefill goal](goals/2026-11-22-inkling2-prefill-e2e.md).
 
+`STRATA_HIP_NVFP4_TAIL=1` (opt-in, gfx1031) omits the wholly padded final 128 activation values of the NVFP4
+down product. It keeps the K256 loader and original dot/sum order, applies only to the tested grouped
+`[2304,1152]` J64 calls, and leaves other calls on the existing launcher. With prefetch enabled and the same
+IQ4_XS/Q8_0/batch2048 settings above, unfrozen A/B/B/A measured 8K 900-903 -> 909-915 tok/s, 16K 839-842 ->
+856-857 and 32K 744-745 -> 754-756, against `4345219b` (about 1.1%, 2.0% and 1.4%). Gate/up, decode,
+weight/activation formats and the default-off path are unchanged. The K128 full-kernel experiment was not kept:
+it accelerated down but slowed gate/up; this narrower change avoids that regression.
+
 ## gfx906 (Instinct MI50 / MI60, Radeon VII): wave64, built from source
 
 gfx906 is wave64 and has no WMMA and no packed byte arithmetic, so the wave32 backend above refuses it. A separate opt-in build compiles the CUDA sources as HIP through a small compat layer

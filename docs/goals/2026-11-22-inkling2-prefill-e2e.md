@@ -144,8 +144,9 @@ scheduling changes hide most DMA. These are hypotheses, not required implementat
 ## Current checkpoint
 
 - Progresses: R2; R1 verified by P1.
-- Next: commit/push P1, measure its longer-context baseline, then measure the pending local MMQ K-step and
-  lane-owned attention-probability prototypes. Qualify staged classes and batch size against P1, not the old base.
+- Next: promote down-tail as the second baseline; reprofile it. Compare the surviving lane-owned attention and
+  SiTU->MMQ fusion on the model. Replace the default-no-op read rebalance with a same-format checkpoint-copy
+  packing experiment; do not disable prompt checkpoints merely to make the benchmark improve.
 - Replan on: failure to retain the effect without freeze, correctness mismatch, or fresh profile showing another
   larger actionable cost. A rejected idea is recorded and replaced, not repeatedly retested unchanged.
 
@@ -180,6 +181,92 @@ scheduling changes hide most DMA. These are hypotheses, not required implementat
   Q8_0 MMQ1098.370, small GEMM375.029, quant181.574 ms. Thus P2 remains first compute hypothesis; P3 becomes
   more important with prefix length. Raw `p1-trace/trace`, `p1-trace/analysis.json`. P1 binary SHA-256
   `46b5d95ba2867a9f0d57237b0bf1fe11995c2c4abee8c568a4ef81f3f8c3a5f2`; no arithmetic/precision change.
+- 2026-11-22: P1 committed/pushed as `4345219b`; this binary with `STRATA_INKLING_PREFETCH=1` is now baseline.
+- 2026-11-22: P2 K128 local-copy prototype compiles and passes exhaustive CPU indexing checks plus 98,304 real-weight
+  simulated outputs. GPU strict smoke (empty/partial groups) and balanced real-GGUF tests are bitwise identical.
+  I128/J64/256threads kept; LDS51200->30720B, VGPR240->206, no spills, HIP-estimated active blocks1->2.
+  **Expectation partly falsified:** gate at64experts x128/256rows gets 5976.9->6210.3 /11792.1->12174.8 us
+  (3-4% slower), down3456.6->3207.1 /6665.9->6177.3 (about7.8% faster). Lower resources/greater occupancy alone
+  do not accelerate gate. Down removes the old128-value paddedK tail, making a down-only model screen worthwhile.
+  Captured uneven groups and gate PMC follow before attributing the cause. Raw `mmq-k128/`.
+- 2026-11-22: P3 lane-owned probabilities, temporary kernel: each8-lane group retains2keys/head/lane instead of16;
+  exp instructions per tile51->9, DPP8 broadcasts keep sequential16-key denominator sum and per-key PV order.
+  VGPR232rounded->208, LDS unchanged18368B, zero spills. Eight GPU geometries (512/2048queries x8K/32Kprefix
+  xSWA/full) **bitwise equal** to currentFlash;14 plain-reference casesPASS including190K dominantkey,60K sink,
+  ringwrap/tails/FP16. Timings full2048@32K167.44->158.85ms, SWA5.245->4.986ms (~5% kernel gain).
+  This is not yet an engine gain: model A/B is required, especially atlongerprefix. Raw `attention-prob/`.
+- 2026-11-22: captured uneven P2 groups confirm gate K1280.961-0.971x and down1.069-1.087x, all bitwise. Gate's
+  FETCH_SIZE counter is nearly unchanged (386217/385521 KiB per dispatch). **SQ PMC unusable in this experiment:** zero
+  VALU/LDS after first sample, occupancy0 and SQ_WAVES65814 rather than18432 for589824threads. A corrected
+  single-counter rerun reproduces invalid values; no hardware-occupancy claim is made. HIP's estimate of2blocks
+  is not a measured occupancy. The first single-counter command only rejected `--warmup 0`; rerun used1.
+- 2026-11-22: temporary **down-only** model uses the original auto-J selection; only supported NVFP4 down1152,
+  max_rows>=128 and J64 qualify (129-row J48 is deliberately excluded). Control relink equals P1 bytes; ABI
+  offsets checked. 8K zero-cache model forced top-10 is identical to P1. Unfrozen same-binary ABBA, P1 enabled:
+  8K A9117.5/9108.8 ->B9030.3/9024.3 ms (+0.95% throughput), 16K A19750.8/19541.6 ->B19357.1/19263.7
+  (+1.74%), 32K A44116.8/44121.0 ->B43713.1/43802.1 (+0.83%). All pairs positive, all guards clean.
+  This clears an end-to-end signal, not the old hypothetical5% gate. Before production integration, test whether
+  keeping K256 but skipping only down's final padded128-value slab does the same work with less overhead/code.
+  Raw `k128-e2e-*`, `k128-model-parity`, `mmq-k128/downonly-model/`.
+- 2026-11-22: attention no-lookahead CPU variant recovers17VGPRs (208->191raw/192rounded), not the expected~40;
+  it misses the ~170 target for a third block. Guarded GPU timing will decide whether the lost memory prefetch
+  outweighs this smaller resource benefit. No model build or permanent change for it yet.
+- 2026-11-22: no-lookahead GPU check: eight geometries bitwise, but full512@8K10.288->10.623ms and
+  full2048@32K159.018->166.973ms versus OWNED (3-7% slower across full cases). SWA roughly flat or~1% faster,
+  too small to explain a real-model win. **Rejected:** fewer registers did not cross the residency threshold,
+  and removing global-memory overlap costs more than it saves. Next attention hypothesis instead splits GQA
+  heads across blocks: more K/V traffic, much smaller live Q/O state; test its reuse/occupancy trade-off.
+- 2026-11-22: K256 tail-skip alternative keeps original loaders/config/LDS51200/VGPR240, but omits only down's
+  padded second128 slab (10->9 activation slabs,40->36 sum updates,20->18 inner barriers). CPU196608 outputs and
+  GPU empty/partial plus8captured groups are bitwise. Captured down1.082-1.101x vs original, gate~flat.
+  It beats K128's typical1.07-1.08x without the doubled outer-loop count, so choose a focused tracked tail kernel
+  over K128. Do not copy/fork upstream headers. Skipped inputs have zero D4 scales; packed padding bytes need
+  not be zero (legacy0*infinity conversion). Model qualification of the tracked implementation follows.
+- 2026-11-22: one-head attention GPU check:8geometries bitwise,14reference casesPASS, but~2.1x slower than OWNED3
+  (full2048@32K158.958->342.346ms). RawVGPR190 still misses the third-block threshold; hoisted LDS operands consume
+  much of the recovered Q/O space and K/V/table staging repeats three times. **Rejected**, do not integrate.
+- 2026-11-22: SiTU->MMQ D4 fusion compiles (33rawVGPR, noLDS/spills) and42GPU row/scale/zero/tiny/cancellation
+  cases have identical **entire packed bytes**, including pad512 and guards. Separate->fused at1152columns:
+  rows2048 .10640->.08080ms; rows16384 .98797->.58713ms. This is a promising~0.5-1% model hypothesis,
+  not yet a model result. Raw `situ-mmq/{parity,timing}.jsonl` (CSV content), no permanent source change yet.
+- 2026-11-22: focused tracked down-tail source138lines reuses unchanged ggml load/dot/writeback helpers; no
+  upstream-header copies. CMake adds it only to HIP/gfx1031; strict `STRATA_HIP_NVFP4_TAIL=1` dispatch preserves
+  original auto-J and default path. Three actual-production GPU layouts (global prefix/suffix, arbitrary
+  gather/scatter, padded cache/weight/output strides) are full-buffer bitwise with intact canaries;8captured
+  down groups also pass. Old/currentoff/currenton 8K zero-resident forced top-10 identical. Independent review
+  found no grouping/math issue; guarded device body is restricted to gfx1031. No other-backend builds required.
+- 2026-11-22: **tracked** down-tail same-binary unfrozen ABBA:8K A9100.1/9068.4 ->B8953.0/9016.2ms (+1.11%);
+  16K A19532.3/19465.9 ->B19115.6/19132.6 (+1.96%);32K A44036.5/43963.1 ->B43463.0/43354.4 (+1.36%).
+  Both pairs positive at each length. Baseline P1 on, all other production settings/profile seed fixed; no reuse.
+  Raw `tail-e2e-*`, `mmq-tail-production/`, guards clean. Rebuild after the two-line device scope guard before
+  promoting the result; the previously qualified binary SHA is `c8a238762cf47e10975f514c5641cfff6a468771816c4d58914c8596cdf94ebe`.
+- 2026-11-22: gfx1031 rebuild after the device guard produces the **same full executable bytes**, SHA
+  `c8a238762cf47e10975f514c5641cfff6a468771816c4d58914c8596cdf94ebe`. Thus the GPU/model/E2E evidence above is
+  current for the final source, not inferred across a changed binary. Default-off original path retained;
+  no gate/up or decode algorithm change. Ready to promote this second measured baseline.
+- 2026-11-22: actual HTTP/SSE baseline (old `ab8507f1` bytes, private server/config/profile copies, loopback+auth):
+  fresh8229-token requests,16outputtokens, zero reused prompt tokens. TTFT(first text, including reasoning)
+  13034.7/12803.1ms afterwarmup; role-only SSE header is~9ms and is **not** TTFT. Reasoning-only short generations
+  are not a coherence test; check a budgeted full reply separately at deployment. Artifacts `api-baseline-v4`.
+  Harness setup needed a free port and a valid `strata-poly-<8/12hex>` basename (server feature detection); no
+  production sampling/config/server-code change. Ordinary urllib bypassed loopback already; helper now explicitly
+  disables proxies. Failed harness starts are not performance data.
+- 2026-11-22: next R&D priority is real partial chunks, not another occupancy sweep. `Session::generate` leaves
+  one token for logits; `Engine::read` splits at rows2048 and checkpoints. Tails32..1023 use CPU/GPU splitting,
+  not the ahead path; aligned-length benchmarks can hide that. A scratch flag will test balancing the last two
+  chunks within each mark segment, preserving total rows/call count/checkpoint positions and scratch limits.
+- 2026-11-22: **read-rebalance expectation falsified for the actual defaults before GPU timing.** Cache every2048
+  remains enabled even with conversation-cache-mib0; all due marks bound calls, including discarded/null-state
+  marks. Thus8229 API input is2048+2048+2048+2048+36, then1, both flagstates. The prepared model/1,479,981CPUcases
+  establish a no-op for all proposed default-policy sweeps. No production integration and no pointless GPU
+  rerun. Larger prompt-batch values likewise cannot make text calls exceed2048 while this cadence remains.
+  Changing/disabling checkpoints just for a positive cold benchmark would risk real prefix-reuse behavior.
+- 2026-11-22: new same-cache-policy hypothesis: current8K trace has134.3ms idle between successive D2H copies,
+  plus42.7ms D2H->runtimecopy, inside331ms idle. `save_state` performs many synchronous tiny transfers.
+  Test packing the unchanged convolution/SWA snapshot into the existing expert stage buffer with asynchronous
+  D2D copies, then one bulk D2H; no new persistent allocation. Preserve all bytes/checkpoints, clear overwritten
+  staged-weight metadata, synchronize before reuse, and fall back when unavailable/DSpark. Temporary prototype
+  and full-byte/restore validation precede any integration. This is a measured direction change, not a new outcome.
 
 ## Completion
 
