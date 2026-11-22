@@ -2,12 +2,15 @@
 #include "inkling_attend.hpp"
 
 #include "strata/kernels/q8_1_finite.hpp"
+#include "strata/kernels/gfx_arch.hpp"
 
 #include <cuda_fp16.h>
 
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 
@@ -178,7 +181,28 @@ template <int X> __device__ float xor8(float v) {
     return __int_as_float(__builtin_amdgcn_mov_dpp8(__float_as_int(v), sel));
 }
 
-template <bool Q8>
+// Broadcast a key's FP32 probability from its owning lane within each group of 8.
+template <int Owner> __device__ float owner8(float v) {
+    constexpr int sel = Owner | Owner << 3 | Owner << 6 | Owner << 9 | Owner << 12 | Owner << 15 |
+                        Owner << 18 | Owner << 21;
+    return __int_as_float(__builtin_amdgcn_mov_dpp8(__float_as_int(v), sel));
+}
+
+// The fully unrolled caller makes owner constant and removes this switch before ISA generation.
+__device__ __forceinline__ float broadcast8(float v, int owner) {
+    switch (owner) {
+        case 0: return owner8<0>(v);
+        case 1: return owner8<1>(v);
+        case 2: return owner8<2>(v);
+        case 3: return owner8<3>(v);
+        case 4: return owner8<4>(v);
+        case 5: return owner8<5>(v);
+        case 6: return owner8<6>(v);
+        default: return owner8<7>(v);
+    }
+}
+
+template <bool Q8, bool LaneProb = false>
 __global__ void __launch_bounds__(kFlashThreads)
 flash_kernel(const float* __restrict__ q, const float* __restrict__ rel, const float* __restrict__ table,
              const float* __restrict__ sink, const float* __restrict__ gate, KvView k, KvView v, int64_t pos, int n,
@@ -229,7 +253,11 @@ flash_kernel(const float* __restrict__ q, const float* __restrict__ rel, const f
         }
         __syncthreads();
 
-        float s[kGroup][kKeys];
+        float s[kGroup][LaneProb ? kKeys / kSplit : kKeys];
+        if constexpr (LaneProb) {
+#pragma unroll
+            for (int r = 0; r < kGroup; ++r) s[r][0] = s[r][1] = 0.f;
+        }
 #pragma unroll
         for (int c = 0; c < kKeys; ++c) {
             float dot[kGroup] = {};
@@ -250,52 +278,109 @@ flash_kernel(const float* __restrict__ q, const float* __restrict__ rel, const f
                 float score = dot[r] * (0.08838834764831845f * kLog2e);
 #pragma unroll
                 for (int i = 0; i < kRelPart; ++i) score = fmaf(rr[r][i], tr[i], score);
-                s[r][c] = score;
+                if constexpr (LaneProb) {
+                    score += xor8<1>(score);
+                    score += xor8<2>(score);
+                    score += xor8<4>(score);
+                    const int64_t key = kb + c;
+                    // This is a cndmask, not divergent execution around the DPP8 reductions.
+                    if (part == c % kSplit) s[r][c / kSplit] = key < lo || key > p ? -INFINITY : score;
+                } else {
+                    s[r][c] = score;
+                }
             }
         }
 #pragma unroll
         for (int r = 0; r < kGroup; ++r) {
-            float top = -INFINITY;
+            if constexpr (LaneProb) {
+                float top = fmaxf(s[r][0], s[r][1]);
+                top = fmaxf(top, xor8<1>(top));
+                top = fmaxf(top, xor8<2>(top));
+                top = fmaxf(top, xor8<4>(top));
+                // Every lane gets the same maximum.
+                const float mn = fmaxf(m[r], top), shrink = exp2f(m[r] - mn);
+                m[r] = mn;
+                l[r] *= shrink;
+                lc[r] *= shrink;
 #pragma unroll
-            for (int c = 0; c < kKeys; ++c) {
-                float x = s[r][c];
-                x += xor8<1>(x);
-                x += xor8<2>(x);
-                x += xor8<4>(x);
-                const int64_t key = kb + c;
-                s[r][c] = key < lo || key > p ? -INFINITY : x;
-                top = fmaxf(top, s[r][c]);
+                for (int i = 0; i < 4 * kVec; ++i) o[r][i] *= shrink;
+                s[r][0] = exp2f(s[r][0] - mn);
+                s[r][1] = exp2f(s[r][1] - mn);
+            } else {
+                float top = -INFINITY;
+#pragma unroll
+                for (int c = 0; c < kKeys; ++c) {
+                    float x = s[r][c];
+                    x += xor8<1>(x);
+                    x += xor8<2>(x);
+                    x += xor8<4>(x);
+                    const int64_t key = kb + c;
+                    s[r][c] = key < lo || key > p ? -INFINITY : x;
+                    top = fmaxf(top, s[r][c]);
+                }
+                // a block the row attends none of scales by exp(0) and adds exp(-inf): it changes nothing
+                const float mn = fmaxf(m[r], top), shrink = exp2f(m[r] - mn);
+                m[r] = mn;
+                l[r] *= shrink;
+                lc[r] *= shrink;
+#pragma unroll
+                for (int i = 0; i < 4 * kVec; ++i) o[r][i] *= shrink;
+                // a block's share can be below the running sum's rounding (one key far above the rest of a long row):
+                // the block's own sum first, then a compensated sum over the blocks
+                float sum = 0.f;
+#pragma unroll
+                for (int c = 0; c < kKeys; ++c) {
+                    s[r][c] = exp2f(s[r][c] - mn);
+                    sum += s[r][c];
+                }
+                const float y = sum - lc[r], next = l[r] + y;
+                lc[r] = (next - l[r]) - y;
+                l[r] = next;
             }
-            // a block the row attends none of scales by exp(0) and adds exp(-inf): it changes nothing
-            const float mn = fmaxf(m[r], top), shrink = exp2f(m[r] - mn);
-            m[r] = mn;
-            l[r] *= shrink;
-            lc[r] *= shrink;
-#pragma unroll
-            for (int i = 0; i < 4 * kVec; ++i) o[r][i] *= shrink;
-            // a block's share can be below the running sum's rounding (one key far above the rest of a long row):
-            // the block's own sum first, then a compensated sum over the blocks
-            float sum = 0.f;
-#pragma unroll
-            for (int c = 0; c < kKeys; ++c) {
-                s[r][c] = exp2f(s[r][c] - mn);
-                sum += s[r][c];
-            }
-            const float y = sum - lc[r], next = l[r] + y;
-            lc[r] = (next - l[r]) - y;
-            l[r] = next;
         }
+        if constexpr (LaneProb) {
+            float sum[kGroup] = {};
 #pragma unroll
-        for (int c = 0; c < kKeys; ++c) {
-#pragma unroll
-            for (int i = 0; i < kVec; ++i) {
-                const float4 x = vs[c][part + kSplit * i];
+            for (int c = 0; c < kKeys; ++c) {
+                float prob[kGroup];
 #pragma unroll
                 for (int r = 0; r < kGroup; ++r) {
-                    o[r][4 * i] = fmaf(s[r][c], x.x, o[r][4 * i]);
-                    o[r][4 * i + 1] = fmaf(s[r][c], x.y, o[r][4 * i + 1]);
-                    o[r][4 * i + 2] = fmaf(s[r][c], x.z, o[r][4 * i + 2]);
-                    o[r][4 * i + 3] = fmaf(s[r][c], x.w, o[r][4 * i + 3]);
+                    prob[r] = broadcast8(s[r][c / kSplit], c % kSplit);
+                    // Match the original sequential 16-key denominator sum; no new tree-sum rounding.
+                    sum[r] += prob[r];
+                }
+#pragma unroll
+                for (int i = 0; i < kVec; ++i) {
+                    const float4 x = vs[c][part + kSplit * i];
+#pragma unroll
+                    for (int r = 0; r < kGroup; ++r) {
+                        o[r][4 * i] = fmaf(prob[r], x.x, o[r][4 * i]);
+                        o[r][4 * i + 1] = fmaf(prob[r], x.y, o[r][4 * i + 1]);
+                        o[r][4 * i + 2] = fmaf(prob[r], x.z, o[r][4 * i + 2]);
+                        o[r][4 * i + 3] = fmaf(prob[r], x.w, o[r][4 * i + 3]);
+                    }
+                }
+            }
+#pragma unroll
+            for (int r = 0; r < kGroup; ++r) {
+                // The compensated sum across key blocks is unchanged; l/lc are not used by PV.
+                const float y = sum[r] - lc[r], next = l[r] + y;
+                lc[r] = (next - l[r]) - y;
+                l[r] = next;
+            }
+        } else {
+#pragma unroll
+            for (int c = 0; c < kKeys; ++c) {
+#pragma unroll
+                for (int i = 0; i < kVec; ++i) {
+                    const float4 x = vs[c][part + kSplit * i];
+#pragma unroll
+                    for (int r = 0; r < kGroup; ++r) {
+                        o[r][4 * i] = fmaf(s[r][c], x.x, o[r][4 * i]);
+                        o[r][4 * i + 1] = fmaf(s[r][c], x.y, o[r][4 * i + 1]);
+                        o[r][4 * i + 2] = fmaf(s[r][c], x.z, o[r][4 * i + 2]);
+                        o[r][4 * i + 3] = fmaf(s[r][c], x.w, o[r][4 * i + 3]);
+                    }
                 }
             }
         }
@@ -757,12 +842,34 @@ void attend_decode(const Attend& a, float* scratch, cudaStream_t st, void* q8) {
 void attend_flash(const Attend& a, cudaStream_t st) {
     if (a.n <= 0) return;
     const dim3 grid(div_up(a.n, kTokens), kKv);
-    if (a.k.scales)
-        flash_kernel<true><<<grid, kFlashThreads, 0, st>>>(a.q, a.rel, a.table, a.sink, a.gate, a.k, a.v, a.pos, a.n,
-                                                           a.window, a.ring, a.out);
-    else
-        flash_kernel<false><<<grid, kFlashThreads, 0, st>>>(a.q, a.rel, a.table, a.sink, a.gate, a.k, a.v, a.pos,
-                                                            a.n, a.window, a.ring, a.out);
+    static const bool lane_prob = [] {
+        const char* value = std::getenv("STRATA_INKLING_LANE_PROB");
+        if (!value || value[0] != '1' || value[1] != '\0') return false;
+        int device = 0;
+        cudaDeviceProp prop{};
+        cudaError_t error = cudaGetDevice(&device);
+        if (error == cudaSuccess) error = cudaGetDeviceProperties(&prop, device);
+        if (error != cudaSuccess)
+            throw std::runtime_error(std::string("Inkling lane probabilities: ") + cudaGetErrorString(error));
+        if (!kernels::gfx_arch_is(prop.gcnArchName, "gfx1031")) return false;
+        std::fputs("strata-poly: STRATA_INKLING_LANE_PROB=1: lane-owned FP32 flash probabilities on gfx1031\n", stderr);
+        return true;
+    }();
+    if (lane_prob) {
+        if (a.k.scales)
+            flash_kernel<true, true><<<grid, kFlashThreads, 0, st>>>(a.q, a.rel, a.table, a.sink, a.gate, a.k, a.v, a.pos, a.n,
+                                                               a.window, a.ring, a.out);
+        else
+            flash_kernel<false, true><<<grid, kFlashThreads, 0, st>>>(a.q, a.rel, a.table, a.sink, a.gate, a.k, a.v, a.pos,
+                                                                a.n, a.window, a.ring, a.out);
+    } else {
+        if (a.k.scales)
+            flash_kernel<true><<<grid, kFlashThreads, 0, st>>>(a.q, a.rel, a.table, a.sink, a.gate, a.k, a.v, a.pos, a.n,
+                                                               a.window, a.ring, a.out);
+        else
+            flash_kernel<false><<<grid, kFlashThreads, 0, st>>>(a.q, a.rel, a.table, a.sink, a.gate, a.k, a.v, a.pos,
+                                                                a.n, a.window, a.ring, a.out);
+    }
     check("Inkling flash attention");
 }
 

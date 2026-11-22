@@ -789,6 +789,21 @@ TTFT, mixed pairs), not a repeatable 8K API speed claim. Kernel tests are bitwis
 fixed-placement 8K plus eight forced steps match the old printed top-10 traces. The 32/77-row kernel
 experiments were slower and are deliberately excluded by the 512-row gate.
 
+`STRATA_INKLING_LANE_PROB=1` (opt-in, gfx1031, requires `STRATA_INKLING_FLASH=1`) gives each lane two
+FP32 probabilities and broadcasts them for PV, instead of computing all 16 in every lane. The 16-query,
+16-key geometry, QK reduction order, sequential denominator sum, compensated update and per-key PV FMA
+order stay the same. No extra buffers or lower-precision operands. The false specialization retains the
+old kernel machine bytes/resources; the true one uses 208 rather than 225 named VGPRs, without spills.
+
+Against `af66c57e` with the four optimizations above enabled, the same-host unfrozen A/B/B/A (8K warmup,
+then fresh 8K/32K/64K engine requests) measured throughput gains of 1.16%, 2.36% and 2.53%, both pairs
+positive at every length. Actual-build HTTP A/B/B/A, warm 8229 then two fresh 32805-token prompts per
+process with 16 output tokens and zero cached input, measured mean TTFT 45.206 -> 43.929 s: 2.83% lower
+latency, paired reductions 1.86% and 3.77%, with 2.11% A/A drift. Clocks and expert placement were not fixed.
+Eight standalone geometries are bitwise against old Flash; 14 plain-reference cases cover wrap, tails,
+FP16 and long attention. Fixed-placement 8K plus eight forced steps match the old printed top-10 traces.
+64K is measured model prefill; the longer kernel-only cases do not establish 200K model throughput.
+
 ## gfx906 (Instinct MI50 / MI60, Radeon VII): wave64, built from source
 
 gfx906 is wave64 and has no WMMA and no packed byte arithmetic, so the wave32 backend above refuses it. A separate opt-in build compiles the CUDA sources as HIP through a small compat layer

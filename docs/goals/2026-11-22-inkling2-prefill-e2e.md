@@ -146,11 +146,11 @@ scheduling changes hide most DMA. These are hypotheses, not required implementat
 ## Current checkpoint
 
 - Progresses: R2; R1 verified by P1.
-- Next: retained baseline is **`53348354`**, actual build `e4555437...`, with prefetch, down-tail and batch
-  KV release enabled. Selective2x2 F32 temporary-model parity and8/16/32K ABBA pass; its exact single-file
-  patch passes actual-root native/golden and32K HTTP ABBA. Promote this qualified opt-in with the8K API
-  caveat, reprofile, then rebase OWNED16 attention and packed-checkpoint hypotheses onto the retained
-  baseline. Actual-root VMM frozen restore and unfrozen HTTP ABBA passed. SiTU remains unshipped.
+- Next: retained baseline is **`af66c57e`**, actual build `1cc5d022...`, with prefetch, down-tail, batch-KV
+  release and selective2x2 F32 enabled. OWNED16 actual-root parity/native/32K HTTP ABBA pass: promote it,
+  reprofile, then qualify the clean packed-checkpoint hook. F32's32K HTTP gain is verified; its8K API screen
+  remains inconclusive. Empty-grid MMQ cost is small; no compact-grid mechanism is justified by that screen.
+  Actual-root VMM frozen restore and unfrozen HTTP ABBA passed. SiTU remains unshipped; production not deployed.
   The query16 lane-owned attention, packed checkpoints and selective2x2 F32 projections remain model candidates;
   rebase them on each retained baseline. Do not disable checkpoints or merely move measured work afterDONE.
 - Replan on: failure to retain the effect without freeze, correctness mismatch, or fresh profile showing another
@@ -463,6 +463,50 @@ scheduling changes hide most DMA. These are hypotheses, not required implementat
   not an8K API guarantee. Keep the512gate because short kernel32/77caseslost1.6-1.8x. No new buffers,
   defaultold141kernels/resources and FP32term order preserved. Raw `gemm-api32-production-*`, summaryJSON.
   Next: commit/pushF32, profile, then continue surviving OWNED16 and packed-state candidates.
+- 2026-11-22: F32 committed/pushed as**af66c57e**, newbaseline. Retained trace `f32-retained-trace` warm8K,
+  then fresh8/32K: span8891.36/42918.42ms, kernelunion8452.52/41242.69, copyoverlap2095.60/8372.75,
+  NVFP43934.56/15449.66, Flash1456.31/13602.86. Actual F32newkernel206.33/824.99ms versus prior
+  smallF32374.55/1497.47ms (different profile starts/residency, not an isolated E2E pair). Arithmetic/copy work
+  otherwise stays on the same paths; do not add dispatch sums as wall shares. Flash is now the clear next
+  tested candidate at longprefix. Checkpoint D2H->D2H idle remains138.76/230.69ms; packed-state source has
+  been freshly rebased without SiTU and preserves VMMlogic. Its new virtual hook/performance remain unqualified.
+- 2026-11-22: opt-in OWNED16 model freshly linked onaf66, controlbyte-identical1cc5, onlyattentionobject
+  replaced; all28otherGPUbundles exact. Model5346adea8764593d1f3dcf4e3810469c85dc349643393d73cf03ae993bd339bc.
+  Off/on zero-resident8K+8forcedtop10 both match oldgolden. Unfrozen8/32/64K ABBA warm8K with allretained
+  flags1: A1[8829.5,43023.6,106867.9], B1[8695.2,41777.3,104154.2],
+  B2[8705.2,42049.0,104109.2], A2[8772.9,42777.0,106672.6]ms. Throughput**+1.16/+2.36/+2.53%**;
+  bothpairspositiveeverylength, Adrift0.64/0.57/0.18%. Allguards clean, actual64K model prefill now measured,
+  not200K. NextactualRoot keeps false template oldcode and true qualifiedcode; removeonlynewmisleading
+  comment clause about fullymasked Kahanstate. No performance credit from a comment. No attentioncommit yet.
+- 2026-11-22: CPU-only MMQ-grid accounting `mmq-grid-cost` bounds the next possible bottleneck, not a win.
+  Eight repacked realgroups:60123validrows/66496nonemptytileslots,9.58%padding; >128-rowexperts6.65%padding.
+  Their repackedgrids have88.44%emptyCTAs, but physical resident-run boundaries are absent, so this is NOT
+  productiongrid waste. Lasttilelive1-8/9-16/17-32/33-64hist41/25/38/88 (10full64). Preparedsingle guarded
+  ABBA adds64zero experts whileholding64x128 or64x512usefulrows and cross-checks outputhashes. Cost must be
+  measured; oldgeneric shared-ID/barrier setup differs from retaineddown-tail's earlyreturn. No compactgrid,
+  newtailbody, groupingpolicy or additionalkernel was implemented from these ratios.
+- 2026-11-22: actual-root OWNED16 build79efbccc834549dca97020bf2b4f97f33229ca533ef19a8685f4ff25aef02c8f
+  has falseoldkernels, qualifiedtruekernels, unchanged104BABI and28otherexactGPUbundles. Metadata-only CUID,
+  69localABSresourcesymbols/ordering/emptysection differences are constructively normalized; actual shader
+  text/descriptors/args/resources already match before normalization. Actual-root8K+8forcedgolden PASS.
+  HTTP32ABBA warm8K, sameoriginalsettings/allretainedflags1, cached0/32805prompt/16output:
+  A1[44868.286,44601.357], B1[44004.291,43802.434], B2[44065.448,43842.913],
+  A2[45161.981,46194.374]ms TTFT. Mean45206.500->43928.771ms, **-2.826%latency/+2.909%throughput**,
+  pairedreductions1.859/3.774%, Adrift2.109%; allfourcorrespondingcasespositive/allguardsclean. Clocks and
+  placementunfixed, do not promise exactpercentage. Nextcommit/pushthenretainedprofileandPACKqualification.
+- 2026-11-22: empty-grid GPU cost diagnostic completed with identical cross-arm useful-outputhashes:
+  +2304emptyCTAs at64x128 changedgate-16.31us/down+0.37us (noise); +9216 at64x512 gave+52.83/+23.49us;
+  +32256 at16x1024 gave+72.83/+123.61us. Oldgenericdown is NOT the retained-tail earlyreturn kernel.
+  Extraallocation/cache/clocks remainconfounders; these are descriptive deltas, not calibratedperCTA costs.
+  Large empty-grid ratios do NOT imply large runtimecost. No compact-grid/early-shell rewrite from this.
+  Padding inthissubset is only9.58%slots (6.65%for>128experts), not evidence a new dynamic-tail kernel wins;
+  priorforcedJ32 lostreuse. Preserve currentkernel instead of inventinganother specialization from ratios.
+- 2026-11-22: execution-only NULL-marker skipping was checked as a distinct possible remedy for APIshorttails,
+  before implementation. It does not unlock the cold8229fixture: inside considers2048/4096/6144/8192plusatmost
+  one lastturn opener, endpoint8228isaddedlater, atmost6states;8192isreal/protected, notpolicydiscarded.
+  NULLmarks have no savedBlob but still determinebatcharithmetic/progress/cancelpolls; retention simulation
+  itself mustkeepallcandidates. SkippingNULLandbalancing cannotborrowacrossreal8192without changingcache
+  semantics or historicalstatecapture. No code changed or speedclaimed; oldread-balance remainsNOOP here.
 
 ## Completion
 
