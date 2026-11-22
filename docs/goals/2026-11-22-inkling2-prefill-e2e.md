@@ -77,6 +77,8 @@ the current measurements; record untested limitations. Stop on a fresh guard fau
 - Benchmarks use isolated copies of one frozen expert-profile seed, not the live additive profile. Timed measurements
   separate from traces/PMC and diagnostic logging. Freeze can isolate experiments but does not qualify production behavior.
 - Keep server on 127.0.0.1 with its existing API key. Downtime is allowed. No binaries, traces, credentials or model files in Git.
+- Final long HTTP timing uses an equivalent private server/config/profile copy; the actual deployed unit gets
+  the short authenticated answer/tool smoke, not tens of thousands of synthetic tokens added to its live profile.
 - No unrelated refactoring, services or dependencies. Scratch artifacts stay outside Git.
 
 ## Change envelope
@@ -144,9 +146,11 @@ scheduling changes hide most DMA. These are hypotheses, not required implementat
 ## Current checkpoint
 
 - Progresses: R2; R1 verified by P1.
-- Next: promote down-tail as the second baseline; reprofile it. Compare the surviving lane-owned attention and
-  SiTU->MMQ fusion on the model. Replace the default-no-op read rebalance with a same-format checkpoint-copy
-  packing experiment; do not disable prompt checkpoints merely to make the benchmark improve.
+- Next: **promote the qualified KV aggregate-wait improvement**, actual build `e4555437...`, against prior
+  baseline `914336f6`; then profile the retained baseline and rebase the selective2x2 F32 model. Actual-root
+  frozen restore and unfrozen HTTP ABBA passed. SiTU remains unshipped.
+  The query16 lane-owned attention, packed checkpoints and selective2x2 F32 projections remain model candidates;
+  rebase them on each retained baseline. Do not disable checkpoints or merely move measured work afterDONE.
 - Replan on: failure to retain the effect without freeze, correctness mismatch, or fresh profile showing another
   larger actionable cost. A rejected idea is recorded and replaced, not repeatedly retested unchanged.
 
@@ -244,6 +248,9 @@ scheduling changes hide most DMA. These are hypotheses, not required implementat
   `c8a238762cf47e10975f514c5641cfff6a468771816c4d58914c8596cdf94ebe`. Thus the GPU/model/E2E evidence above is
   current for the final source, not inferred across a changed binary. Default-off original path retained;
   no gate/up or decode algorithm change. Ready to promote this second measured baseline.
+- 2026-11-22: down-tail committed/pushed as `914336f6` (P2 binary c8a238... with prefetch/tail enabled). Parent
+  includes the intervening user documentation commit `753b8cdd`; it changes no measured engine code. All future
+  experiments use this retained code/settings as baseline rather than the old P1-only engine.
 - 2026-11-22: actual HTTP/SSE baseline (old `ab8507f1` bytes, private server/config/profile copies, loopback+auth):
   fresh8229-token requests,16outputtokens, zero reused prompt tokens. TTFT(first text, including reasoning)
   13034.7/12803.1ms afterwarmup; role-only SSE header is~9ms and is **not** TTFT. Reasoning-only short generations
@@ -267,7 +274,152 @@ scheduling changes hide most DMA. These are hypotheses, not required implementat
   D2D copies, then one bulk D2H; no new persistent allocation. Preserve all bytes/checkpoints, clear overwritten
   staged-weight metadata, synchronize before reuse, and fall back when unavailable/DSpark. Temporary prototype
   and full-byte/restore validation precede any integration. This is a measured direction change, not a new outcome.
+- 2026-11-22: fresh unfrozen P2 trace after8K warmup: measured8K span8999.561ms, kernel union8571.651,
+  copy union2215.403, overlap2125.825, copy-only89.578, idle338.331. NVFP4 combined3888.697ms
+  (original MMQ2736.351 + native down-tail1152.346), Flash1457.354, Q8_0 MMQ1097.163, smallGEMM375.353,
+  packing181.850, SiTU116.864. New symbol names must not be mistaken for removed work. Checkpoint-related
+  D2H->D2H idle134.714ms persists; fill->H2D107.894ms and D2H->runtimecopy42.080ms. The second baseline
+  keeps P1's overlap; attention/fusion/checkpoint hypotheses remain measurable. Raw `p2-trace/analysis.json`.
+- 2026-11-22: same real HTTP/SSE fixture on retained P2: fresh8229prompt+16output, cached0, first-text TTFT
+  10269.1/10538.4ms versus original13034.7/12803.1ms. Mean12.919->10.404s,19.47% lower latency
+  (24.18% higher reciprocal throughput). Separate private servers/profile copies, same payload/settings;
+  clocks unlocked, not a fine-grained estimate of P2 alone. Role-only headers are excluded. Raw `api-p2`.
+- 2026-11-22: current-P2 knob screen, A/T/C/D/A, warm8K, fresh8K/8229/8704: staged8/16/32 alone
+  9544.8/10044.9/10502.4ms versus A means8960.2/9325.5/10097.6; CPU-share0 alone
+  9018.2/9459.9/10183.2; both9153.4/9501.4/10178.4. **No retained win.** The earlier1-2% staged-tiles
+  result does not survive this baseline/screen. Extra small-class launches only address5.4% of staged rows;
+  reducing CPU work on partial tails is not automatically faster. One sample/arm and uncontrolled initial
+  residency (A1424slots, T1429) do not prove exact regression sizes. Keep existing adaptive/default settings.
+  Raw `p2-knobs-*`, all guards clean.
+- 2026-11-22: packed-state prototype passes actual GPU **full92875776-byte** comparisons at positions93,
+  2048/4096/6144/8192; existing rewind at4096 restores the same six generated IDs as a full read. It also
+  byte-compares short/rewound states at6/4104/4199. No policy/marker change, no new GPU allocation, old serializer
+  used as reference with verification on. Guard clean. Raw `state-pack-verify`, `guard-state-pack-verify`.
+  Verification must be disabled for timing; numerical success alone is not an E2E improvement.
+- 2026-11-22: SiTU->MMQ temporary model at P2, unfrozen ABBA:8K A8993.7/8957.9 ->B8894.0/8885.3ms
+  (+0.969% throughput, both pairs faster, control drift0.40%);32K A43551.5/43503.1 ->B43382.8/43330.0
+  (+0.394%, both faster, control drift0.11%). **16K inconclusive:**A19167.2/19292.1 ->B19310.1/19103.6
+  (+0.119% mean, one pair0.74% slower). Fixed-placement8K+8forced top-10 equals the golden baseline.
+  No GPU faults. Independent kernel review found no blocking arithmetic/index issue. Prepare the minimal
+  opt-in tracked implementation, then qualify that build rather than promoting scratch timing alone.
+  Raw `situ-e2e-*`, `situ-model-parity`, `measured-summary.json`.
+- 2026-11-22: one additional attention hypothesis follows the failed occupancy variants:32query/256thread
+  blocks instead of16/128, still16keys/GQA3/8lanes per query. This doubles KV reuse without the one-head
+  variant's tripled loads; projected1x256 versus2x128 resident threads is not a measured occupancy claim.
+  Compile/strict parity/kernel timing decide whether it survives. Keep only one such geometry, not a blind sweep.
+- 2026-11-22: **query32 rejected.** Actual rawVGPR208->196, LDS18368->19392, no spills; fewer global loads
+  did not translate to throughput. Four512-query geometries are bitwise but6-8% slower:full8K10.299->10.928ms,
+  full32K40.389->43.580, SWA1.328->1.437. The sweep stops at2048/SWA/pos8192 with446 tiny bit differences
+  (max3.73e-9, normalized4.57e-8), although14plain-reference casesPASS. A wider block can execute extra fully
+  masked tiles; investigate compensated-zero updates rather than weakening the strict comparison. No model
+  build/integration/retry, no fresh GPU faults. Raw `attention-query32/`, `guard-att-query32`.
+- 2026-11-22: FP16 packed-state actual-GPU byte verification alsoPASS at93/2048,171442176bytes each. This
+  validates the existing alternate KV layout only; production remains Q8_0. Raw `state-pack-fp16-verify`.
+- 2026-11-22: opt-in lane-probability source uses separate compile-time Flash specializations. Actual native
+  false Q8/FP16 machine bytes/resources equal P2, true equal qualifiedOWNED3, nine non-flash kernels unchanged.
+  Actual host flag0/1 each passes8finite/bitwise GPU geometries;14reference casesPASS on1. No additional timing
+  claim from these unchanged kernel bytes. Model rebase waits for the next retained baseline. Raw
+  `attention-prob/optin-source`, `guard-att-optin-dispatch`.
+- 2026-11-22: query32 arithmetic explained from actual ISA/source: worst differing element isquery43/head0/dim7.
+  Valid keys7212..8235; query32 executes an additional fully masked8240..8255 tile. Withsum0/shrink1 the
+  compensated denominator still computesFP32(l-lc), not necessarilyl; exact-FP32 emulation demonstrates
+  a one-ULP compensation fold. Matched update ISA has the same contraction DAG, so a changed compiler
+  reduction is not needed to explain differences. Internal GPUl/lc were not captured; not a replay of all446
+  elements. Keep query16 and its tile schedule, do not relax parity or pursue the slower query32 geometry.
+- 2026-11-22: provisional tracked SiTU fusion builds on914336f6: `Mmq::situ_nvfp4()` rejects unsupported
+  shapes/devices before writes; Inkling alone sets the default-false flag. Cached/staged fallback keeps the
+  original calls. New85-line kernel uses actual ggml D4 types; its machine bytes equal the qualified scratch
+  kernel, all existing model HIP.text unchanged, Engine bool uses padding.71150CPUcondition casesPASS.
+  Binary `cb6b5dd3bfb2b6862d7d2c79fd1303329cdfcd940fb409e838fb0fc353e5c32b`; actual production GPU/model
+  checks and timing remain required before commit. Artifacts `situ-mmq/production`.
+- 2026-11-22: actual tracked SiTU kernel passes all42GPU packed-byte/canary cases. Actual binary flag0/1 each
+  matches the8K+8forced golden top-10 trace at fixed placement. Active-on banner confirmed, guard clean.
+  This closes tracked numerical/default-off qualification; timing waits until CPU builds finish.
+- 2026-11-22: SiTU review caught a shared-source link regression: a runtime-false call still required the new
+  MMQ symbol in Metal. Restricting the call to the existing HIP compile guard, with old-path false fallback,
+  removes the dependency; no backend implementation/test expansion. Independent review cleared it. Rebuilt
+  gfx1031 **full executable remains byte-identical** cb6b5d..., so all prior tracked GPU checks remain current.
+- 2026-11-22: private actual HTTP smoke on tracked SiTU passes auth401, coherent answer "17 plus25 is42",
+  automatic `add_numbers(a=17,b=25)` call and tool-result answer "42". No external tool/code executed.
+  This is functional qualification, not timed performance. Raw `api-situ-smoke/full-smoke`.
+- 2026-11-22: existing F32 tile screen **rejected**:16shape/row cases full-buffer bitwise, finite and guardsPASS,
+  but2048rows small->tile2304x24 .2215->.3280ms,2304x32 .2233->.3520,2304x64 .4278->.4323,
+  4608x64 .8381->.8550. Short32/77rows are much slower. Actual old selector isout>64, not>=128.
+  Keep it unchanged. The4x4 tile has fewer blocks, more masked output work and lacks the small kernel's
+  next-step global-prefetch pipeline; this screen does not isolate one hardware cause. Raw `gemm-small-tiles`.
+  One different candidate will preserve that pipeline with16x32 blocks,128threads and2x2 FP32 accumulators,
+  reducing LDS data per FMA while keeping input order. No blind geometry sweep and no model claim yet.
+- 2026-11-22: **extended actual-build SiTU ABBA does not qualify a win.** Two rounds of8K/16K/32K, warm8K:
+  mean throughput differences-2.41%/-3.18%/-2.48%; both8Kpairs slower. Raw `situ-prod-e2e-*` is retained,
+  not discarded as a successful test. No commit/push. The helper loops rounds outside lengths: the second16K
+  follows32K->8K. In all four arms that16K spends3558/3708/3561/3573ms before its firstRESUME versus24-50ms
+  normally, at the KV-trim/cache-grow boundary;16K totals22.8-25.2s versus19.3-20.5s initially. A separate
+  slow period spans lateB1/earlyB2; its hardware cause is not established. Do not silently subtract these costs
+  from the end-to-end claim. Raw `situ-prod-history-breakdown.json` separates the existing pre-layer boundary.
+- 2026-11-22: diagnostic trace removes the32K history, keeping8K/16K/8K/16K. Both16K are stable again.
+  Actual GPU union8K8607.86->8540.67 /8659.13->8592.78ms;16K18494.10->18346.66 /
+  18622.67->18490.16. Flash/NVFP4/copy work and overlap remain near-identical; fused packing replaces about
+  150ms separate work with89.5ms per8K. This supports a real local saving, **not** unprofiled E2E qualification.
+  Next isolate mixed-history trim via HIP API and record clocks/power/temperature on the next timed comparison.
+  Raw `situ-prod-repeat-trace-{0,1}`. No fault, and no claim that the negative series was disproved.
+- 2026-11-22: **SiTU closed without promotion.** Local saving is real in the trace, but repeatable unprofiled
+  production E2E gain was not established by the extended test. All seven provisional code changes were
+  removed; tracked engine sources exactly match914336f6 again, private source/binaries/proofs retained. No
+  unqualified flag ships merely for its microbenchmark result. New evidence would be needed to reopen it.
+- 2026-11-22: mixed-history3.5s is independently visible in closed protocol timestamps beforeRESUME, before
+  any model layer. Source has32KVregions and up to100x1ms memory-accounting polls **per region** after address
+  release. Current free-memory baseline is sampled after physical release, so an already visible release can
+  make a target unreachable; this is still a hypothesis until the exact HIP API pattern is checked. Candidate
+  preserves all physical unmap/remap operations, checkpoints, residency policy and same `mind_vram` boundary,
+  but measures before the entire trim and polls once for7/8 of the aggregate bytes, bounded100ms. No new
+  worker/pool and no hiding work outside prompt time. Read-only telemetry will accompany the trace.
+- 2026-11-22: K64-prefetch2x2 F32 screen succeeds numerically for all16cases. At2048rows old->new:
+  2304x24 .22344->.13344ms,2304x32 .22388->.13384,2304x64 .42928->.23704,
+  4608x64 .84385->.45968.512rows also win;32/77rows are1.6-1.8x slower. Preserve those short calls on
+  the old kernel. Actual newVGPR121/allocated128 versus64, LDS12480versus10400, no spills; prefetch survives,
+  but increased resources did not prevent the measured gain. Prepare one opt-in host selection only for the
+  tested shapes androws>=512, then measure the model. Raw `gemm-small-2x2`, no root integration yet.
+- 2026-11-22: exact mixed-history P2 trace confirms the KV hypothesis:32polling series occupy3490.211ms,
+  including3200sleep gaps totaling3473.076ms. Actual polling HIP APIs take10.536ms. Whole trim3517.120ms
+  includes DeviceSync0.132ms,288Unmap14.713ms,128Release3.028ms,32AddressFree/Reserve and160Map/SetAccess.
+  Subsequent refill26.498ms host wall, not3.5s. This proves repeated waits, not the precise free-byte accounting
+  cause; current CSV lacks MemGetInfo return values. Prototype diagnostics will capture them and actual refill.
+  Raw `kv-mixed-trace-baseline`, read-only CPU analysis; no hardware fault.
+- 2026-11-22: read-only telemetry on that trace records clocks/power/fan/temperature and process page faults.
+  Busy GPU clocks are around2.26GHz, hotspot rises to92C during the last32K. The pre-layer wait lets GPU idle;
+  all-sample clock means therefore cannot be used to normalize kernel throughput. No retrospective claim
+  that thermal throttling caused the earlier SiTU outliers. Raw `kv-mixed-trace-baseline.telemetry.jsonl`.
+- 2026-11-22: private batch-release prototype `5bcd495e...` built from frozen P2; control relinks exactly to
+  `c8a23876...`. No new fields/vtable entries/GPU code. Source operation oracle and69native CPU driver-stub
+  cases pass. Independent source review finds no blocker; timeout/external VRAM activity can still change
+  refill through the existing fresh `mind_vram()` sample, so do not promise identical refill from the7/8 target.
+- 2026-11-22: first **unfrozen** rewind/full-read equality fails in the batch arm. Native VRAM expert hits differ
+  4055vs4961out of5376, so this is not a controlled numerical comparison. Nothing committed or waved through.
+  Repeated the exact32K->8K->16K,14,336checkpoint fork and full reread with frozen placement and3072MiB reserve
+  (validation only, enough KV headroom): **both modes pass six-token equality within each process**. Initial
+  slots1187vs1185 differ, so no cross-process bitwise claim. Old/new trim2033.994->18.254ms; both free285212672B,
+  new free2602684416->2887897088 exactly matches that delta, exceeds2852245504target without extra sleeps.
+  An additional68MiB trim also passes and falls1857.183->12.212ms. Diagnostic timings, not final performance.
+  Raw `kv-prototype-{frozen-,}restore-*`; all guards clean.
+- 2026-11-22: actual opt-in2x2 F32 API dispatcher passes all16finite/full-buffer-bitwise/canary cases with
+  flag0 and1, including short fallback. All141old GPU kernels remain identical; sole added kernel matches
+  the qualified standalone. Canonical object `gemm-small-2x2/optin-source/kernels_optin.o`; model still pending.
+- 2026-11-22: applied only production VMM `engine.cpp/hpp` draft, without temporary diagnostics; build passes
+  on gfx1031. Stable binary `kv-release-batch/production/strata-poly-kv-release`, SHA
+  `e4555437d9532c3610f562960ed55cebe4cc95465b2587e89acbfc7203b1e577`. **All20,355,104embedded HIP fatbin bytes
+  equal P2**, not merely sampled kernels. No rejected SiTU object/member remains. Source review clears actual
+  diff. Actual-root frozen restore followed by HTTP ABBA is in progress; no VMM performance promotion yet.
+- 2026-11-22: **actual-root KV qualification succeeds.** Frozen actual-root14,336rewind and full reread
+  produce the same six IDs. Unfrozen private HTTP A/B/B/A, exact same binary off/on, fresh-profile copies,
+  body sequence32768/8192/16384 and16completion tokens: actual prompts32805/8229/16420, cached0 everywhere.
+  Last-request TTFT24,164.64/24,482.80ms ->20,688.92/20,806.44ms: **-14.70% mean latency**, paired-14.38/-15.02%.
+  This includes the real pre-layer wait, not a renamed timing bucket. First32K control44,548.36->44,588.48ms
+  (+0.09%, A/A0.11%); no causal8K gain claimed because that request does not trim. Cache after refill:
+  A1362/1354, B1356/1362; adaptive placement varied, not a fixed-capacity test. No systematic refill loss
+  observed, and no claim it must be identical under external VRAM activity or timeout. All guards clean,
+  both B logs confirm actual batch activation. Raw `kv-api-production-*`, summary JSON and telemetry.
+  Retain this opt-in; production deployment is still pending. Next commit/push, reprofile, then F32 model.
 
 ## Completion
 
-Pending R1-R3; final qualified commits, deployment and remaining limitations will be recorded here.
+R1 and R4 verified; R2 and R3 remain open. Final qualified commits, deployment and remaining limitations will be recorded here.

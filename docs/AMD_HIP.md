@@ -757,6 +757,22 @@ IQ4_XS/Q8_0/batch2048 settings above, unfrozen A/B/B/A measured 8K 900-903 -> 90
 weight/activation formats and the default-off path are unchanged. The K128 full-kernel experiment was not kept:
 it accelerated down but slowed gate/up; this narrower change avoids that regression.
 
+`STRATA_INKLING_BATCH_KV_RELEASE=1` (opt-in, gfx1031, VRAM pool off) waits for free-memory accounting once
+after a KV trim, instead of once per KV region. The device barrier, release/remap operations, retained
+addresses, KV policy and subsequent expert-cache refill stay on their existing paths. The wait allows at
+most 100 one-millisecond sleeps; scheduler and API time can make it longer than 100 ms. Other releases keep
+their old waits. External VRAM activity or a timeout can still change how much the cache refills.
+
+On the same RX 6700 XT / Ryzen 7 5700X / TheRock 7.13, with prefetch and down-tail enabled, batch 2048,
+Q8_0 growing KV, 200K capacity and a 2048 MiB reserve, four private HTTP server starts in A/B/B/A order
+read fresh 32K -> 8K -> 16K body-token requests. Actual prompt lengths were 32805, 8229 and 16420; all had
+zero cached tokens. The last request triggered a 272 MiB KV trim. Its first nonempty SSE text, including
+reasoning, arrived at 24.165/24.483 s off versus 20.689/20.806 s on: 14.7% less mean TTFT, with both pairs
+positive. Clocks were not locked and expert placement was adaptive. The first 32K control was 0.09% slower
+on average, within its 0.11% A/A drift. This is a context-shrink improvement, not a steady 8K speed claim.
+No GPU kernel or format changes: the complete HIP fatbin matches `914336f6`. Checkpoint rewind/full-read
+checks used fixed placement separately; unfrozen placement is not a bitwise numerical control.
+
 ## gfx906 (Instinct MI50 / MI60, Radeon VII): wave64, built from source
 
 gfx906 is wave64 and has no WMMA and no packed byte arithmetic, so the wave32 backend above refuses it. A separate opt-in build compiles the CUDA sources as HIP through a small compat layer

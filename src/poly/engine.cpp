@@ -921,7 +921,7 @@ void Engine::vmm_map(Mapped& m, size_t bytes, size_t piece, const char* what) {
 }
 
 // Gives back the pieces of m that lie past its first `bytes`.  The card must be done with them.
-void Engine::vmm_unmap(Mapped& m, size_t bytes) {
+void Engine::vmm_unmap(Mapped& m, size_t bytes, bool wait) {
     const size_t had = m.mapped;
     while (!m.pieces.empty() && m.mapped - m.pieces.back().second >= bytes) {
         const auto [h, n] = m.pieces.back();
@@ -973,14 +973,15 @@ void Engine::vmm_unmap(Mapped& m, size_t bytes) {
         at += n;
     }
     // amdgpu counts the VRAM as free 2 to 5 ms later: a reading before that (mind_vram()'s log line, cover()) is
-    // short by what was given back.  At most 100 ms, as another program may take VRAM meanwhile.
+    // short by what was given back. Limit the wait to 100 one-millisecond sleeps; another program may take VRAM meanwhile.
     const size_t back = (had - m.mapped) / 8 * 7, want = free_b + back;
-    for (int i = 0; i < 100 && free_b < want; ++i) {
+    for (int i = 0; wait && i < 100 && free_b < want; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         (void) cudaMemGetInfo(&free_b, &total_b);
     }
 #else
     (void) had;
+    (void) wait;
 #endif
 }
 
@@ -1362,11 +1363,40 @@ size_t Engine::trim_card_kv(int64_t end) {
     if (rows >= kv_rows_) return 0;
     OnCard here(device_, split_);
     ck(cudaDeviceSynchronize(), "the attention cache");
+    bool batch = false;
+    size_t free_before = 0, free_after = 0, total_b = 0;
+#if defined(STRATA_USE_HIP) && defined(STRATA_VMM_RELEASE_WITH_ADDRESSES)
+    // Inkling is the only looped_ engine. Query the active card only for a requested, actual trim.
+    if (looped_ && !pool_on_) {
+        const char* asked = std::getenv("STRATA_INKLING_BATCH_KV_RELEASE");
+        if (asked && asked[0] == '1' && asked[1] == '\0') {
+            cudaDeviceProp prop = {};
+            if (cudaGetDeviceProperties(&prop, device_) == cudaSuccess &&
+                std::strncmp(prop.gcnArchName, "gfx1031", 7) == 0 &&
+                (prop.gcnArchName[7] == '\0' || prop.gcnArchName[7] == ':'))
+                batch = cudaMemGetInfo(&free_before, &total_b) == cudaSuccess;
+        }
+    }
+#endif
     size_t freed = 0;
     for (Kv& k : kv_) {
         const size_t had = k.mapped;
-        vmm_unmap(k, (size_t) ((rows + k.per - 1) / k.per) * k.bytes);
+        vmm_unmap(k, (size_t) ((rows + k.per - 1) / k.per) * k.bytes, !batch);
         freed += had - k.mapped;
+    }
+    size_t want = free_before;
+    if (batch && freed > 0) {
+        want += freed / 8 * 7;
+        free_after = free_before;
+        (void) cudaMemGetInfo(&free_after, &total_b);
+        for (int i = 0; i < 100 && free_after < want; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            (void) cudaMemGetInfo(&free_after, &total_b);
+        }
+        static const int logged = std::fputs(
+            "strata-poly: STRATA_INKLING_BATCH_KV_RELEASE=1: batch KV release polling on gfx1031; "
+            "at most 100 one-millisecond sleeps\n", stderr);
+        (void) logged;
     }
     kv_rows_ = rows;
     return freed;

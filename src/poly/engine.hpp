@@ -621,7 +621,7 @@ protected:
     };
     void vmm_reserve(Mapped& m, size_t bytes);
     void vmm_map(Mapped& m, size_t bytes, size_t piece, const char* what);
-    void vmm_unmap(Mapped& m, size_t bytes);
+    void vmm_unmap(Mapped& m, size_t bytes, bool wait = true);
     void vmm_free(Mapped& m);
     /// The pool (Options::vram_pool): handles of pg_ bytes, claimed once, that the maps take from and the unmaps give to.
     void vpool_claim(size_t bytes);
