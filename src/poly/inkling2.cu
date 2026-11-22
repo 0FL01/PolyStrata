@@ -914,6 +914,20 @@ bool Inkling2::try_pack_state(uint8_t* dst) {
             if (p.stride != stride || (stride && !p.data)) return false;
         }
 
+    // Fault this checkpoint in parallel before the bulk D2H.
+    if (workers_ && workers_->threads() > 1) {
+        constexpr size_t kTouchJob = size_t(2) << 20;
+        const int jobs = (int) (bytes / kTouchJob + (bytes % kTouchJob != 0));
+        const auto touch_pages = [dst, bytes](int job) {
+            constexpr size_t kJob = size_t(2) << 20, kStep = 4096;
+            const size_t first = (size_t) job * kJob, end = std::min(bytes, first + kJob);
+            volatile uint8_t* const out = dst;
+            for (size_t at = first; at < end; at += kStep) out[at] = 0;
+            if (first < end) out[end - 1] = 0;
+        };
+        workers_->run(jobs, std::ref(touch_pages));
+    }
+
     // stage_ no longer holds weights, including if an enqueue below throws. clear() retains capacity.
     staged_.clear();
     staged_il_ = -1;

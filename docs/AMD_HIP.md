@@ -820,6 +820,16 @@ and FP16 state images match the old serializer, including short padding and Q8 S
 model traces match the old golden. Same RX 6700 XT/5700X/HIP7.13 and production settings as above, clocks
 and cache placement unlocked. The production binary contains no byte-comparison or timer instrumentation.
 
+With more than one existing CPU worker, the same PACK path now first-touches only the current output Blob's
+pages before D2H. No additional flag, buffer, allocation policy or worker is added. Plain timing including
+dispatch, page faults and join measured about 27.43 -> 13.55 ms per Q8 checkpoint, still 22674 minor faults.
+Against the previous PACK build `09304bb1...`, actual-build short HTTP ABBA (warm then two fresh 131-token
+prompts, 16 output tokens, zero cached input) measured TTFT 1.149 -> 1.107 s: 3.69% lower, pairs 4.72%/2.64%,
+A/A drift -1.68%. Same hardware/settings; desktop activity and clocks were not controlled. The prototype
+also improved bare94 by 2.52%, but 2K was flat and the extra 8K API gain was below drift: no all-length claim.
+PACK-off, unsupported cases and single-thread behavior stay unchanged. GPU fatbin is byte-identical to the
+previous PACK build; actual Q8/FP16 images and forced model traces pass the same checks.
+
 ## gfx906 (Instinct MI50 / MI60, Radeon VII): wave64, built from source
 
 gfx906 is wave64 and has no WMMA and no packed byte arithmetic, so the wave32 backend above refuses it. A separate opt-in build compiles the CUDA sources as HIP through a small compat layer

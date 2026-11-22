@@ -85,6 +85,8 @@ the current measurements; record untested limitations. Stop on a fresh guard fau
 
 - `src/poly/engine.*`, `inkling2.*`, `inkling_attend.*`, `mmq*`, local kernels and their declarations/direct callers;
   CMake/tests only when a retained change requires a target or a concrete regression check. Docs for measured settings.
+- `rdna2-rnd/scripts/run_guarded.py` only for the reproduced R2 safety-gate blocker: journald byte-array text
+  decoding without changing fault patterns, monitoring, termination or the VRAM floor (checkpoint history below).
 - Work on `main`, push task commits to `origin/main`. After qualification install the production binary and only its
   measured opt-in switches, with a rollback copy. Preserve unrelated configuration and decode optimizations.
 
@@ -590,6 +592,26 @@ scheduling changes hide most DMA. These are hypotheses, not required implementat
   MinimalenvelopeadditionforR2/R3: `rdna2-rnd/scripts/run_guarded.py` mustdecodejournald'sknownbyte-array
   textform for MESSAGE/source fields, keepunknownformsfatal. Rawjournals/faultpatterns/floor/termination
   unchanged. CPUreplay+invalidtypechecks andguarded`true`verify beforefreshABBAunderexistingdesktopload.
+- 2026-11-22: guardfix committed/pushed**6e52c12e**; inferencebinary093unchanged. Completefreshpage-touch
+  v2ABBA passedallguards; nointerruptedB2datareused. API8229mean9888.078->9856.930ms(-0.315%),
+  pairs0.543/0.089%, Adrift0.695%: inconclusive. Bare94mean462.125->450.475ms(-2.521%),
+  pairs2.047/2.999%, Adrift-.830%;2Kmeanexactlyflat/pairsopposite. Warm8192actuallyread8192inallshort
+  controls afterfixturefix. Do not extrapolate shortgain toalllengths; desktopVLCremaineduntouched.
+- 2026-11-22: shortactualHTTPproto confirmsappropriateworkload: 131prompttokens(body94+template),16output,
+  cached0, warm+2freshperprocess, sameoriginalsettings/all6baseflags, nofreeze. A1[1134.332,1168.727],
+  B1[1119.171,1124.912], B2[1094.029,1108.659], A2[1136.210,1156.303]ms.
+  Mean1148.893->1111.693ms(**-3.238%TTFT**), pairs2.561/3.918%, Adrift-.458%, allfourcasespositive,
+  allguards clean. Proceedtoactual-root13lineadoptioninsidePACK1/threads>1; no newpermanentTOUCHflag.
+  Build/native/actualshortAPIqualification pending. DefaultPACK0/fallback/serialpoolstayunchanged.
+- 2026-11-22: actual13lineRootadoption**ebab4fad...** qualifies, oldPURE093vsnewPUREbothPACK1;
+  noTOUCHflag/timer/verificationinproduction. WholeGPUfatbin/all29modulesrawbyte-identical093,
+  other22linkinputs/vtables392unchanged. ActualDIAGfullQ8pos93/2048/4096/6144/8192andFP16pos93/2048
+  pass; PURE8Kforcedgoldenmatches. ShortHTTP131+16cached0 ABBA:
+  A1[1156.340,1161.189], B1[1107.027,1101.083], B2[1102.043,1116.330], A2[1127.800,1150.831]ms.
+  Mean**1149.040->1106.621ms(-3.692%TTFT)**, pairs4.721/2.644%, Adrift-1.678%; allfourcasespositive,
+  allguards clean. Keepconservativeworkload-specificclaim; long8Kextraeffectinconclusive, 2Kflat.
+  Retainthislastsmallwin, then closehypothesismap and runfinaloriginal-vs-final/API/deployment. No new
+  investigationbranchfromremaininglow-shareceilings; globaloptimum,200Kthroughputandotherhardwareuntested.
 
 ## Completion
 
