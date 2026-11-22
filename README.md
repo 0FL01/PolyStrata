@@ -2,8 +2,109 @@
 
 **English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Türkçe](README.tr.md)
 
-<p align="center"><b>Run large AI models on your own PC</b><br>
-Qwen3.8-Flash-Next, GLM 5.3 Flash, DeepSeek V4 Flash, LFM2.5, Flint, Qwen3.6, Clover, Ornith 1.5, Gemma 4, Tiel Coder, MiniCPM-V and Kolibri 1 · free and open source</p>
+<p align="center"><b>Run Inkling-2-Mini on AMD RDNA2</b><br>
+Local inference with HIP and system RAM · free and open source</p>
+
+This PolyStrata fork builds on [Strata](https://github.com/Niko1221/Strata) and targets AMD RDNA2.
+[Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini) runs natively in `strata-poly` on Linux
+using one Radeon GPU. Frequently used expert weights stay in VRAM; the CPU runs the experts that stay in system RAM.
+
+- **Chat and coding agents:** streamed answers and reasoning, and JSON tool calls with tool results passed back by
+  ID. One request runs at a time.
+- **Images:** an [optional CPU encoder](tools/vision/INKLING.md) stays loaded in system RAM instead of using VRAM.
+- **Context:** growing Q8_0 key/value cache with a configured limit of 200,000 tokens on the tested setup.
+
+## Inkling-2-Mini performance
+
+**About 992 tokens/s reading a fresh 2K prompt and 46–50 tokens/s writing in short agent requests.**
+Measured separately on an **RX 6700 XT (12 GiB, `gfx1031`)** with a Ryzen 7 5700X, 32 GiB of RAM, TheRock HIP 7.13,
+and Unsloth's `UD-IQ4_XS` GGUF. Both benchmarks used Q8_0 KV and no DSpark drafter.
+
+| Prompt length | Before the latest prefill changes | With the latest prefill changes |
+| ---: | ---: | ---: |
+| 2,048 tokens | 764 tok/s | **992 tok/s** |
+| 8,192 tokens | 736 tok/s | **937 tok/s** |
+| 16,384 tokens | 695 tok/s | **883 tok/s** |
+| 32,768 tokens | 628 tok/s | **780 tok/s** |
+| 65,536 tokens | 518 tok/s | **628 tok/s** |
+
+**Prompt reading (prefill):** 21–30% faster from `ab8507f1` to `cb75238a` with the prefill opt-ins enabled. Both
+builds used an 8K warm-up and fresh, uncached prompts. For an uncached 8,229-token HTTP prompt, the first streamed
+reasoning or answer text arrived in **9.79 s instead of 12.65 s** (23% sooner). The 200,000-token limit is a
+capacity setting; prefill throughput was measured up to 65,536 tokens.
+[Prefill measurements and settings](docs/goals/2026-11-22-inkling2-prefill-e2e.md#final-measured-account).
+
+**Answer writing (decode):** at `ab8507f1`, live short agent requests ran at **46.5–49.8 tok/s**. In a separate
+paired run, decode after a 16K prompt went from **33.3 to 41.0 tok/s** versus `32b3fc6f`.
+[Decode measurements](docs/goals/2026-11-21-inkling2-decode-stalls.md#checkpoint-history).
+[DSpark is optional](docs/goals/2026-11-21-inkling2-dspark.md#completion); it did not meet the speed target and
+was left off.
+
+## Run Inkling-2-Mini
+
+Inkling is not in the interactive installer yet. On Linux, set up the [HIP build prerequisites](docs/AMD_HIP.md#build)
+and get [Unsloth's `UD-IQ4_XS` GGUF](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF/blob/main/Inkling-2-Mini-UD-IQ4_XS.gguf)
+(14.7 GiB). This example targets the tested RX 6700 XT (`gfx1031`).
+
+<details>
+<summary>Build and run on the RX 6700 XT</summary>
+
+From the repository root, with a Python virtual environment active and the ROCm toolchain available:
+
+```sh
+python -m pip install -r requirements.txt
+cmake -S . -B build-inkling -DCMAKE_BUILD_TYPE=Release \
+  -DSTRATA_ENABLE_HIP=ON -DSTRATA_ENABLE_CUDA=OFF -DCMAKE_HIP_ARCHITECTURES=gfx1031
+cmake --build build-inkling --target strata-poly -j4
+python tools/strata_tokenizer.py --gguf /path/to/Inkling-2-Mini-UD-IQ4_XS.gguf --out packs/inkling2
+```
+
+Save this as `strata-inkling-2-mini.json` in the repository root, using the same GGUF path as above.
+The `env` block includes the speed options used in the measurements; they are not engine defaults.
+
+```json
+{
+  "exe": "build-inkling/strata-poly",
+  "cwd": ".",
+  "backend": "hip",
+  "model_name": "inkling-2-mini",
+  "tokenizer": "packs/inkling2/tokenizer",
+  "args": ["--model", "/path/to/Inkling-2-Mini-UD-IQ4_XS.gguf",
+           "--max-context", "200000", "--kv", "q8_0", "--prompt-batch", "2048",
+           "--vram-reserve-mib", "2048", "--threads", "8", "--expert-swaps", "64",
+           "--conversation-cache-mib", "0"],
+  "env": {
+    "DEBUG_HIP_DYNAMIC_QUEUES": "0",
+    "STRATA_HIP_NVFP4_MMQ": "1",
+    "STRATA_INKLING_FLASH": "1",
+    "STRATA_POLY_DIRECT_STAGE": "1",
+    "STRATA_INKLING_DECODE": "1",
+    "STRATA_INKLING_PREFETCH": "1",
+    "STRATA_HIP_NVFP4_TAIL": "1",
+    "STRATA_INKLING_BATCH_KV_RELEASE": "1",
+    "STRATA_HIP_SMALL_GEMM_2X2": "1",
+    "STRATA_INKLING_LANE_PROB": "1",
+    "STRATA_INKLING_STATE_PACK": "1"
+  }
+}
+```
+
+```sh
+python -m serve.server --engine strata --config strata-inkling-2-mini.json --host 127.0.0.1 --port 8080
+```
+
+</details>
+
+Open the web chat at `http://127.0.0.1:8080` or use `http://127.0.0.1:8080/v1` as the OpenAI-compatible base
+URL for your app. Keep the server on loopback unless you set an API key.
+
+## Other models
+
+The catalog, demos and benchmarks below are inherited from PolyStrata and Strata. They are not results from this
+fork's Inkling testing. This fork targets AMD RDNA2; other backends are outside its scope.
+
+<details>
+<summary>Other models, their setup guides and earlier benchmarks</summary>
 
 <p align="center"><img src="docs/media/speed.svg" width="820" alt="Tokens per second while writing an answer: 94 to 100 for Qwen3.6-35B-A3B on a laptop with an 8 GB card, 394 to 395 on an RTX 5090"></p>
 
@@ -20,7 +121,7 @@ with your apps and coding agents. Nothing leaves your PC.
 [Linger](https://github.com/simplexai-labs/linger) is an open-source personal agent that runs locally on your computer.
 Its local models run on PolyStrata.
 
-It runs twelve models, on two engines:
+The inherited catalog has twelve models on two engines:
 
 - **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)** on an NVIDIA or AMD graphics card with
   12 GB or more, on Windows or Linux. It also reads pictures. Its engine is the Strata project's, unchanged.
@@ -56,7 +157,7 @@ PolyStrata was created by [VecSzn](https://github.com/VecSzn).
 PolyStrata is built on [Strata](https://github.com/Niko1221/Strata) by Niko1221.
 Why it is a separate repo, AMD and smaller cards, fine-tunes and other questions: [FAQ](docs/FAQ.md).
 
-## How fast is it?
+### How fast is it?
 
 A token is about ¾ of a word.
 
@@ -91,7 +192,7 @@ What others measured on their own cards, and how to compare with llama.cpp on yo
 On the laptop PolyStrata read prompts 2.7 to 3.5 times as fast as llama.cpp b11540 and wrote 1.5 to 1.8 times
 as fast, with Qwen3.6 and with Tiel Coder ([the two runs](docs/COMMUNITY_BENCHMARKS.md#comparing-with-llamacpp)).
 
-## How much RAM it keeps
+### How much RAM it keeps
 
 Since 0.1.45-poly.7 the engine of the eleven models keeps less of your RAM: it no longer holds the parts of the
 model file that are already on the graphics card. On the laptop, Qwen3.6-35B-A3B after a 32,000-token prompt held
@@ -143,7 +244,7 @@ The engine also needs 350 to 400 MiB less VRAM for reading prompts: the expert c
 experts in VRAM instead of 2,444), or `--vram-reserve-mib` leaves it to other programs.
 How it works and how it was measured: [docs/BACKENDS.md](docs/BACKENDS.md#less-of-the-pcs-ram-and-vram).
 
-## What you need
+### What you need
 
 | Model | Graphics card | RAM (the installer's size) | Disk | System |
 | --- | --- | --- | --- | --- |
@@ -164,9 +265,9 @@ RAM is the installer's estimate; a larger card needs less. The installer sets up
 
 What Qwen3.6, Clover, Ornith 1.5, Gemma 4, Tiel Coder and MiniCPM-V each need and how it was checked: [docs/BACKENDS.md](docs/BACKENDS.md#install).
 
-## Install
+### Install
 
-### Let your AI set it up
+#### Let your AI set it up
 
 Do you use an AI coding assistant (Claude Code, Cursor, Codex, GitHub Copilot, ...)? Paste this into it:
 
@@ -178,7 +279,7 @@ It checks your graphics card, RAM and disk and picks the model that fits. Then i
 you how to connect your apps. AI tools can also install, start and stop PolyStrata through its
 [MCP server](docs/MCP_SERVER.md).
 
-### Or do it yourself
+#### Or do it yourself
 
 [Download PolyStrata](https://github.com/simplexai-labs/PolyStrata/archive/refs/heads/main.zip) and unzip it (or `git clone` it).
 **Windows:** double-click **`START-HERE.bat`**. **Linux:** run **`./setup.sh`** in the PolyStrata folder.
@@ -216,7 +317,7 @@ several cards, where the files go and every option: [docs/INSTALL.md](docs/INSTA
 
 **Is it fast on your PC?** Run `BENCH.bat` (`./bench.sh`): about 5-10 minutes, it measures chat, 4K/16K prompts and an agent-style session with your own settings and writes a report to share ([how](docs/COMMUNITY_BENCHMARKS.md#run-the-benchmark)).
 
-## Which model should I pick?
+### Which model should I pick?
 
 The same model comes in several sizes, compressed more or less: smaller sizes are faster and need less RAM, larger ones are closer to the original. The installer takes one for your RAM and card when you press Enter; for another size add `--model <size>` when you install.
 
@@ -237,7 +338,7 @@ The same model comes in several sizes, compressed more or less: smaller sizes ar
 
 What each size is, its download, the RAM it needs beside other cards and how close it comes to the largest: each model's page, linked from the table under "How fast is it?".
 
-## Using it
+### Using it
 
 All twelve models are used the same way: the same app, the same API.
 
@@ -268,7 +369,7 @@ Where they differ:
 
 More: [where your chats are stored](docs/INSTALL.md#where-things-are-stored), [the API](docs/DETAILS.md#using-it).
 
-### Optional: more speed on one card when the whole model fits in RAM
+#### Optional: more speed on one card when the whole model fits in RAM
 
 Two opt-in settings (by RubenTorney, #1904 and #1905). They help when you run one graphics card and your RAM holds
 every expert (PolyStrata's arena mode, for example Q2_0 or IQ3_XXS on a 64 GB PC). Open your config,
@@ -288,7 +389,7 @@ every expert (PolyStrata's arena mode, for example Q2_0 or IQ3_XXS on a 64 GB PC
 
 Restart PolyStrata (`START-HERE.bat` or `./setup.sh`) after the change. To undo, remove the two entries.
 
-## Something went wrong?
+### Something went wrong?
 
 - **My PC froze the first time PolyStrata started.** This is normal while it loads the model. Wait, and don't close the
   window. Still frozen after 10 minutes? Restart the PC, close other programs and try again, or pick a smaller size.
@@ -302,7 +403,7 @@ More problems and their fixes: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md
 [issue](https://github.com/simplexai-labs/PolyStrata/issues) and attach `strata-<model>.log` from the PolyStrata folder. Found a
 security problem? Report it privately: [SECURITY.md](SECURITY.md).
 
-## How does it work?
+### How does it work?
 
 Models like these usually run on servers with hundreds of gigabytes of graphics memory. Your graphics card has
 8-32 GB. PolyStrata makes the model fit by **sharing the work across your whole PC**. Think of a kitchen: the things
@@ -310,8 +411,11 @@ you use all the time stay on the counter, and the rest waits in the pantry.
 
 Each model's diagram and how it works: [docs/HOW_IT_WORKS_MODELS.md](docs/HOW_IT_WORKS_MODELS.md).
 
+</details>
+
 ## Credits and license
 
+Inkling-2-Mini is by Thinking Machines Lab; the GGUF above is quantized by Unsloth.
 Qwen3.8-Flash-Next is by the [Qwen team](https://huggingface.co/Qwen/Qwen3.8-Flash-Next). It was compressed by
 [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF), UkisAI (Swift 1.5) and Unsloth.
 GLM 5.3 Flash runs from the files of
