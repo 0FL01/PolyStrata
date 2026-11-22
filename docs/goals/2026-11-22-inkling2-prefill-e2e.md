@@ -1,6 +1,6 @@
 # Goal: faster end-to-end Inkling prefill on RDNA2
 
-Status: active
+Status: complete
 Source: user direction of 2026-11-22, copied below; the same day's measured prefill RECON.
 Last updated: 2026-11-22
 
@@ -55,13 +55,18 @@ the current measurements; record untested limitations. Stop on a fresh guard fau
   - Acceptance: measured successful and unsuccessful experiments recorded here, priorities updated from the latest
     timeline, each retained improvement committed/pushed to main before becoming the next baseline.
   - Primary evidence: checkpoint history, per-stage commits and paired runs, fresh profiles.
-  - Status: in_progress
+  - Status: verified
+  - Evidence: retained task commits through cb75238a; all positive/negative checkpoints below, final default-off
+    golden and retained profile, complete original-vs-final2K–64K and HTTP ABBA. No surviving unqualified prototype.
 - R3: Production deployment and final measured account.
   - Source: "деплой в прод", "в финале покажи измеренные результатыы, неудачные подходы и оставшиеся ограничения".
   - Acceptance: tested final binary/config installed with rollback, authenticated local server and live answer/tool
     checks pass; final summary includes measured gains, rejected ideas, limitations.
   - Primary evidence: production binary hash, `strata.service`, authenticated live checks and final report.
-  - Status: pending
+  - Status: verified
+  - Evidence: exact final ebab4fad... installed as strata-poly-ebab4fadff6f; active user unit, running /proc/exe
+    and all six flags checked. Local401 without the preserved key, coherent answer and inert tool roundtrip pass.
+    Original config/binary retained for rollback; final account and limitations below.
 - R4: Durable, editable goal with the plan and user directive.
   - Source: "Делай копию плана и моей подсказки в цель ... в эту глину пиши удачи/неудачи".
   - Acceptance: this file retains source intent, hypothesis map, current evidence and next action.
@@ -147,17 +152,17 @@ scheduling changes hide most DMA. These are hypotheses, not required implementat
 
 ## Current checkpoint
 
-- Progresses: R2; R1 verified by P1.
-- Next: retained baseline is **`c9bb85d9`**, actual build `09304bb1...`, with prefetch, down-tail, batch-KV,
-  selective2x2 F32, OWNED16 and PACK enabled. Test the faulting cost exposed by plain snapshot timing as
-  one remaining concrete private prototype, then final original-vs-final/production. F32's32K HTTP gain is verified;
-  its8K API screen remains inconclusive.
-  Empty-grid MMQ cost is small; no compact-grid mechanism is justified by that screen. Production is pending.
-  Actual-root VMM frozen restore and unfrozen HTTP ABBA passed. SiTU remains unshipped; production not deployed.
-  The query16 lane-owned attention, packed checkpoints and selective2x2 F32 projections remain model candidates;
-  rebase them on each retained baseline. Do not disable checkpoints or merely move measured work afterDONE.
-- Replan on: failure to retain the effect without freeze, correctness mismatch, or fresh profile showing another
-  larger actionable cost. A rejected idea is recorded and replaced, not repeatedly retested unchanged.
+- Closed: R1/R2/R3/R4 verified; no pending implementation or qualification.
+- Next: all retained changes are committed/pushed through **`cb75238a`**, actual build **`ebab4fad...`**.
+  Prefetch, down-tail, batch-KV, selective2x2 F32, OWNED16 and PACK are enabled; parallel first-touch is inside
+  PACK, not another flag. Final default-off golden, retained8K profile, original-vs-final2K–64K ABBA and
+  original-vs-final HTTP all passed. This exact ELF is installed and serving the authenticated local unit;
+  final measured account, production checks and rollback are below. Stop substantive work.
+- Hypothesis map is closed: no surviving unqualified promising prototype. SiTU and failed geometry/knob
+  variants remain unshipped. Empty-grid/common-input-pack bounds do not justify larger mechanisms. Numerical
+  checks, cache policy and measured-work boundaries are preserved; no claim of a global optimum or200K speed.
+- Replan only on a related final-comparison regression, correctness mismatch or fresh safety fault. Do not
+  reopen rejected branches or add an unrelated audit after the closure evidence passes.
 
 ## Checkpoint history
 
@@ -613,6 +618,77 @@ scheduling changes hide most DMA. These are hypotheses, not required implementat
   Retainthislastsmallwin, then closehypothesismap and runfinaloriginal-vs-final/API/deployment. No new
   investigationbranchfromremaininglow-shareceilings; globaloptimum,200Kthroughputandotherhardwareuntested.
 
+## Final measured account
+
+Original installed code `ab8507f1` (recorded by `a27c4a6c`, binary6b417311...) versus final code
+`cb75238a`, binary`ebab4fadff6f978158deb051f939c7511c84e47d343ba7b2255f240a7b0cc693`.
+Same RX6700XT gfx1031, Ryzen5700X, 32GiB, TheRockHIP7.13; same IQ4_XS model, growingQ8_0 KV,
+200000capacity, batch2048, reserve2048MiB, threads8, swaps64, cache0, noDSpark. No expert skipping or
+precision/model-work reduction. Private frozen-profile copies, warm8K, fresh uncached prompts, ABBA,
+one output token. Clock and adaptive initial placement unlocked; ordinary desktop/VLC was not stopped.
+
+| Prompt tokens | Original tok/s | Final tok/s | Throughput gain |
+|---:|---:|---:|---:|
+|2048|763.6|991.9|29.90%|
+|8192|736.2|937.4|27.32%|
+|16384|695.0|883.1|27.06%|
+|32768|628.4|779.8|24.08%|
+|65536|517.7|627.7|21.23%|
+
+These use mean engine prompt_ms, not kernel timers. Both pairs are positive at every length; absolute
+original A/A drift is below0.7%. Fixture hashes agree across all arms; reused0 and actual token counts checked.
+Actual HTTP ABBA, 8229prompt+16output, first nonempty reasoning/content TTFT, warm+2fresh perprocess,
+cached0: **12.654423->9.789203s, -22.642%latency** (+29.269% reciprocal), paired reductions22.963/22.321%,
+A/A drift-0.234%. Role-only events are not TTFT; these short outputs are not coherence proof.
+Independent rolling-baseline context-shrink test (32K->8K->16K) reduced16420-token HTTP TTFT
+24.324->20.748s(-14.70%); do not add that percentage to the final steady8K gain.
+
+Final8K trace: span8749.897ms, kernelunion8465.972, copyunion2241.408, overlap2155.220, idle197.738.
+NVFP4 legacy+tail3938.470ms, Flash1410.968, F322x2208.186. Dispatch sums are not additive wall shares;
+NVFP4 and longer-prefix full attention remain the large compute costs. Final default-off8K+8forced printed
+top10 trace matches the old golden. Ten final guard scopes clean, minimumfree1879.508MiB.
+Raw/summary: scratch`FINAL-MEASURED.json`, `final-engine-*`, `final-api-*`, `final-retained-trace`,
+`final-guard-summary.json`. Long benchmarks never wrote the live additive expert profile; its original hash
+was still unchanged immediately before deployment.
+
+Retained: earlier prefetch restores DMA overlap; narrow NVFP4 down-tail skip; one aggregate KV-release wait;
+selective pipelined F322x2; lane-owned query16 Flash probabilities; same-policy checkpoint packing plus
+parallel first-touch on existing workers. Each uses its own measured rolling baseline, not additive gains.
+Rejected/inconclusive: smallerI/J andK128gate lose reuse; headsplit/no-lookahead/query32 regress (query32
+also changes masked-block compensation bits); SiTU fusion's local gain did not qualify in extended actualEE;
+batch4096 cannot widen default2048 checkpoint-limited text calls and lost residency; tiny staged classes and
+CPU-share0 did not retain a gain. Empty-grid overhead and common-input dense packing were bounded too small
+for larger mechanisms. PACK bare CPP and page-touch2K/extra8K are not general throughput wins.
+
+Limits: only this GPU/model/config measured; no global-optimum claim.200000 is capacity, not measured model
+prefill speed (64K actual model measured; longer attention checks are kernel-only). Clocks/desktop/placement
+vary, small-stage percentages are workload-specific. SQ performance counters became inconsistent, so no
+unsupported occupancy/single-hardware-bottleneck claim. Numerical evidence combines standalone exact/ref
+checks, complete Q8/FP16 snapshot bytes and controlled forced/restore fixtures, not unrestricted full-logit
+bitwise parity under adaptive CPU/GPU placement. Vision/decode optimizations and sampling settings unchanged.
+One interrupted run was a journald-byte-array monitor error, fixed fail-closed in6e52c12e and rerun as a
+whole fresh order; it was not counted as a clean benchmark or a hardware fault.
+
 ## Completion
 
-R1 and R4 verified; R2 and R3 remain open. Final qualified commits, deployment and remaining limitations will be recorded here.
+All R1–R4 verified. Closure passed: qualified code is committed/pushed through`cb75238a`, no remaining
+in-envelope prototype supported by current measurements, final comparisons/default-off/profile pass,
+and the exact tested build serves production. No unrelated source/dependency/service changes.
+
+- Installed executable: `/home/stfu/.config/strata/inkling2-mini/strata-poly-ebab4fadff6f`.
+- SHA256: `ebab4fadff6f978158deb051f939c7511c84e47d343ba7b2255f240a7b0cc693`.
+- Code commit: `cb75238addf90bbde94e57f43e7cb0bff532ec59`. Later goal-only commit does not change the ELF.
+- `strata.service`: active; boot enable remains disabled, as before. Running engine path and six opt-in
+  variables verified from `/proc`; no benchmark engine left running alongside it.
+- Listener: only`127.0.0.1:8080`, model`inkling-2-mini`; same API key and all unrelated config keys/old env
+  unchanged. Request without key401. Live answer: **“17 plus 25 is 42.”** Auto tool call
+  `add_numbers({"a":17,"b":25})`, inert local result42, final model answer **“42”**. No model-supplied code executed.
+- `guard-production-deploy`: no fault/reset/OOM/unsafe reason; minfree1996.230MiB. Long final timing used
+  private profiles; the real unit received only this short functional smoke.
+- Private deployment record/smoke: scratch`deployment.json`, `production-deploy-smoke/summary.json`.
+- Rollback: old executable`strata-poly-ab8507f1` remains installed. Exact original config is private0600
+  scratch`production-config-before-deploy.json` (never Git). Run scratch`rollback_prod.py` with the repo's
+  venv to stop the unit and atomically restore it, then start the existing unit if the old service is wanted.
+  The script refuses to overwrite a config changed after deployment. Live expert history is not rolled back.
+
+Final status: **complete**. Do not open more experiments, cleanup, hardening or audits after this closure.
