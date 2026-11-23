@@ -1,9 +1,9 @@
 # Goal: Inkling-2-Mini next levers on RDNA2 (decode, NVFP4 MMQ, prompt idle, R5, R6, 200K)
 
-Status: active, paused by the user after plan step 1 (RECON measured; the expf check passed; no engine code changed)
+Status: active
 Source: user instruction of 2026-11-23 (verbatim below); the limits listed at the end of
 `docs/goals/2026-11-23-inkling2-fork-vectors.md` (session 3 account)
-Last updated: 2026-11-23
+Last updated: 2026-11-24
 
 ## Objective
 
@@ -52,8 +52,12 @@ outcome is resolved and affected constraints remain satisfied.
     tokens identical to the switch off, or (for a precision-level change) the `q.py` KL protocol at the FP32
     reorder noise floor.
   - Primary evidence: `ab.sh` logs, token hashes.
-  - Status: pending
-  - Evidence:
+  - Status: verified
+  - Evidence: measured rejection of the mapped levers for production. Exact resident routing, earlier cached
+    expert submission, and exact eight-lane down did not beat decode spread. Lending MMQ scratch did not pay
+    for the cache refill. Stage-only lending raised 2K+256 decode from 46.32 to 47.38 tok/s (four runs per arm)
+    and cut that request from 7.915 to 7.837 s, but regressed 32K prefill from 34.992/35.026 to
+    35.185/35.811 s and 16K prefill on all three quality prompts. No stage or decode switch was deployed.
 - R2: NVFP4 MMQ: an instruction or load-phase cut of the J64 gate/up kernel (or the tail) ships opt-in with a
   kernel and 32K end-to-end win, or the two mapped cuts are recorded as measured dead.
   - Source: soft goal 2.
@@ -64,13 +68,23 @@ outcome is resolved and affected constraints remain satisfied.
     with identical dumps; 32K ABBA 36.258/35.875 -> 34.732/34.748 s, identical 32 greedy IDs. The 65 default
     lean kernel bodies match after ISA normalization. B2 aligned LDS reads were bitwise but only 10.762 ms
     vs 10.995–11.151 ms, and slower in combination (9.699 vs 9.485 ms with B1 alone).
+    Extending B1 to the eligible J64 down-tail brought 5.735–5.765 -> 4.858–4.901 ms in the grouped bench
+    with identical bytes; both versions also matched bit for bit on the same real inputs in over 1,400 calls.
+    Final Release vs `ed88e9ba`: 32K ABBA + BAAB averaged 34.912 -> 34.470 s (1.27% less), all eight sets of
+    32 greedy IDs identical. The unchanged lean down-tail, lean, and B1 kernel bodies matched normalized ISA
+    (1, 65, and 65 bodies respectively).
 - R3: Prompt idle: the measured steady-state idle at 32K is cut by a shipped opt-in change, or the components are
   recorded as not reachable.
   - Source: soft goal 3.
   - Acceptance: trace idle (window after the first batch) lower and 32K A/B faster; bitwise.
   - Primary evidence: `rocprofv3 --kernel-trace` window idle, `ab.sh` 32K pairs.
-  - Status: pending
-  - Evidence:
+  - Status: verified
+  - Evidence: after batch 1, most of the kernel gaps counted in RECON were startup or DMA, not reclaimable
+    idle. At the B1 baseline there were 545 ms with neither kernel nor copy running. Exact GPU routing and
+    an exact AVX2 host top-eight did not yield a repeatable untraced 32K win. The host variant cut the traced
+    router handoff from 318 to 258 ms without DMA, but its second ABBA was 34.804/34.605 -> 34.671/34.785 s
+    with all 32 greedy IDs identical. The Q5_0 and rocBLAS gaps left after accounting for DMA were about 5 and
+    3 ms respectively. No idle-specific change was retained.
 - R4: R5 of the previous goal (situ + down/gate_up merge) resolved: shipped bitwise with an A/B win or measured
   dead.
   - Source: soft goal 4; `2026-11-23-inkling2-fork-vectors.md` R5.
@@ -209,16 +223,18 @@ reverted from the tree).
 
 ## Current Checkpoint
 
-- Closes: R1 and R3.
-- Smallest next action: test stage lending and earlier cached-expert submit for decode, plus the exact eight-lane
-  down reduction. For R3 test host AVX2 top-eight with the same sigmoid, ties and weight sums on the new baseline.
-- Expected evidence: each retained change must beat the ABBA spread and meet the token/bitwise gate.
-- Stop or replan if: a candidate only improves a microbenchmark or moves time from compute idle to DMA.
+- Closes: verify the deployed Release build and close the goal.
+- Smallest next action: deploy the confirmed down-tail build, trace that build at 32K, check that an
+  incompatible disk snapshot is refused, and compare a guarded 199K + 32 greedy run to the old baseline.
+- Expected evidence: production health and chat smoke, 32K steady trace, incompatible snapshot refused
+  before any device write, and the 199K greedy sequence agrees with the RECON baseline.
 
 ## Material Decisions
 
 - 2026-11-23: User, after the plan: "Выполняй шаг — проверка expf на всех входах. Далее Делай копию плана в цель и
   на этом работа остановлена" - step 1 run; the plan above is the goal's copy; work paused here.
+- Resume directive: move from RECON to implementation, use the plan as a map of hypotheses, and commit, push and
+  deploy reproducible end-to-end wins as the next baseline. Reprofile after wins and keep measured rejections.
 
 - 2026-11-23: The soft goal "prompt idle 3.1 s" is re-measured as 1.5 s steady at 32K; the rest was process
   start-up counted from the first kernel.
@@ -230,9 +246,28 @@ reverted from the tree).
 - IMPLEMENT: D3 and C1 not retained. GPU route matched all IDs and finite weight bits for 4,560 real + 8,192
   synthetic rows, plus 544 packed-resident comparisons. Forced 2K+256 decode 46.28/45.59 -> 46.02/45.94 tok/s;
   96 greedy tokens matched. C1 prompt route at 32K 35.855/35.966 -> 35.860/35.725 s, same 32 greedy IDs.
-- IMPLEMENT: deployed R2 B1. The post-first-batch 32K trace span fell 34.074 -> 32.868 s; kernel idle
-  1,422 -> 1,326 ms, of which 813 -> 751 ms already carried DMA. The Q5_0 waits and the norm-to-router gap
-  largely overlap transfers; small GEMM -> rocBLAS leaves only about 3 ms with neither a kernel nor a copy running.
+- IMPLEMENT: deployed R2 B1 and R5 (`ed88e9ba`). Production slot smoke restored its session after restart.
+  From the first flash visit of batch 2 to decode, B1's 32K trace span fell 33.645 -> 32.524 s, with J64 NVFP4
+  MMQ at 9.019 -> 7.966 s. Packed-half attention still took 7.213 s. Kernel idle fell 1,350 -> 1,256 ms, of which
+  769 -> 712 ms already carried DMA. About 322 ms of the residual 545 ms with neither kernels nor copies
+  running was the router handoff (median 0.556 ms per gap). Q5_0 coda and norm-to-router idle without DMA
+  were about 5 ms and 16 ms; small GEMM -> rocBLAS contributed only about 3 ms.
+- IMPLEMENT: earlier GPU expert submit did not change forced 2K+256 decode (46.26–46.34 vs 46.27–46.36 tok/s).
+  Eight-lane down with both original 16-lane accumulators reduced the cold seven-expert kernel from 50.40–50.43
+  to 46.99–47.02 us and matched all 16,128 outputs. Forced decode ranges overlap (44.91–45.21 vs 45.14–45.19
+  tok/s); all 96 greedy IDs matched. The 46.33 us plain eight-lane variant changed the dot order and was not used.
+- IMPLEMENT: MMQ scratch lending alone was not retained. It held 80–85 more experts at load but the 2K+256
+  request took 8.089 s vs 8.045 s (means); remapping and refilling cost more than the decode savings. All 96
+  greedy IDs matched. Stage-only lending raised expert hits from 88.0% to 90.4–90.6%; the 32K prefill regression
+  remained after requiring the full reserve during mapping (the inherited quarter-reserve widening had tripped
+  the guard). The 32K 32-token sequences and both subsequent 2K 96-token sequences matched. One earlier 2K
+  continuation differed after the logged first 12 tokens; its exact first divergence was not captured. `q.py`
+  on three real 16K prompts x 128 forced tokens: KL mean 0.001250, p99 0.02376, 99.22% top-1 agreement, within
+  the earlier CPU/GPU-residency noise in mean KL. No quality gain is claimed; the prefill cost ruled it out.
+- IMPLEMENT: down-tail scratch trace isolated 4.541 -> 3.662 s across exactly 1,372 steady 32K launches
+  per arm. Scratch untraced A/Bs measured −0.09%, +0.88%, and +2.19% less prefill time. One scratch
+  continuation differed after the logged first 12 IDs; the exact first divergence was not captured.
+  Same-input comparisons over all eligible calls and all eight complete Release token sequences matched.
 - 2026-11-23: D3 step 1: GPU port of glibc `expf` bit-exact over all 2^32 inputs (and sigmoid; NaN payloads
   separate). OCML differed on 33,606,109 `expf` and 10,474,369 sigmoid inputs. Paused by the user after step 1.
 - 2026-11-23: RECON: decode trace and sensitivity runs, VRAM map, slot-kernel microbench, router hack, MMQ phase

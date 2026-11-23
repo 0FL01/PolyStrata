@@ -16,5 +16,11 @@ static __device__ __forceinline__ int ggml_cuda_dp4a(const int a, const int b, i
 #endif
     return ggml_cuda_dp4a_ggml(a, b, c);
 }
+#ifdef STRATA_NVFP4_SCALE_BITS
+#include "mmq_nvfp4_scale_bits.cuh"
+#define nvfp4_tail_try nvfp4_tail_scale_bits_try
+#define nvfp4_tail_kernel nvfp4_tail_scale_bits_kernel
+#else
 #define nvfp4_tail_try nvfp4_tail_lean_try
+#endif
 #include "mmq_nvfp4_tail.cu"

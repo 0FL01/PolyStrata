@@ -758,11 +758,18 @@ weight/activation formats and the default-off path are unchanged. The K128 full-
 it accelerated down but slowed gate/up; this narrower change avoids that regression.
 
 `STRATA_HIP_NVFP4_SCALE_BITS=1` (opt-in, gfx1031) builds the lean NVFP4 MMQ loader's FP32 scales from the
-UE4M3 bits. It needs `STRATA_HIP_NVFP4_MMQ=1` and `STRATA_HIP_NVFP4_LEAN=1`; tiles of at most eight rows and
-eligible down-tail calls keep their previous kernels. On the same RX 6700 XT, J64 gate/up (128 experts ×
+UE4M3 bits. It needs `STRATA_HIP_NVFP4_MMQ=1` and `STRATA_HIP_NVFP4_LEAN=1`; tiles of at most eight rows keep
+their previous kernels. With `STRATA_HIP_NVFP4_TAIL=1`, the same scale construction applies to eligible lean
+down-tail calls without changing their tile selection. On the same RX 6700 XT, J64 gate/up (128 experts ×
 128 rows, `[2304,2304]`) went from 10.92 to 9.58 ms with a byte-identical FP32 dump. A 32,768-token prompt
 with the production settings above took 35.88–36.26 s off and 34.73–34.75 s on (3.7% less time on average);
 all 32 greedy token IDs matched. Decode throughput was within the run-to-run spread.
+
+On the same card, grouped J64 down-tail (128 experts × 128 rows, `[2304,1152]`) went from 5.74–5.77 to
+4.86–4.90 ms with a byte-identical FP32 dump. Both down-tail kernels also matched bit for bit on the same
+inputs in over 1,400 launches during a real 32K prefill. Against `ed88e9ba` (the gate/up gain already enabled),
+four 32K runs per build averaged 34.91 -> 34.47 s (1.27% less), with all 32 greedy IDs identical in all eight
+runs. Decode stayed within the spread.
 
 `STRATA_INKLING_BATCH_KV_RELEASE=1` (opt-in, gfx1031, VRAM pool off) waits for free-memory accounting once
 after a KV trim, instead of once per KV region. The device barrier, release/remap operations, retained

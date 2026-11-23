@@ -25,6 +25,7 @@ bool nvfp4_tail_try(const mmq_args& a, cudaStream_t s);
 void nvfp4_w4a8_lean(ggml_backend_cuda_context& ctx, const mmq_args& a, cudaStream_t s);
 void nvfp4_w4a8_scale_bits(ggml_backend_cuda_context& ctx, const mmq_args& a, cudaStream_t s);
 bool nvfp4_tail_lean_try(const mmq_args& a, cudaStream_t s);
+bool nvfp4_tail_scale_bits_try(const mmq_args& a, cudaStream_t s);
 #endif
 
 namespace {
@@ -222,17 +223,18 @@ void Mmq::mul(const void* w, int type, int64_t w_rows, int64_t w_cols, size_t st
             // J8 tiles (8 rows at most) grow with the VOP3 form: 94 -> 175 VGPRs, 2.73 -> 2.89 ms in a 128-expert
             // launch on RX 6700 XT; from 16 rows on they gain (J64 6.02 -> 5.58 ms)
             const bool use_lean = lean && max_rows > 8;
-            if (tail && (use_lean ? nvfp4_tail_lean_try(a, s) : nvfp4_tail_try(a, s))) {
+            static const bool scale_bits = [] {
+                const char* v = std::getenv("STRATA_HIP_NVFP4_SCALE_BITS");
+                return v && v[0] == '1' && v[1] == '\0';
+            }();
+            const auto tail_try = !use_lean ? nvfp4_tail_try : scale_bits ? nvfp4_tail_scale_bits_try : nvfp4_tail_lean_try;
+            if (tail && tail_try(a, s)) {
                 ck("mmq NVFP4 tail product");
                 static const int logged_tail = std::fputs(
                     "strata-poly: STRATA_HIP_NVFP4_TAIL=1: NVFP4 down skips the padded K128 half on gfx1031\n", stderr);
                 (void) logged_tail;
                 return;
             }
-            static const bool scale_bits = [] {
-                const char* v = std::getenv("STRATA_HIP_NVFP4_SCALE_BITS");
-                return v && v[0] == '1' && v[1] == '\0';
-            }();
             if (use_lean && scale_bits) {
                 nvfp4_w4a8_scale_bits(ctx, a, s);
                 static const int logged_scale = std::fputs(
