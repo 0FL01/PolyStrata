@@ -1,12 +1,13 @@
 # Goal: Inkling-2-Mini decode, second round: fewer launches a visit, the MoE path, and no black screens
 
-Status: active (GPU runs paused by the user until said otherwise; the plan below is the map)
+Status: active (implementation round: the user ordered P1 onward, autonomous profile→hypothesis→prototype→measure cycles)
 Source: user request of 2026-11-23: "Изучи последние коммиты и цели, нужен план по пооптимизации движка, цель поднять
 `decode` t/s ... проводить профилирование, писать бенчмарки ... на уровне ядра ... Важно не потерять в качестве из за
 дивергенции/смены формул. Приступай к профилированию". Then, after two black screens: "стоп, ты чо там творишь, второй
 раз уже экран гаснет (и мне пришлось делать хард ресет) ... пиши ответ, чё там баг в AMDGPU и ROCm?" and "щас всё
 окей, зафиксируй в цели из за чего был blackscreen, что бы потом на эти грабли больше не прыгунть и продолжить",
-"и гпу не трогай, что бы снова падений не было и план жду".
+"и гпу не трогай, что бы снова падений не было и план жду". Then the implementation order of the same day (verbatim in
+the User directive section below).
 Last updated: 2026-11-23
 
 ## Objective
@@ -27,7 +28,37 @@ rules that came out of the black screens are written here so that nobody repeats
 
 "зафиксируй в цели из за чего был blackscreen, что бы потом на эти грабли больше не прыгунть"
 
-"гпу не трогай, что бы снова падений не было"
+"гпу не трогай, что бы снова падений не было" — lifted by the order below.
+
+The implementation order (2026-11-23, verbatim):
+
+"Переходи от RECON к реализации, цель максимально ускорить реальный end to end `decode t/s`, а не просто выполнить
+план, план это GPS навигатор, а не рельсы
+
+Используй текущий план как карту гипотез, а не жёсткий маршрут, начинай с P1
+
+Работай автономно длинными циклы: профилирование -> гипотеза -> временный прототип/бенчмарк -> измерение -> анализ ->
+следующий эксперимент (если профит детерминирование получен - коммит и пуш в main, далее это будет как baseline для
+последующих правок (т.е закрепляем результат и идём дальше)
+
+При неудачах выясняй почему ожидания не подтвердились, пересматривай гипотезы и пробуй другие подходы, не Зацикливайся
+на одном направлении и свободно меняй приориты по результам экспериментов
+
+Успешные оптимизации интегрируй в main (прод бинарник), проверяй end to end прирост
+
+После существенных изменений, перепрофилируй движок, bottleneck может переместиться
+
+ПРодолжай исслендвоание и реализацию, пока останется перспективное проверяемые гипотезы, в финале покажи измеренные
+результаты, неудачные подходы и оставшиеся ограничения, и деплой в прод
+
+Делай копию плана и моей подсказки в цель, помни что документ с целью это глина, её можно мять как угодно по ходу
+работ, в эту глину пиши удачи/неудачи"
+
+"Важно не допустить дивергенции по точности в формулах, что бы качество ответов не падало"
+
+"так же призывай саб агентов (review) для ревью диффа перед коммитами, на предмет регресса" — every commit that
+changes engine code goes through an independent review subagent (the diff, for regressions and the quality gates)
+before the commit; the review's findings that prove a gate violation block the commit.
 
 The reserve stays 2048 MiB (the decision of the first round, 2026-11-23-inkling2-decode-throughput.md).
 
@@ -35,8 +66,10 @@ The reserve stays 2048 MiB (the decision of the first round, 2026-11-23-inkling2
 
 Complete the frozen Required Outcomes using the listed Change Envelope and Primary Evidence. Work on the smallest
 unresolved outcome. Do not add requirements from reviews, tests, tools, speculative risks, or optional source text.
-Stop on a fresh guard fault or a proven blocker; record the evidence and the smallest unlock. No GPU run before the
-user allows one again; CPU-only work (reading code, analysis of stored traces, CPU benchmarks) goes on.
+The plan is a hypothesis map (GPS), not rails: reorder, drop and add experiments by what the measurements say; commit
+and push every deterministic win to main and re-profile after substantial changes. Finish when every required outcome
+is resolved or no promising testable hypothesis is left, then report measured results, failed approaches, remaining
+limits, and deploy to production.
 
 ## Frozen Contract
 
@@ -77,8 +110,9 @@ user allows one again; CPU-only work (reading code, analysis of stored traces, C
 - C1: RDNA2/HIP only; one card, one sequence; the same GGUF, Q8_0 KV, 200,000 context; no expert skipping; the
   reserve stays 2048 MiB.
 - C2: New behavior opt-in; with the switch off the path is byte-identical; other models unchanged.
-- C3: No GPU run until the user allows it. Then: through the fixed guard only, its result read before anything else
-  (exit code and `stop-reasons.json`, never redirected away); one engine at a time.
+- C3: GPU runs are allowed again (the user's implementation order of 2026-11-23 supersedes the pause): through the
+  fixed guard only, its result read before anything else (exit code and `stop-reasons.json`, never redirected away);
+  one engine at a time.
 - C4: On this machine (the card drives the desktop) no kernel that can wait without a time limit: no software grid
   barrier, no persistent or spinning kernel, no `rocprofv3 --pmc`. A GPU fault ends the day's GPU work: reboot
   before the next run.
@@ -108,14 +142,17 @@ user allows one again; CPU-only work (reading code, analysis of stored traces, C
 
 ## Current Checkpoint
 
-- Closes: R4.
-- Done: the guard reads the journal from a cursor and by whole words (plurals, "timed out"), and refuses a boot in
-  which amdgpu logged a page fault, a ring timeout, a wedge or a reset. Checked with 13 journal lines of both days'
-  kinds and a harmless command on the clean boot.
-- Smallest next action (CPU only, no GPU): time `cpu_experts()` for 1-4 experts with the weights cold and with them
-  read a moment before (L3), the first measurement of P4b.
-- Expected evidence: ms an expert both ways. If the warm case is not at least 1.5 times faster, P4b is dropped.
-- Stop or replan if: the user allows GPU runs again: then P2a first, with its bitwise test, behind the guard.
+- Closes: R1 (P2a won and shipped; the next steps below).
+- Done: the guard fix and this document (R4); P1 (system side: user actions recorded); P2a (norm+quantize rows
+  kernel, `STRATA_INKLING_NORM_Q8=1`, bit for bit and +1.48% forced decode, 3/3 A/B pairs).
+- P1 result (system side, nothing to change in the engine): `coolercontrold` is a root system service and
+  `amdgpu.mes=0` needs root and a reboot; no sudo password on this machine (checked: `sudo -n` fails), so both are
+  user actions, recorded here. The engine-side part of P1 is the wake-up cost after GPU idle, which P4b shortens.
+- Smallest next action: P2b (copy2 into its producers) or P2c (add_scaled into the tail conv_add), whichever the
+  trace's launch table says saves more; both keep the old block parallelism and stay bitwise.
+- Expected evidence: one launch less a visit each; A/B 3 x 300 forced tokens, all pairs in the same direction.
+- Stop or replan if: a fusion is not bitwise or the A/B gain is inside the run-to-run spread — then P3 (Q8_0
+  segment bandwidth) next.
 
 ## Profiling (this round)
 
@@ -230,6 +267,24 @@ estimates from the measurements above, to be replaced by the A/B.
 - `kbench`: the LM-head section wrote past its output buffer (my bug): page fault at 14:51:46, fixed and re-run;
   the first black screen followed at 14:56. See the incident.
 - MoE split per visit from the trace: 30% CPU-bound, 70% GPU-bound.
+- P2a (norm+quantize fused rows kernel, `STRATA_INKLING_NORM_Q8=1`): the bitwise contract took three compiler
+  findings to meet, all verified at IR/SASS level on this toolchain (HIP 7.13, plain -O3, no fast math):
+  (1) poly's `rms_norm` sum of squares is an fma at SASS (the contract-flagged multiply and add fuse), so the
+  fused kernel must use `__fmaf_rn` on the same per-thread stride, not a multiply and an add; (2) the normed
+  value's product contracts into the Q8_1 block sum's first butterfly add (`v_fmac`) unless the quantize loop is
+  built with `#pragma clang fp contract(off)`; (3) the scale must be `1.0f / sqrtf(...)` with the plain operators:
+  libdevice's `sqrtf` refines `v_sqrt` to the correctly rounded value, and `__fsqrt_rn`'s raw `v_sqrt` is off by
+  1 ulp on boundary values. An `asm "" : "+f"` barrier would have blocked (2) as well, but AMDGPU clang rejects
+  the `'+f'` constraint. With all three, `poly_norm_q8_test`'s rows check passes 24/24 shapes bit for bit
+  (n in {1024, 2304, 2816}, entries {1, 3}, tokens {1, 8}), and the old decode-tail kernel's failures are
+  documented in that test as expected divergence. The old tail kernel was never bitwise: the three findings
+  above plus its 128-thread stride are four independent divergences shipped since `ce9e9b28`.
+- P2a A/B (forced 94+300, RX 6700 XT): off 44.73/45.28/45.44, on 45.62/45.74/46.09 tok/s, 3/3 pairs, mean
+  45.15 -> 45.82 tok/s (+1.48%, 22.15 -> 21.83 ms/token, -0.32 ms). Free-run token streams are NOT a gate on
+  this machine: two runs of the same binary with different expert residency (desktop VRAM moves the load-time
+  packing, 1128-1163 experts) already disagree; CPU and GPU expert paths round differently. The wiring was
+  checked site by site against `git show HEAD` instead (same buffers: `s3in_`/`s3q8_`/`input_[i]`/`xq_`/`kq8_`/
+  `vq8_`, `lin_raw`'s internal quantize and `project()`'s `!k8` guard consume the same bytes).
 
 ## Black screens of 2026-11-23 (what not to repeat)
 
@@ -271,6 +326,10 @@ The rules (C3-C5), in plain words:
 
 - 2026-11-23: R4. Guard fixed (cursor, whole words, boot check); this document with the incident, the measurements
   and the plan. Next: the CPU-only L3 measurement of P4b, then P2a when GPU runs are allowed.
+- 2026-11-23: P2a. The norm+quantize rows kernel is bit for bit the two launches (24/24 shapes, three compiler
+  divergences found and pinned at SASS: fma squares, quantize-loop contraction, libdevice sqrt refinement) and
+  +1.48% forced decode (3/3 pairs, RX 6700 XT). Review subagent on the diff before the commit, per the user's
+  rule. Next: P2b/P2c fusions.
 
 ## Current State
 

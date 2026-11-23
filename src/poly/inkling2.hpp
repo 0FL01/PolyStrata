@@ -71,6 +71,7 @@ private:
     int floor_ = 0, ring_ = 0, visit_ = 0, depth_n_ = 0, attend_tiles_ = 0;
     bool flash_ = false;    // STRATA_INKLING_FLASH=1 (load_geometry())
     bool decode_ = false;   // STRATA_INKLING_DECODE=1 (load_geometry())
+    bool norm_q8_ = false;  // STRATA_INKLING_NORM_Q8=1 (load_geometry()): a visit's stream norms and Q8_1 together
     bool cpu_sum_ = false;  // moe_add() left the CPU experts' sum for layer_tail()
     bool fo_clean_ = false; // layer_tail() left fo_ 0 for the next layer's experts (moe_shared())
     bool kv_stored_ = false;   // layer_head() stored the decode row's K and V (heads_kv_kernel) for attention()

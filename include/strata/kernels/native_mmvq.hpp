@@ -52,6 +52,18 @@ void native_quantize_q8_1(const float* x, void* x_q8_1, int n_in, int ncols,
 void native_add_rms_norm_q8_1(float* x, const float* add, const float* w, float* y, void* y_q8_1, int n, int rows,
                               float eps, int threads, void* stream);
 
+/// Up to four rms_norm() + native_quantize_q8_1() pairs in one launch: each entry its own input row(s), norm weight,
+/// normed output and Q8_1 output, which need not lie together.  A row is bit for bit what rms_norm() (with
+/// sum_threads(n) a block) followed by native_quantize_q8_1() of that row writes.  n is a multiple of 32.
+struct NormQ8Row {
+    const float* x;
+    const float* w;
+    float* y;
+    void* y_q8_1;
+};
+void native_rms_norm_q8_1_rows(const NormQ8Row* rows, int count, int n, int tokens, float eps, int threads,
+                               void* stream);
+
 void native_swiglu_quantize_q8_1(const float* gate, const float* up, void* x_q8_1,
                                  int n_in, int ncols, void* stream);
 

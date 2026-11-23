@@ -239,6 +239,56 @@ __global__ void native_add_rms_norm_q8_1_kernel(float* __restrict__ x, const flo
     }
 }
 
+// native_rms_norm_q8_1_rows(): the kernel above without the add, for up to four rows that need not lie together:
+// a block norms one row of one entry (blockIdx.y) of one token (blockIdx.x) and writes its Q8_1 blocks, bit for bit
+// rms_norm() (threads a block: poly's sum_threads(n), its fused fma sum of squares on that stride) followed by
+// native_quantize_q8_1() of that row.  The pragma below keeps the compiler from contracting the quantize loop's
+// products into the Q8_1 block sum's butterfly: with the contract flag set, ROCm 7.13's backend fuses the normed
+// value's product into the first butterfly add (v_fmac), and the row is no longer the two launches' bits.
+struct NormQ8RowsK {
+    NormQ8Row r[4];
+};
+template<int SUM>
+__launch_bounds__(1024, 1)
+__global__ void native_rms_norm_q8_1_rows_kernel(NormQ8RowsK rows, int n, float eps) {
+    // No fp contraction in the quantize loop below: the normed value's two multiplies must not fuse into the Q8_1
+    // block sum's first butterfly add.  With the contract flag set, ROCm 7.13's backend fuses exactly that (v_fmac),
+    // and the row stops being the two launches' bits.  (The sum of squares above is the opposite case: poly's
+    // contract-flagged square fuses into an fma at SASS, so the explicit intrinsic is what matches it.  An asm
+    // "" : "+f" barrier would block the leaf too, but AMDGPU clang rejects the '+f' constraint.)
+#pragma clang fp contract(off)
+    __shared__ float part[SUM / WARP];
+    const NormQ8Row& row = rows.r[blockIdx.y];
+    const float* xr = row.x + std::size_t(blockIdx.x) * n;
+    float* yr = row.y + std::size_t(blockIdx.x) * n;
+    Q81Block* qr = static_cast<Q81Block*>(row.y_q8_1) + std::size_t(blockIdx.x) * (n / Q8K);
+    if (threadIdx.x < SUM) {
+        float ss = 0.0f;
+        for (int i = threadIdx.x; i < n; i += SUM) {
+            const float v = xr[i];
+            ss = __fmaf_rn(v, v, ss);    // poly's rms_norm: the contract-flagged multiply and add fuse to an fma
+        }
+        ss = warp_sum(ss);
+        if ((threadIdx.x & 31) == 0) part[threadIdx.x >> 5] = ss;
+    }
+    __syncthreads();
+    float sum = 0.0f;
+    for (int k = 0; k < SUM / WARP; ++k) sum = __fadd_rn(sum, part[k]);
+    const float scale = 1.0f / sqrtf(sum / float(n) + eps);   // rms_norm's expression: plain ops compile to the
+    // libdevice division and sqrt (the sqrt refines v_sqrt to the correctly rounded value; __fsqrt_rn does not),
+    // and the row keeps rms_norm's bits.
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {   // n is a multiple of 32: a warp's 32 values are one block
+        float xi = xr[i] * scale * row.w[i];   // poly's rms_norm writes (x * scale) * w, two rounded multiplies
+        yr[i] = xi;
+        const float amax = warp_max(fabsf(xi));
+        const float bsum = warp_sum(xi);
+        const float d = q8_1_finite(amax / 127.0f);
+        const int8_t q = q8_1_quant(xi, d, amax);
+        qr[i / Q8K].qs[i % Q8K] = q;
+        if (i % Q8K == 0) qr[i / Q8K].ds = q8_1_ds(d, bsum);
+    }
+}
+
 // Exact pinned vec_dot_q5_K_q8_1_impl_vmmq expression and integer dot order.
 __device__ __forceinline__ float q5_q8_dot_impl(
     const int* __restrict__ vl, const int* __restrict__ vh, const int* __restrict__ u,
@@ -2723,6 +2773,32 @@ void native_add_rms_norm_q8_1(float* x, const float* add, const float* w, float*
     case 512: native_add_rms_norm_q8_1_kernel<512><<<rows, block, 0, s>>>(x, add, w, y, q, n, eps); break;
     case 1024: native_add_rms_norm_q8_1_kernel<1024><<<rows, block, 0, s>>>(x, add, w, y, q, n, eps); break;
     default: throw std::invalid_argument("native_add_rms_norm_q8_1: 128, 256, 512 or 1024 threads");
+    }
+    launch_check();
+}
+
+void native_rms_norm_q8_1_rows(const NormQ8Row* rows, int count, int n, int tokens, float eps, int threads,
+                               void* stream) {
+    validate_shape(n, 1);
+    if (count < 1 || count > 4) throw std::invalid_argument("native_rms_norm_q8_1_rows: 1 to 4 rows");
+    for (int i = 0; i < count; ++i) {
+        validate_pointer(rows[i].x);
+        validate_pointer(rows[i].w);
+        validate_pointer(rows[i].y);
+        validate_pointer(rows[i].y_q8_1);
+    }
+    validate_stream(stream);
+    if (tokens < 1) return;
+    const auto s = static_cast<cudaStream_t>(stream);
+    NormQ8RowsK rs{};
+    for (int i = 0; i < count; ++i) rs.r[i] = rows[i];
+    const int block = std::max(threads, std::min(1024, n));   // n is a multiple of 32, and so is this
+    switch (threads) {
+    case 128: native_rms_norm_q8_1_rows_kernel<128><<<dim3(tokens, count), block, 0, s>>>(rs, n, eps); break;
+    case 256: native_rms_norm_q8_1_rows_kernel<256><<<dim3(tokens, count), block, 0, s>>>(rs, n, eps); break;
+    case 512: native_rms_norm_q8_1_rows_kernel<512><<<dim3(tokens, count), block, 0, s>>>(rs, n, eps); break;
+    case 1024: native_rms_norm_q8_1_rows_kernel<1024><<<dim3(tokens, count), block, 0, s>>>(rs, n, eps); break;
+    default: throw std::invalid_argument("native_rms_norm_q8_1_rows: 128, 256, 512 or 1024 threads");
     }
     launch_check();
 }

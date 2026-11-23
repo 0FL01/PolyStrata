@@ -514,6 +514,11 @@ void Inkling2::load_geometry() {
             if (il < kStart || il >= kStart + kCore) use_w_[(size_t) il] = 2.f;
     }
     if (decode_) std::fputs("strata-poly: STRATA_INKLING_DECODE=1: decode kernels for a few tokens at a time\n", stderr);
+    const char* norm_q8 = std::getenv("STRATA_INKLING_NORM_Q8");
+    norm_q8_ = decode_ && norm_q8 && norm_q8[0] == '1' && norm_q8[1] == '\0';
+    if (norm_q8_)
+        std::fputs("strata-poly: STRATA_INKLING_NORM_Q8=1: a visit's stream norms and their Q8_1 in one launch\n",
+                   stderr);
     if (!q8() && opt_.kv_format != KvFmt::kFp16)
         throw std::runtime_error("Inkling-2-Mini supports Q8_0 or FP16 KV");
     const int window = opt_.window;
@@ -1194,6 +1199,16 @@ bool Inkling2::heads(const Block& b, int il, bool swa, bool loop, int n, const D
         gemv_f32_waves_segments(down, 3, 2 * kWidth, kRank, kRank, n, st_);
         control_out3_kernel<<<dim3(kWidth / 32, n, 3), 256, 0, cs(st_)>>>(c, kRank);
     }
+    if (norm_q8_) {   // the three stream norms and their Q8_1 in one launch (s3in_ then already Q8_1 in s3q8_)
+        kernels::NormQ8Row rs[3];
+        // a stream's Q8_1 rows are n of them, back to back as the flat quantize laid them out: the stream's
+        // slot in s3q8_ starts n rows in (layer_head's `wq` below reads at the same stride)
+        const size_t wq = (size_t) n * kernels::native_q8_1_bytes(kWidth);
+        for (int i = 0; i < 3; ++i)
+            rs[i] = {s3cur_ + i * w, fp(*norm[i]), s3in_ + i * w, (uint8_t*) s3q8_ + i * wq};
+        kernels::native_rms_norm_q8_1_rows(rs, 3, kWidth, n, rms_eps_, sum_threads(kWidth), st_);
+        return true;
+    }
     NormSegments ns;
     for (int i = 0; i < 3; ++i) {
         ns.x[i] = s3cur_ + i * w;
@@ -1252,14 +1267,17 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
     const int streams = swa && !loop ? 1 : 3;
     const float *xq = input_[0], *xk = xq, *xv = xq;
     const void *kq = nullptr, *vq = nullptr;   // K's and V's own inputs as Q8_1, when heads() quantized them
+    const bool mmv = n < kStageRows;
     const bool three = streams == 3 && heads(b, il, swa, loop, n, norm);
+    bool q8in = three;   // the stream inputs are Q8_1 already (heads(), or the loop below when it fuses)
     if (three) {
         const size_t w = (size_t) n * kWidth, wq = (size_t) n * kernels::native_q8_1_bytes(kWidth);
         xq = s3in_;
         xk = s3in_ + w;
         xv = s3in_ + 2 * w;
         // the three inputs lie one after the other, and a Q8_1 block never straddles two: one launch for all
-        kernels::native_quantize_q8_1(s3in_, s3q8_, kWidth * n * 3, 1, st_);
+        // (heads() wrote their Q8_1 too when norm_q8_)
+        if (!norm_q8_) kernels::native_quantize_q8_1(s3in_, s3q8_, kWidth * n * 3, 1, st_);
         kq = (const uint8_t*) s3q8_ + wq;
         vq = (const uint8_t*) s3q8_ + 2 * wq;
     } else {
@@ -1267,17 +1285,23 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
             if (il == 0) axpy(r_, 1.f, cur_, n * kWidth, false, st_);
             else depth_mix(fp(b.aquery) + (swa ? 0 : i * kWidth), cur_, 0, n);
             if (loop) control(b, il, i, cur_, n);
-            rms_norm(cur_, fp(*norm[i]), input_[i], kWidth, n, rms_eps_, st_);
+            // this stream's norm and its Q8_1 in one launch; K and V write their own single-row buffers
+            if (norm_q8_ && mmv && (streams == 1 || n == 1)) {
+                void* q = streams == 1 || i == 0 ? xq_ : i == 1 ? (void*) kq8_ : (void*) vq8_;
+                const kernels::NormQ8Row r{cur_, fp(*norm[i]), input_[i], q};
+                kernels::native_rms_norm_q8_1_rows(&r, 1, kWidth, n, rms_eps_, sum_threads(kWidth), st_);
+                q8in = true;
+            } else rms_norm(cur_, fp(*norm[i]), input_[i], kWidth, n, rms_eps_, st_);
         }
         if (streams == 3) {
             xk = input_[1];
             xv = input_[2];
+            if (q8in && n == 1) kq = kq8_, vq = vq8_;
         }
     }
     // MMVQ uses the same Q8_1 input for Q, relative bias and the attention gate (also K and V when
     // they share the input). The matrix-matrix prompt path uses its own layout instead.
-    const bool mmv = n < kStageRows;
-    if (mmv && !three) kernels::native_quantize_q8_1(xq, xq_, kWidth * n, 1, st_);
+    if (mmv && !q8in) kernels::native_quantize_q8_1(xq, xq_, kWidth * n, 1, st_);
     const void* shared = three ? s3q8_ : mmv ? xq_ : nullptr;
     if (fused(n) && n == 1) project(b, xq, xk, xv, streams == 1, shared, kq, vq);
     else {
