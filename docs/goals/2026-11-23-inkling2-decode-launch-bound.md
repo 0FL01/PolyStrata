@@ -160,23 +160,25 @@ limits, and deploy to production.
 
 ## Current Checkpoint
 
-- Closes: R1, R2, R3 (all three launch-count fusions won, shipped and deployed; statuses above).
+- Closes: R1, R2, R3 (all three launch-count fusions won, shipped and deployed; statuses above). P2d, the last
+  mapped launch fusion, FAILED on measurement and is reverted (the log below has the mechanism).
 - Done: R4 (guard + incident); P1's system side (user actions recorded: `coolercontrold` is a root service,
   `amdgpu.mes=0` needs root and a reboot, no sudo password on this machine); P2a (`273fa1a0`,
   `STRATA_INKLING_NORM_Q8=1`, +1.48%); P2c (`e2027e4b`, `STRATA_INKLING_TAIL_MOE=1`, +0.57%); P2b (`56eb42bd`,
   `STRATA_INKLING_ROUTE_DUAL=1`, +0.67%); the guard's kwin-monitor crash fix (`003e5fd9`); deployment to production
   (binary `strata-poly-56eb42bd` + the three switches in the service env; live check passed; 16K direct pairs
-  above). Compounded forced-decode win +2.7% on the kept set; 16K +2.3% direct.
-- Smallest next action: P2d (mix + the rows-norm after it in one kernel, the last mapped launch fusion, est
-  +1.7-1.9%: 48 norm launches a token, 0.22 ms busy + ~0.16 ms of launch floor). The full recipe, call sites and
-  gates are in "The next cycle's map" below.
-- Expected evidence: a bitwise fused-vs-two-launch test in the pattern of `poly_norm_q8_test`, a launch-table trace
-  (mix path unchanged, `rms_norm_q8_1_rows` 48 -> 0 a token), A/B forced 94+300 (5 pairs) and 16K (3 pairs),
-  review subagent before the commit.
-- Stop or replan if: the mix phase's compiled form cannot be reproduced bit for bit in the fused kernel after the
-  SASS archaeology (the P2a fights were three; this one has ten reductions and an `expf`), or the A/B gain lands
-  inside the spread - then record the failure, and the next candidates are the situ+down merge and the user actions
-  of P1.
+  above). Compounded forced-decode win +2.7% on the kept set; 16K +2.3% direct. P2d attempted after the deploy:
+  bitwise 28/28, A/B -1.2%, reverted, tree clean at `56eb42bd` again (the engine's flag gone; a 94+96 sanity run
+  at 43.69 tok/s).
+- Smallest next action: the situ+down merge (est +1.2%, the one remaining measured-payoff item: fold the SiTU
+  activation and its Q8_1 quantize into the NVFP4 slot kernel's down launch; the launches' own geometry kept, so
+  the P2d collapse does not apply). The recipe is in "The next cycle's map" below.
+- Expected evidence: a bitwise fused-vs-two-launch test (the gate_up product tree, the situ expression's compiled
+  form and the quantize's are three separate surfaces), a trace with `situ_rows_q8_1` 48 -> 0 a token, A/B forced
+  94+300 (5 pairs) and 16K (3 pairs), review subagent before the commit.
+- Stop or replan if: the activation's compiled form cannot be reproduced bit for bit inside the slot kernel's
+  warps, or the A/B gain lands inside the spread - then the round's engine work is done: what remains are the
+  user actions of P1 and the structural limits, all recorded in the map.
 
 ## Profiling (this round)
 
@@ -290,24 +292,19 @@ dense Q8_0 `segments<8>` 2.846 (48, 59.3 us); o-proj `Q80Block` 1.113 (48, 23.2)
 0.218 (48, 4.5); `mix3` 0.215 (28, 7.7); `heads_kv` 0.193 (48); `control_in` 0.161 + `in3` 0.146 + `out` 0.131
 (72); `situ_rows_q8_1` 0.118 (48, 2.5); logits copy 0.031 (1).
 
-- P2d mix + rows-norm, est +1.7-1.9% (the 48 `rms_norm_q8_1_rows` launches: 0.22 ms busy + ~0.16 ms launch
-  floor). `mix_row` (inkling2.cu ~60-124) is an attention-style softmax over up to 5 banks: a thread owns
-  kPer = 2304/128 = 18 values a bank, per-bank ss and dot through explicit `__fmaf_rn` + wave-reduce trees,
-  `scale = rsqrtf(ss/kRowWidth + 1e-6)`, `w = dot*scale*rsqrtf(kRowWidth)`, softmax `expf(w - top)`, and the value
-  is `Σ __fmaf_rn(w*scale, x, val) / sum`. The fusable pairs: `mix_kernel` at 1153 (one-stream depth-mix ->
-  `cur_`) then the rows-norm at ~1289; `mix3_kernel` at 1200 (three-stream, in `heads()` -> `s3cur_`) then the
-  rows-norm right after it. NOT fusable: the msg mix at ~1161 (its output feeds `control_in3` without a norm) and
-  the loop control's mixes. Plan: one kernel, mix phase on threads 0..127 writing the row to shared, then the norm
-  phase over the shared row with the P2a recipe exactly (`__fmaf_rn` squares on the SUM stride, `1.0f/sqrtf`,
-  `#pragma clang fp contract(off)` around the quantize); the weight row and the y/q8_1 destinations are the same
-  buffers the two launches used. Gates: fused-vs-two-launch bitwise on the normed floats AND the q8_1 bytes
-  (`poly_norm_q8_test` pattern); SASS archaeology on `mix_row`'s compiled forms inside the fused context before any
-  run; A/B 5 pairs + 16K 3 pairs; review before the commit.
+- P2d mix + rows-norm: DEAD - built, proven bitwise, measured slower, reverted. One-line mechanism: the norm's
+  SUM=1024 reduction forces ONE 1024-thread block a row, and the producers' block-level parallelism does not fit
+  inside it - `control_out3` ran 72 blocks x 256 threads per stream (load latency hidden by ~18K threads in
+  flight), the fused kernel swept 18x inside 3 blocks, and the saved ~4.5 us launch floor bought nothing against
+  +6/+16 us of GPU time per visit (trace: `mix_norm_q8` 18.8 us vs mix3 8.6 + rows 4.5; `ctrl_norm_q8` 33.0 us vs
+  control_out3 12.1 + rows 4.5; A/B off 44.32 vs on 43.80 tok/s, off 4/5 pairs). Numbers and the full story: the
+  experiment log's P2d entry. This closes the launch-count fusion family on this card: every remaining adjacent
+  pair is this same geometry collapse or needs a grid barrier (banned per C4).
 - situ + down merge, est +1.2% (the 48 `situ_rows_q8_1` launches, ~0.28 ms with their floor): fold the SiTU
   activation and the Q8_1 quantize into the NVFP4 slot kernel's down launch (elementwise in the warp that owns
   the 32-value block; no barrier). Deep surgery in `iq_kernels.cu` + `kernels.cu`'s `situ_rows_q8_1`; THREE
   bitwise surfaces (the gate_up product tree unchanged, the situ expression's compiled form, the quantize with
-  the P2a-verified tools). Only after P2d resolves.
+  the P2a-verified tools). This is now the map's next candidate (P2d above is dead).
 - P3 dense-segment bandwidth: DOWNGRADED. The plan's 238-256 GB/s was the COLD microbench number; in the engine
   the five projections run hot (42-59 us for 21 MB a visit, ~357-500 GB/s effective, Infinity Cache reuse across
   tokens) - the real headroom is a fraction of the 1.0 ms upper bound.
@@ -403,6 +400,27 @@ dense Q8_0 `segments<8>` 2.846 (48, 59.3 us); o-proj `Q80Block` 1.113 (48, 23.2)
   3/3 pairs). R2 holds; the win ships. The review (independent subagent on the diff) found no blockers; its
   three notes - refuse the shapes the copy cannot carry whole, seed the fallback's destinations and prove a
   refusal writes nothing, and two comments that still described the reverted norm-side copy - are applied.
+- P2d (the mix/control output + its rows-norm in one launch), FAILED AND REVERTED, with the mechanism measured:
+  the two fused kernels were bit for bit the two launches - `poly_mix_norm_test` 28/28 (12 mix cases and 2 control
+  cases a seed, `adjacent` and `separate` layouts, the engine's own kernel source via the shared
+  `inkling_mix_norm.cuh`), and the SASS instruction-identical (the control chains' `v_mul + v_fmac x3`, the gate
+  write's `2 x v_bfi + v_sub + v_mul + v_fmac`, the norm's two rounded multiplies and plain `v_add` butterfly leaf,
+  the libdevice sqrt; `#pragma clang fp contract(off)` scopes correctly inside a nested block when the control
+  phase's own contraction must survive). The loss was geometry: the norm's SUM = 1024 reduction forces one
+  1024-thread block a row, and the producer's parallelism did not fit in it. The trace: `mix_norm_q8` 18.8 us
+  against `mix3` 8.6 + the rows 4.5; `ctrl_norm_q8` 33.0 against `control_out3` 12.1 + the rows 4.5 - the control
+  phase swept its 2304 channels 18 times inside one block where the old launch ran 72 blocks x 256 threads a
+  stream (216 blocks, the loads' latency under 18K threads in flight), and the mix phase's wide load schedule did
+  not survive the shared register budget. A/B forced 94+300, 5 pairs: off 44.32, on 43.80 tok/s mean (off wins
+  4/5, -1.2%); the trace's busy is +0.53 ms a token. One launch saved is ~4.5 us of floor and gap: it buys
+  nothing against 6-16 us of GPU time lost to serialization. Reverted; the launch-count fusion family is spent
+  (every remaining adjacent pair is this same collapse or needs a grid barrier, which this card's display driver
+  cannot take).
+- The remaining map after P2d: the situ+down merge (est +1.2%: fold the SiTU activation and the Q8_1 quantize
+  into the NVFP4 slot kernel's down launch - elementwise in the warp that owns the 32-value block, the launches'
+  own geometry kept, so the P2d collapse does not apply; three bitwise surfaces: the gate_up product tree, the
+  situ expression's compiled form, the quantize with the norm kernel's verified tools), then the user actions
+  (`amdgpu.mes=0`, `coolercontrold`) and the structural limits below.
 
 ## Black screens of 2026-11-23 (what not to repeat)
 
@@ -468,6 +486,12 @@ The rules (C3-C5), in plain words:
 - 2026-11-23: R1/R2/R3 verified (statuses above). Deploy: binary `strata-poly-56eb42bd` + the three switches in
   the service env, live check "test passed", service running; 16K direct pairs (all off vs all on) 41.84 ->
   42.81 tok/s mean. Next: P2d per the map above.
+- 2026-11-23: P2d FAILED and reverted. Built as designed, bitwise 28/28 (mix_norm_test ALL OK), SASS
+  instruction-identical phases; measured: A/B 5 pairs off 44.32 vs on 43.80 tok/s (off 4/5), trace busy +0.53
+  ms a token (mix_norm_q8 18.8 us vs 13.1 two-launch; ctrl_norm_q8 33.0 vs 16.6). Mechanism: the norm's
+  one-1024-block-a-row geometry serializes the producer's block parallelism. Reverted cleanly (tree
+  byte-identical to 56eb42bd, sanity 43.69 tok/s); the fusion family is spent - see the map. Next: the
+  situ+down merge (est +1.2%) in a fresh cycle, or stop here.
 
 ## Current State
 
@@ -475,5 +499,5 @@ The rules (C3-C5), in plain words:
   compounded +2.7% forced decode, +2.3% at 16K, deployed to production, service live.
 - Last relevant evidence: the 16K direct pairs and the live check; the trace table in "The next cycle's map".
 - Blocker: none. The remaining items are sized and mapped, not blocked.
-- Next: P2d (mix + rows-norm, est +1.7-1.9%), then the situ+down merge (est +1.2%); P1's system side and the
-  structural limits are user actions and measured dead ends, recorded in the map.
+- Next: the situ+down merge (est +1.2%) in a fresh cycle; P1's system side and the structural limits are user
+  actions and measured dead ends, recorded in the map. This round's engine work is done.
