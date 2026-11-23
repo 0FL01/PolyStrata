@@ -85,7 +85,8 @@ class Guard:
                 msg = journal_text(entry.get("MESSAGE", "")).lower()
                 source = journal_text(entry.get("_COMM", "")) + journal_text(entry.get("SYSLOG_IDENTIFIER", ""))
                 fault = is_fault(msg, "amdgpu" in msg)
-                fault |= ("kwin" in source.lower() and FAULT_WORDS.search(msg))
+                # re.search() yields None on no match (and a Match on one): both would poison the bool below
+                fault |= "kwin" in source.lower() and FAULT_WORDS.search(msg) is not None
                 if fault:
                     self.reasons.append(f"fresh {scope} fault; see private journal")
                     self.unsafe.set()
