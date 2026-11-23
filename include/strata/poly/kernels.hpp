@@ -23,6 +23,12 @@ void gemv_bf16(const uint16_t* w, const float* x, float* y, int n_in, int n_out,
 /// it, Inkling's STRATA_INKLING_DECODE=1): its sums go in another order than gemv_f32's.
 void gemv_f32_waves(const float* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows,
                     void* stream);
+/// gemv_f32_waves' own one-block-a-row shape (its dispatch condition, the same launch) with the product also
+/// written to y_host and the input row's values to x_host: the same product, and the host's copies the router's
+/// scores and the experts' input ride it (STRATA_INKLING_ROUTE_DUAL).  False, nothing written: not that shape, or
+/// the copy could not carry it whole (one input row a token: rows_per_x = n_out, and n_in <= 256 * n_out).
+bool gemv_f32_waves_dual(const float* w, const float* x, float* y, float* y_host, float* x_host, int n_in,
+                         int n_out, int rows_per_x, int rows, void* stream);
 /// Up to four gemv_f32_waves() products of the same shape in one launch, each its own w, x and y; every output is
 /// the one gemv_f32_waves() gives for its segment, to the bit.
 struct F32Segments {

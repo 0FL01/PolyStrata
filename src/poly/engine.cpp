@@ -3742,7 +3742,16 @@ void Engine::lin_raw(const Dev& w, const float* x, float* y, int n, const void* 
                              y + (size_t) at * w.n_out, w.n_in, w.n_out, std::min(8, n - at), st_);
 }
 
-void Engine::router_scores(const Layer& L, int n) { lin(L.gate_inp, xn_, rl_, n, xq_); }
+void Engine::router_scores(const Layer& L, int n) {
+    // STRATA_INKLING_ROUTE_DUAL: one token's scores also land in h_rl_ and the gemv's input row (the normed
+    // experts' input) in h_x_, the host's copies, in the gemv's own launch - moe_router() then launches no
+    // copy2 for them.  The product's sums are the plain path's own (the copies ride the same kernel).
+    route_dual_done_ = route_dual_ && n == 1 && wave_gemv_ && L.gate_inp.type == kTypeF32 &&
+                       gemv_f32_waves_dual(fp(L.gate_inp), xn_, rl_, h_rl_, h_x_, L.gate_inp.n_in, L.gate_inp.n_out,
+                                           L.gate_inp.n_out, n, st_);
+    if (route_dual_done_) return;
+    lin(L.gate_inp, xn_, rl_, n, xq_);
+}
 
 bool Engine::batched(const Layer& L, int n) const { return mmq_ && L.mmq && n >= kStageRows; }
 
@@ -3751,7 +3760,10 @@ int Engine::card_rows() const { return block_guess_ ? std::max(kSumRows, opt_.wi
 // The router's scores, and the copies of them and of the experts' input to the host.
 void Engine::moe_router(const Layer& L, int n) {
     router_scores(L, n);
-    copy2(rl_, h_rl_, n * n_expert_, xn_, h_x_, n * n_embd_, st_);
+    // STRATA_INKLING_ROUTE_DUAL wrote the host its copies itself - the gemv's product to h_rl_ and its input
+    // row to h_x_ (router_scores()) - and nothing else; a visit that fell back - or a model without it -
+    // carries them as before
+    if (!route_dual_done_) copy2(rl_, h_rl_, n * n_expert_, xn_, h_x_, n * n_embd_, st_);
     if (prefetch_k_ <= 0 || block_pass_ || n > 16) return;
     size_t part = 0;
     for (size_t q = 0; q < 8; ++q)

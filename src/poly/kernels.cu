@@ -2840,10 +2840,13 @@ gemv_waves_kernel(const float* __restrict__ w, const float* __restrict__ x, floa
     gemv_waves_body<L>(w, x, y, n_in, n_out, rows_per_x);
 }
 
-// A row too long for the few rows there are to fill the card: a block a row, float4s 256 apart.
+// A row too long for the few rows there are to fill the card: a block a row, float4s 256 apart.  y2 (null: none)
+// also takes the product, and x_host (null: none) the input row's values: the host's copies the router's scores
+// and the experts' input ride (STRATA_INKLING_ROUTE_DUAL) - copy2() would have carried both.  The product's sums
+// are the plain kernel's own, untouched.
 __device__ __forceinline__ void
 gemv_rows_body(const float* __restrict__ w, const float* __restrict__ x, float* __restrict__ y, int n_in, int n_out,
-               int rows_per_x) {
+               int rows_per_x, float* __restrict__ y2 = nullptr, float* __restrict__ x_host = nullptr) {
     __shared__ float waves[8];
     const int o = blockIdx.x;
     const size_t tok = blockIdx.y;
@@ -2864,6 +2867,11 @@ gemv_rows_body(const float* __restrict__ w, const float* __restrict__ x, float* 
 #pragma unroll
         for (int i = 0; i < 8; ++i) sum += waves[i];
         y[tok * n_out + o] = sum;
+        if (y2) y2[tok * n_out + o] = sum;
+    }
+    if (x_host) {   // the row's own values to the host, a thread a float
+        const int i = blockIdx.x * 256 + threadIdx.x;
+        if (i < n_in) x_host[tok * n_in + i] = x[tok * n_in + i];
     }
 }
 
@@ -2871,6 +2879,12 @@ __global__ void __launch_bounds__(256)
 gemv_rows_kernel(const float* __restrict__ w, const float* __restrict__ x, float* __restrict__ y, int n_in, int n_out,
                  int rows_per_x) {
     gemv_rows_body(w, x, y, n_in, n_out, rows_per_x);
+}
+
+__global__ void __launch_bounds__(256)
+gemv_rows_dual_kernel(const float* __restrict__ w, const float* __restrict__ x, float* __restrict__ y,
+                      float* __restrict__ y2, float* __restrict__ x_host, int n_in, int n_out, int rows_per_x) {
+    gemv_rows_body(w, x, y, n_in, n_out, rows_per_x, y2, x_host);
 }
 
 // gemv_f32_waves_segments(): a segment a blockIdx.z, each row as the one-segment kernels'
@@ -2904,6 +2918,21 @@ void gemv_f32_waves(const float* w, const float* x, float* y, int n_in, int n_ou
     else if (n_in >= 128) launch.template operator()<16>();
     else if (n_in >= 64) launch.template operator()<8>();
     else launch.template operator()<4>();
+}
+
+// gemv_f32_waves' own one-block-a-row shape, with the product also written to y_host and the input row's values
+// to x_host: the same product, and the host's copies the router's scores and the experts' input ride it
+// (STRATA_INKLING_ROUTE_DUAL), which copy2() would have carried.  False, with nothing written: this shape is not
+// that one, or the copy could not carry it whole - one input row a token (rows_per_x = n_out), and a thread a
+// float for all of it (n_in <= 256 * n_out, the launch's own threads) - and the caller takes the plain path.
+bool gemv_f32_waves_dual(const float* w, const float* x, float* y, float* y_host, float* x_host, int n_in,
+                         int n_out, int rows_per_x, int rows, void* stream) {
+    if (n_in % 4 || (reinterpret_cast<uintptr_t>(w) | reinterpret_cast<uintptr_t>(x)) % 16) return false;
+    if (!(n_in >= 1024 && (n_out + 7) / 8 * rows < 80)) return false;   // gemv_f32_waves' condition, the same launch
+    if (rows_per_x != n_out || n_in > 256 * n_out) return false;   // x_host: the token's one row, a thread a float
+    const cudaStream_t st = (cudaStream_t) stream;
+    gemv_rows_dual_kernel<<<dim3(n_out, rows), 256, 0, st>>>(w, x, y, y_host, x_host, n_in, n_out, rows_per_x);
+    return true;
 }
 
 void gemv_f32_waves_segments(const F32Segments& s, int count, int n_in, int n_out, int rows_per_x, int rows,

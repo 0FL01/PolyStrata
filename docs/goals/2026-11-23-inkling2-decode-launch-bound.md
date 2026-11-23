@@ -313,6 +313,32 @@ estimates from the measurements above, to be replaced by the A/B.
   without fault words crashed the monitor with a TypeError, and a real kwin fault line would have crashed it
   too instead of stopping the run. The guard still failed closed (engine killed, stop-reasons written, no VRAM
   breach, no amdgpu fault). Fixed to `... is not None`; the fix is committed on its own.
+- P2b, first idea, REVERTED: "only MoE visits route" (STRATA_INKLING_ROUTE_MOE) - a no-op. The trace's full-token
+  dump shows ALL 48 visits are MoE (MmvqSlots 2 a visit = 96 a token, copy2 of the router's scores 1:1 with
+  visits): the loop's edge layers are not dense; only the kPhysical core distinction in the old notes was
+  wrong. Reverted without shipping.
+- P2b (the router's copies ride its producers, `STRATA_INKLING_ROUTE_DUAL=1`): every visit's router ended in one
+  `copy2` D2H - the 128 scores to `h_rl_` and the 2304 normed floats of the experts' input to `h_x_` - ~48
+  launches a token. Now `gemv_f32_waves_dual()` (the same one-block-a-row launch `lin()` takes for the router's
+  F32 128x2304, same condition, same grid) also writes `h_rl_` and copies its own input row to `h_x_`, and
+  `moe_router()` launches no copy2 (a shape that falls back carries them as before). A first attempt wrote
+  `h_x_` inside the FFN norm kernel - REVERTED: the extra store materialized the normed product and killed the
+  contract's fma contraction into the Q8_1 block sum, so `poly_norm_q8_test`'s frozen-kernel "diff (expected)"
+  lines turned "same" against HEAD's own output (the norm's values changed - production bits would move). The
+  lesson: a store of a value the compiler had folded into a later expression changes that expression's
+  contraction; the frozen kernels take no new stores, and the value-level gate is the stash dance - HEAD-built
+  baseline output vs the modified build's, byte-diffed - not a SASS shape match (the SASS reordering of
+  `v_max`/`v_add` in that attempt looked innocent and was not).
+- P2b evidence: `poly_route_dual_test` all passed (the dual gemv's products the plain launch's bits, `h_rl_` the
+  product's, `h_x_` the input's - both to pinned memory, as the engine's are; a shape the plain path gives the
+  waves kernel, or one whose input the launch's threads cannot copy whole (`n_in > 256 * n_out`), takes no dual
+  and writes nothing - sentinels prove it); `poly_norm_q8_test`'s output byte-identical to the HEAD-built
+  baseline (the norm kernel is untouched again); trace: `copy2` 48.98 -> 0.98 a token, `gemv_rows_dual` 48,
+  launches 1008.7 -> 960.7 a token, busy 15.15 -> 15.11 ms; A/B forced 94+300 with the two shipped flags on:
+  off 47.47, on 47.78 tok/s mean of 5 pairs (+0.67%, deltas +0.29 to +0.34, 5/5); 16K: 42.91 -> 43.02 (+0.26%,
+  3/3 pairs). R2 holds; the win ships. The review (independent subagent on the diff) found no blockers; its
+  three notes - refuse the shapes the copy cannot carry whole, seed the fallback's destinations and prove a
+  refusal writes nothing, and two comments that still described the reverted norm-side copy - are applied.
 
 ## Black screens of 2026-11-23 (what not to repeat)
 

@@ -2183,6 +2183,12 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
                                                         ${_strata_gpu_include_directories})
   target_link_libraries(poly_tail_moe_test PRIVATE strata_kernels ${_strata_gpu_blas_target}
                                                    ${_strata_gpu_runtime_target})
+  # the router's copies riding its producers against the plain launches; needs a card, run by hand
+  add_executable(poly_route_dual_test src/poly/route_dual_test.cu src/poly/kernels.cu)
+  target_include_directories(poly_route_dual_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+                                                         ${_strata_gpu_include_directories})
+  target_link_libraries(poly_route_dual_test PRIVATE strata_kernels ${_strata_gpu_blas_target}
+                                                     ${_strata_gpu_runtime_target})
   # the multi-segment F32 products and RMS norms against one call a segment; needs a card, run by hand
   add_executable(poly_segments_f32_test src/poly/segments_f32_test.cu src/poly/kernels.cu)
   target_include_directories(poly_segments_f32_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include

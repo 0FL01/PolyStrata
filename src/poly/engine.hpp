@@ -872,6 +872,11 @@ protected:
     bool tail_record_ = false;  ///< STRATA_INKLING_TAIL_MOE: a model's layer_head() asks moe() to leave the visit's
                                 ///< routed experts for its layer_tail() to sum in its own launch, not add_scaled()
     TailSum tail_sum_{};        ///< those experts (moe() fills this; one token's: n <= kMaxUsed, at n == 1)
+    bool route_dual_ = false;   ///< STRATA_INKLING_ROUTE_DUAL (a model's load_geometry()): a visit's router writes
+                                ///< the host its copies itself in its gemv's launch - the scores to h_rl_, the
+                                ///< experts' input row to h_x_ (router_scores()) - and moe_router() launches no
+                                ///< copy2 for them.  One token at a time only.
+    bool route_dual_done_ = false;   ///< router_scores() took that path for the call under way
     float* wf_ = nullptr;      ///< the largest BF16 matrix as floats: lin() multiplies a prompt batch by cuBLAS
     size_t bf16_max_ = 0;      ///< that matrix's values
     float *g_ = nullptr, *u_ = nullptr, *h_ = nullptr, *d_ = nullptr, *rl_ = nullptr,

@@ -534,6 +534,11 @@ void Inkling2::load_geometry() {
     if (moe_tail_)
         std::fputs("strata-poly: STRATA_INKLING_TAIL_MOE=1: a fused visit's routed experts summed in its tail launch\n",
                    stderr);
+    const char* route_dual = std::getenv("STRATA_INKLING_ROUTE_DUAL");
+    route_dual_ = decode_ && route_dual && route_dual[0] == '1' && route_dual[1] == '\0';
+    if (route_dual_)
+        std::fputs("strata-poly: STRATA_INKLING_ROUTE_DUAL=1: the router's copies to the host ride its producers\n",
+                   stderr);
     if (!q8() && opt_.kv_format != KvFmt::kFp16)
         throw std::runtime_error("Inkling-2-Mini supports Q8_0 or FP16 KV");
     const int window = opt_.window;
@@ -1390,6 +1395,8 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
     depth_mix(fp(b.fquery), cur_, 0, n);
     if (loop) control(b, il, 3, cur_, n);
     kernels::native_add_rms_norm_q8_1(cur_, nullptr, fp(L.ffn_norm), xn_, xq_, kWidth, n, rms_eps_, 128, st_);
+    // with STRATA_INKLING_ROUTE_DUAL and one token, the router's gemv below also writes the host h_rl_ and h_x_,
+    // and moe_router() launches no copy2 for them
     if (!batched(L, n)) moe_router(L, n);
 }
 
