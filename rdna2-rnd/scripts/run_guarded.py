@@ -38,8 +38,10 @@ def is_fault(msg, amdgpu_line):
 
 
 class Guard:
-    def __init__(self, directory):
+    def __init__(self, directory, accept_before=None):
         self.directory = Path(directory)
+        # Epoch seconds: faults of this boot logged before it were reviewed by the user and do not refuse the launch.
+        self.accept_before = accept_before
         self.start = time.strftime("%Y-%m-%d %H:%M:%S")
         c = subprocess.run(["journalctl", "-n", "1", "--show-cursor", "--no-pager"], capture_output=True,
                            text=True, timeout=8, check=True)
@@ -111,6 +113,8 @@ class Guard:
         for line in p.stdout.splitlines():
             entry = json.loads(line)
             msg = journal_text(entry.get("MESSAGE", "")).lower()
+            if self.accept_before is not None and int(entry["__REALTIME_TIMESTAMP"]) < self.accept_before * 1e6:
+                continue
             if "amdgpu" in msg and GPU_TROUBLE.search(msg):
                 raise RuntimeError("the GPU took a fault or a reset earlier in this boot; reboot first: " +
                                    msg.strip()[:160])
@@ -145,6 +149,9 @@ class Guard:
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--output", type=Path, required=True)
+    ap.add_argument("--accept-faults-before", metavar="'YYYY-MM-DD HH:MM:SS'",
+                    help="ignore this boot's GPU faults logged before this local time (the user accepted them); "
+                         "faults after it, and any fresh fault during the run, still stop the run")
     ap.add_argument("command", nargs=argparse.REMAINDER)
     a = ap.parse_args()
     command = a.command[1:] if a.command[:1] == ["--"] else a.command
@@ -153,7 +160,10 @@ def main():
     os.umask(0o077)
     a.output.mkdir(parents=True, exist_ok=False)
     env = dict(os.environ, DEBUG_HIP_DYNAMIC_QUEUES="0")
-    with Guard(a.output) as guard, (a.output / "command.log").open("w") as log:
+    accept = None
+    if a.accept_faults_before:
+        accept = time.mktime(time.strptime(a.accept_faults_before, "%Y-%m-%d %H:%M:%S"))
+    with Guard(a.output, accept) as guard, (a.output / "command.log").open("w") as log:
         guard.proc = subprocess.Popen(command, env=env, stdout=log, stderr=log, start_new_session=True)
         code = guard.proc.wait()
     return code
