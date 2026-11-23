@@ -1,6 +1,6 @@
 # Goal: Inkling-2-Mini next levers on RDNA2 (decode, NVFP4 MMQ, prompt idle, R5, R6, 200K)
 
-Status: active (RECON done and measured; plan below; no engine code changed in this round yet)
+Status: active, paused by the user after plan step 1 (RECON measured; the expf check passed; no engine code changed)
 Source: user instruction of 2026-11-23 (verbatim below); the limits listed at the end of
 `docs/goals/2026-11-23-inkling2-fork-vectors.md` (session 3 account)
 Last updated: 2026-11-23
@@ -201,19 +201,24 @@ reverted from the tree).
 
 ## Current Checkpoint
 
-- Closes: R1 (D3), first step.
-- Smallest next action: exhaustive GPU-vs-host check of a ported glibc `expf` (and the full `route()` on recorded
-  router scores).
-- Expected evidence: 0 mismatches over the scores' float range, or the count that kills bit-exactness.
-- Stop or replan if: mismatches cannot be removed; then D3 ships only as a precision-level option, or D1 goes first.
-
-## Current State
-
-- Resolved: R6 (200K measured). RECON numbers above.
-- Production: `strata.service` restarted on the deployed `f442cbe2` config after the GPU runs; tree clean.
-- Next: plan step 1.
+- Closes: R1 (D3).
+- Done (step 1): the host's `expf` (glibc 2.44, `expf@plt` from `Inkling2::route()`) is reproduced bit for bit on
+  the GPU by a port of glibc's algorithm in double (`~/.cache/claude-fv/expf/expf.hip`: 32-entry table computed
+  from 2^(i/32) at 60 digits, shift 0x1.8p52, the three scaled polynomial constants, the >= 88 special cases).
+  Exhaustive over all 2^32 float bit patterns: **0 mismatches for `expf`, 0 for the router's `1/(1+expf(-x))`**,
+  for each of the four fused/unfused multiply-add variants (the double evaluation leaves no float rounding
+  flip). Sanity: OCML's `expf` in the same harness disagrees on 33,606,109 inputs (sigmoid 10,474,369), so the
+  check is not vacuous.
+- Smallest next action: the whole `route()` on the card (sigmoid, bias add, top-8 with the host's first-index
+  tie rule, the sequential weight sum, `expert_scale_ / (sum + 1e-20f)`, the NVFP4 down scale) against the host
+  on router scores recorded from a real decode (`--dump`-style capture of `h_rl_`), then the `MmvqIds` dispatch.
+- Expected evidence: identical ids and weight bits on every recorded visit.
+- Stop or replan if: the A/B of the finished path lands inside the spread (bound +4.5%).
 
 ## Material Decisions
+
+- 2026-11-23: User, after the plan: "Выполняй шаг — проверка expf на всех входах. Далее Делай копию плана в цель и
+  на этом работа остановлена" - step 1 run; the plan above is the goal's copy; work paused here.
 
 - 2026-11-23: The soft goal "prompt idle 3.1 s" is re-measured as 1.5 s steady at 32K; the rest was process
   start-up counted from the first kernel.
@@ -222,6 +227,8 @@ reverted from the tree).
 
 ## Checkpoint History
 
+- 2026-11-23: D3 step 1: GPU port of glibc expf bit-exact over all 2^32 inputs (and the sigmoid); next: the whole
+  route() on recorded scores. Paused by the user.
 - 2026-11-23: RECON: decode trace and sensitivity runs, VRAM map, slot-kernel microbench, router hack, MMQ phase
   split, 32K idle re-analysis, 200K end to end on both binaries. R6 verified.
 
