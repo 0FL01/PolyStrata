@@ -288,8 +288,12 @@ gfx1031; the register-level ideas that survive it are in P1b).
 ## Current Checkpoint
 
 - Closes: R1 (partially - the trace tables are in), R2 (done - the plan above).
-- Smallest next action: after the user reboots, run `bench1 check` under the guard (wiring), then `bench1 ceil` and
-  the `flash`/`decode` sweeps; fold the numbers into the Profiling section. Then start P1b experiments.
+- Smallest next action: after the user reboots, run one command -
+  `~/.cache/opencode-tmp/opencode/prefill-opt3/post-reboot.sh` - which chains `dbg` (staged
+  allocation probes of all three geometries) -> `check` (wiring) -> `ceil` -> `flash` -> `decode`,
+  every mode under the guard, stops/starts production itself, and stops the batch on the first
+  nonzero exit or non-empty stop-reasons; then fold the numbers into the Profiling section and
+  start P1b.
 - Expected evidence: bench1 logs (hot/flushed span curves, card ceilings), guard-clean runs.
 - Stop or replan if: the flash structural edits (P1b) cannot beat the tile-loop overhead (the flushed span curve
   will say), or the quality protocol rejects the precision paths (then P1 stops at the bitwise wins).
@@ -303,7 +307,14 @@ gfx1031; the register-level ideas that survive it are in P1b).
   `run-check2` the fault record).
 - Blocker: the guard refuses this boot after the 19:15:23 bench1 fault (my gate-buffer sizing bug; desktop survived);
   the remaining GPU RECON (bench1 runs) and all kernel experiments wait for a reboot, per the standing rule C4.
-- Next: user reboots (or lifts the rule explicitly) -> bench1 check/ceil/flash/decode -> P1b.
+- Next: user reboots (or lifts the rule explicitly) -> `post-reboot.sh` (the whole bench1 batch) -> P1b.
+- Blocked-time prep (19:17-19:27, no GPU touched): bench1 re-verified against the header
+  (`Attend` field shapes, `attend_plain/flash/decode` signatures - all match); fixture gate fill
+  fixed (the loop under-filled `[n][24][128]` to `[n][24]`, benign for parity but unrepresentative);
+  `dbg` mode now stages allocation probes through the small, flash (198,656 rows) and decode
+  (190,008 rows) geometries with a Buffers destructor between them, so an OOM/mapping problem
+  surfaces before any kernel runs; `post-reboot.sh` written and bash -n checked. bench1 rebuilt
+  (BUILD-OK 19:26).
 
 ## Material Decisions
 
