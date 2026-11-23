@@ -394,6 +394,21 @@ unroll 4 and batched softmax; fp16-output GEMMs and split-K gate as fork patholo
   common max frame), the far-loop non-finite guard missing (restored), the test relaxing on non-gfx1031 (fixed).
   Fixture lesson: `fvbench`'s K scales were 1/64 (codes*scale exact in F16); scales are random now.
 
+- **Re-profile after P1a/P2/P1c** (32K, all three on; `tr32k2`): 36.5 s prefill, kernel sum 34.2 s: NVFP4 gate/up J64
+  9.66 s (28.3%), flash_h2 7.24 s (21.2%), nvfp4_tail 4.42 s (12.9%), Q8_0 MMQ 4.35 s (12.7%), GPU idle 3.63 s
+  (9.6% of the span) - the idle share grew, the router round trip about 2.1 ms a visit.
+- **P3 kept: `STRATA_INKLING_KCOPY=1`** (engine.cpp `moe_rows`). Host timers (scratch build) per 2048-row visit:
+  prefetch 3.6 ms, routing 0.37 ms, tables 0.15 ms, the rest waiting for the GPU. The router scores' D2H and the
+  tables' H2D are DMA copies on `st_` that queue behind the visit's expert uploads on `up_`; `copy2()` kernels on
+  `st_` do the same copies: idle 3.63 -> 3.10 s in the trace (router -> memset -> quantize gaps gone), E2E 32K
+  36.48 s (mean of 6 baseline runs) -> 36.00 s (4 runs), -1.3%. Same bytes, bitwise. Review: no defect.
+  Refuted on the way: (a) `ROUTE_FIRST` (router GEMM queued before the prefetch): the gap moved from before the
+  router to after it, idle unchanged; (b) `hipMemcpyBatchAsync`: 150 individual H2D submits cost only 0.13-0.23 ms
+  after warm-up (microbench), so API submission is not the 3.6 ms; (c) the 3.6 ms is the bounce path (~2.6
+  unregistered experts a visit, those that left VRAM after the load) waiting 2.3 s in `cudaEventSynchronize`;
+  queuing the bounced copies first (`BOUNCE_FIRST`) removed that wait from the host but did not move the end to
+  end time (36.12/36.03 vs 36.11/35.78 s): the host wait was off the critical path. Both reverted.
+
 ## Current Checkpoint
 
 - Closes: R1 (re-measured: ceilings, flash and decode span curves, fresh 32K trace, ISA mixes), R2 (plan above).

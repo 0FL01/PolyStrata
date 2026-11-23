@@ -721,6 +721,7 @@ protected:
     int padded_vocab_ = 0;   ///< zero unless the token table and LM head have extra non-token rows
     bool looped_ = false;    ///< the model owns its visit order; reads go through all visits for each chunk
     bool prefetch_early_ = false;   ///< Inkling opt-in: enqueue prompt weights before the router's readback
+    bool kcopy_ = false;            ///< Inkling opt-in: the prompt router's readback and tables copied by a kernel
     int n_ff_ = 0;            ///< a dense FFN's width, in the architectures that have one
     int n_expert_ = 0, n_used_ = 0, n_ff_exp_ = 0, n_ff_shexp_ = 0, n_moe_ = 0;
     int rows_ = 1;            ///< tokens the scratch is sized for

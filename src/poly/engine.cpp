@@ -4624,6 +4624,11 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         if (spare) copy2(xn_, h_x_, n * n_embd_, nullptr, nullptr, 0, st_);
     } else if (spare) {
         copy2(rl_, h_rl_, n * n_expert_, xn_, h_x_, n * n_embd_, st_);
+    } else if (kcopy_) {
+        // STRATA_INKLING_KCOPY: a kernel writes the scores into the pinned buffer. A DMA copy queued on st_ waited
+        // behind the visit's expert uploads on up_ (one copy engine serves both in order): with the tables' copy
+        // below, 0.5 s of a 32K prompt's 3.6 s GPU idle on RX 6700 XT.
+        copy2(rl_, h_rl_, n * n_expert_, nullptr, nullptr, 0, st_);
     } else {
         ck(cudaMemcpyAsync(h_rl_, rl_, (size_t) n * n_expert_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
            "router");
@@ -4812,13 +4817,16 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         }
         b[n_chan] = at;
     }
-    ck(cudaMemcpyAsync(tab_, h_tab_,
-                       (3 * cap + 3 * (size_t) n_expert_ + 3 + kClasses * cb_row + 2 * n_tile * tile_row * (n_tile > 1)) *
-                           sizeof(int32_t),
-                       cudaMemcpyHostToDevice, cs(st_)),
-       "expert rows");
-    if ((es.gate || es.up) && rg > 0)
-        ck(cudaMemcpyAsync(d_ex_, h_ex_, (size_t) rg * sizeof(int32_t), cudaMemcpyHostToDevice, cs(st_)), "expert rows");
+    const size_t tab_words = 3 * cap + 3 * (size_t) n_expert_ + 3 + kClasses * cb_row + 2 * n_tile * tile_row * (n_tile > 1);
+    const bool ex_too = (es.gate || es.up) && rg > 0;
+    if (kcopy_) {   // the tables by a kernel too (above), one launch for both
+        copy2(h_tab_, tab_, (int) tab_words, h_ex_, d_ex_, ex_too ? rg : 0, st_);
+    } else {
+        ck(cudaMemcpyAsync(tab_, h_tab_, tab_words * sizeof(int32_t), cudaMemcpyHostToDevice, cs(st_)), "expert rows");
+        if (ex_too)
+            ck(cudaMemcpyAsync(d_ex_, h_ex_, (size_t) rg * sizeof(int32_t), cudaMemcpyHostToDevice, cs(st_)),
+               "expert rows");
+    }
 
     const int rc = bounds[n_cached];   // the rows of the cached experts
     stats_.batch_cached += rc;

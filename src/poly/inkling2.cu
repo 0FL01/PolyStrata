@@ -511,6 +511,11 @@ void Inkling2::load_geometry() {
     prefetch_early_ = prefetch && prefetch[0] == '1' && prefetch[1] == '\0';
     if (prefetch_early_)
         std::fputs("strata-poly: STRATA_INKLING_PREFETCH=1: prompt experts queued before router readback\n", stderr);
+    const char* kcopy = std::getenv("STRATA_INKLING_KCOPY");
+    kcopy_ = kcopy && kcopy[0] == '1' && kcopy[1] == '\0';
+    if (kcopy_)
+        std::fputs("strata-poly: STRATA_INKLING_KCOPY=1: prompt router scores and expert tables copied by a kernel\n",
+                   stderr);
     const char* decode = std::getenv("STRATA_INKLING_DECODE");
     decode_ = decode && decode[0] == '1' && decode[1] == '\0';
     wave_gemv_ = head_warps_ = situ_q8_ = decode_;
