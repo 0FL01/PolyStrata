@@ -197,11 +197,21 @@ __global__ void conv2_kernel(Conv k, Conv v, int width, int n, size_t stride) {
 
 // A static convolution of x (plus `add`, the CPU experts' sum, when there is one) added to the residual r, as
 // axpy(add, 1, x), conv() and axpy(x, 1, r) do. With `depth`, a block of layers starts: depth takes r and r takes x,
-// as axpy(r, 1, depth) and axpy(x, 1, r) without adding do.
+// as axpy(r, 1, depth) and axpy(x, 1, r) without adding do. With `moe`, the routed experts' rows in the router's
+// order (STRATA_INKLING_TAIL_MOE, one token's: n == 1) are the x itself, as the add_scaled() chain wrote it into fo_:
+// the same sums, one launch less.
 __global__ void conv_add_kernel(float* x, const float* add, float* state, const float* w, float* r, float* depth,
-                                int width, int n, bool clean, float* snap = nullptr, size_t stride = 0) {
+                                int width, int n, bool clean, TailSum moe, float* snap = nullptr, size_t stride = 0) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= width) return;
+    if (moe.n)
+        for (int t = 0; t < n; ++t) {
+            const size_t at = (size_t) t * width + i;
+            // fo_ was 0 where add_scaled() started (moe_shared()), so this chain is its sums bit for bit
+            float v = 0.f;
+            for (int k = 0; k < moe.n; ++k) v = v + moe.x[k][at] * moe.w[k];
+            x[at] = v;
+        }
     if (add)
         for (int t = 0; t < n; ++t) x[(size_t) t * width + i] = x[(size_t) t * width + i] + add[(size_t) t * width + i];
     conv_channel(x, state, w, nullptr, width, n, i, snap, stride);
@@ -518,6 +528,11 @@ void Inkling2::load_geometry() {
     norm_q8_ = decode_ && norm_q8 && norm_q8[0] == '1' && norm_q8[1] == '\0';
     if (norm_q8_)
         std::fputs("strata-poly: STRATA_INKLING_NORM_Q8=1: a visit's stream norms and their Q8_1 in one launch\n",
+                   stderr);
+    const char* tail_moe = std::getenv("STRATA_INKLING_TAIL_MOE");
+    moe_tail_ = decode_ && tail_moe && tail_moe[0] == '1' && tail_moe[1] == '\0';
+    if (moe_tail_)
+        std::fputs("strata-poly: STRATA_INKLING_TAIL_MOE=1: a fused visit's routed experts summed in its tail launch\n",
                    stderr);
     if (!q8() && opt_.kv_format != KvFmt::kFp16)
         throw std::runtime_error("Inkling-2-Mini supports Q8_0 or FP16 KV");
@@ -1262,6 +1277,10 @@ void Inkling2::run_visits(int n) {
 
 void Inkling2::layer_head(Layer& L, int il, int n) {
     const Block& b = blocks_[il];
+    // STRATA_INKLING_TAIL_MOE: this visit's cached experts wait in tail_sum_ for the tail launch, or fo_ holds
+    // their add_scaled() sums as before.  One token only: the record carries no rows.  Every visit starts fresh.
+    tail_sum_.n = 0;
+    tail_record_ = moe_tail_ && fused(n) && L.moe && n == 1;
     const bool swa = local(visit_), loop = messages();
     const Dev* norm[3] = {&L.attn_norm, swa ? &L.attn_norm : &b.knorm, swa ? &L.attn_norm : &b.vnorm};
     const int streams = swa && !loop ? 1 : 3;
@@ -1360,7 +1379,7 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
     if (fused(n))
         conv_add_kernel<<<div_up(kWidth, kThreads), kThreads, 0, cs(st_)>>>(
             ao_, nullptr, hist + 6 * kKey, fp(b.aconv), r_, il % kBlock == 0 ? depth_[depth_n_++] : nullptr, kWidth, n,
-            false, snap_of(hist + 6 * kKey), rec_n_);
+            false, TailSum{}, snap_of(hist + 6 * kKey), rec_n_);
     else conv(ao_, hist + 6 * kKey, fp(b.aconv), nullptr, kWidth, n);
     if (fused(n)) {   // conv_add_kernel() did the rest
     } else if (il % kBlock == 0) {
@@ -1433,11 +1452,13 @@ void Inkling2::moe_add(int n) {
 void Inkling2::layer_tail(Layer&, int il, int n) {
     float* hist = state_ + (size_t) visit_ * kConvFloats + 6 * kKey + 3 * kWidth;
     if (fused(n)) {
+        // with the record's experts summed here (STRATA_INKLING_TAIL_MOE), moe() launched nothing for them
         conv_add_kernel<<<div_up(kWidth, kThreads), kThreads, 0, cs(st_)>>>(
-            fo_, cpu_sum_ ? h_cpu_ : nullptr, hist, fp(blocks_[il].fconv), r_, nullptr, kWidth, n, true, snap_of(hist),
-            rec_n_);
+            fo_, cpu_sum_ ? h_cpu_ : nullptr, hist, fp(blocks_[il].fconv), r_, nullptr, kWidth, n, true,
+            tail_record_ ? tail_sum_ : TailSum{}, snap_of(hist), rec_n_);
         cpu_sum_ = false;
         fo_clean_ = true;
+        tail_record_ = false;   // one record's life: layer_head() fills the next visit's
         dbg("l_out", visit_, r_, kWidth);
         return;
     }

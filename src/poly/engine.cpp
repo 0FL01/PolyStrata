@@ -4265,6 +4265,10 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
         if (pool_) pool_take(L, il, host, n_host);
         stats_.gpu_experts += n_cached;
         stats_.cpu_experts += n_host;
+        // STRATA_INKLING_TAIL_MOE: the model's layer_tail() sums these rows in its own launch.  One token's
+        // experts only (the record carries no rows), all of them or none: a fallback visit writes fo_ as before.
+        static_assert(kMaxUsed == TailSum::kMax, "the record is sized for every model's experts");
+        const bool record = tail_record_ && n == 1 && n_cached <= kMaxUsed;
         // The launches cost this thread more than they cost the card, so each one less counts.  The cached experts
         // go kSlots at a time, a launch a stage for all of them: gate and up, the activation, its quantization,
         // down.  Then one launch adds up to kSumRows of them into their tokens' rows, in the order they came.  A
@@ -4326,7 +4330,13 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
                     sum.x[k] = down.y[j];
                     sum.acc[k] = fo_ + (size_t) c.row * e_row;
                     sum.w[k] = c.w;
-                    if (k == kSumRows - 1 || i0 + j == n_cached - 1) add_scaled(sum, k + 1, n_embd_, st_);
+                    if (record) {
+                        // the same chain add_scaled() would sum, in this order; fo_ was 0 where it started
+                        tail_sum_.x[tail_sum_.n] = sum.x[k];
+                        tail_sum_.w[tail_sum_.n] = sum.w[k];
+                        ++tail_sum_.n;
+                    } else if (k == kSumRows - 1 || i0 + j == n_cached - 1)
+                        add_scaled(sum, k + 1, n_embd_, st_);
                 }
             }
 #if defined(STRATA_GPU_METAL)

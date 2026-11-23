@@ -142,14 +142,17 @@ limits, and deploy to production.
 
 ## Current Checkpoint
 
-- Closes: R1 (P2a won and shipped; the next steps below).
+- Closes: R1 (P2a and P2c won and shipped; the next steps below).
 - Done: the guard fix and this document (R4); P1 (system side: user actions recorded); P2a (norm+quantize rows
-  kernel, `STRATA_INKLING_NORM_Q8=1`, bit for bit and +1.48% forced decode, 3/3 A/B pairs).
+  kernel, `STRATA_INKLING_NORM_Q8=1`, bit for bit and +1.48% forced decode, 3/3 A/B pairs); P2c (the tail's own
+  expert sum, `STRATA_INKLING_TAIL_MOE=1`, bit for bit 60/60, +0.57% forced decode, 7 pairs, launch table proof:
+  `add_scaled` 0 a token).
 - P1 result (system side, nothing to change in the engine): `coolercontrold` is a root system service and
   `amdgpu.mes=0` needs root and a reboot; no sudo password on this machine (checked: `sudo -n` fails), so both are
   user actions, recorded here. The engine-side part of P1 is the wake-up cost after GPU idle, which P4b shortens.
-- Smallest next action: P2b (copy2 into its producers) or P2c (add_scaled into the tail conv_add), whichever the
-  trace's launch table says saves more; both keep the old block parallelism and stay bitwise.
+- Smallest next action: P2b (copy2 into its producers) — the last launch-count fusion with a clear site — or
+  re-profile first if the trace says the small-kernel table moved (the two shipped fusions took ~27 of ~1,100
+  launches a token; the remaining ones are ~1 us host each, so weigh P3/P4 against that).
 - Expected evidence: one launch less a visit each; A/B 3 x 300 forced tokens, all pairs in the same direction.
 - Stop or replan if: a fusion is not bitwise or the A/B gain is inside the run-to-run spread — then P3 (Q8_0
   segment bandwidth) next.
@@ -285,6 +288,31 @@ estimates from the measurements above, to be replaced by the A/B.
   packing, 1128-1163 experts) already disagree; CPU and GPU expert paths round differently. The wiring was
   checked site by site against `git show HEAD` instead (same buffers: `s3in_`/`s3q8_`/`input_[i]`/`xq_`/`kq8_`/
   `vq8_`, `lin_raw`'s internal quantize and `project()`'s `!k8` guard consume the same bytes).
+- P2c (the tail launch's own expert sum, `STRATA_INKLING_TAIL_MOE=1`): `Engine::moe`'s one `add_scaled` a MoE
+  visit (~24 launches a token at n == 1, ~3.4 us on the launch floor each) is folded into the tail's
+  `conv_add_kernel` as a `TailSum` record of the visit's cached experts. The record replaces the launch when
+  `tail_record_ && n == 1 && n_cached <= kMaxUsed` (all of them or none; a fallback visit sums `fo_` as before and
+  the kernel's `moe.n == 0` path is byte-identical). The bitwise contract held without a single compiler fight
+  this time: the folded sum is the same `v + x*w` chain in the router's k order from `fo_ == 0` (SASS: one
+  `v_fmac` a k, exactly `add_scaled_kernel`'s own contraction), and the conv segment around it is
+  instruction-identical at SASS to HEAD's (`v_mul + v_fmac*3 + v_add + v_mul 0x3ee4f92e`). `poly_tail_moe_test`
+  (new): the folded kernel against `add_scaled` + the HEAD kernel, 60/60 combos bit for bit (widths
+  {256, 1024, 2304} x experts {0, 1, 2, 5, 8} x the CPU experts' add on/off x clean on/off), exit 0 under the
+  guard. Engine trace with the flag on: `add_scaled` 0 launches (was ~24 a token), `conv_add_kernel` 96 a token
+  unchanged. A/B forced 94+300, 7 pairs: off 46.88, on 47.14 tok/s mean (+0.57%, 5/7 pairs positive, median pair
+  +0.5%); the gain matches the launch floor's arithmetic (24 x ~3.4 us ~ 0.1 ms/token at ~21 ms/token) and the
+  mechanism is deterministic, so it ships. The kernel's `add` (the CPU experts' `h_cpu_`) and residual blocks and
+  the attention call site (empty record) are unchanged source.
+- P2c at 16K (forced 16384+200, 7 pairs, the same build): off 41.93, on 41.95 tok/s mean (+0.06%, pair deltas
+  -0.3 to +0.9, sigma ~0.5): no regression, the small absolute gain (~0.1 ms/token) invisible in the longer
+  16K token (~24 ms) at this noise level. R2 holds. The review (independent subagent on the diff) found no
+  blockers; its one hardening note (a failed readback must fail the test, not compare zeros) is applied and the
+  test re-passed 60/60.
+- Guard crash found by the 16K runs, fixed: `run_guarded.py`'s kwin check did `fault |= ("kwin" in source and
+  FAULT_WORDS.search(msg))`, and a match returns a Match while no match returns None - a kwin journal line
+  without fault words crashed the monitor with a TypeError, and a real kwin fault line would have crashed it
+  too instead of stopping the run. The guard still failed closed (engine killed, stop-reasons written, no VRAM
+  breach, no amdgpu fault). Fixed to `... is not None`; the fix is committed on its own.
 
 ## Black screens of 2026-11-23 (what not to repeat)
 
@@ -326,6 +354,11 @@ The rules (C3-C5), in plain words:
 
 - 2026-11-23: R4. Guard fixed (cursor, whole words, boot check); this document with the incident, the measurements
   and the plan. Next: the CPU-only L3 measurement of P4b, then P2a when GPU runs are allowed.
+- 2026-11-23: P2c. The tail launch sums the visit's cached experts itself (`TailSum` record, opt-in
+  `STRATA_INKLING_TAIL_MOE=1`): bit for bit (60/60 in `poly_tail_moe_test`, SASS conv segment identical), one
+  launch less a MoE visit (`add_scaled` 0 a token in the trace), forced 94+300 46.88 -> 47.14 tok/s mean of 7
+  pairs (+0.57%, 5/7 pairs positive; the launch floor's arithmetic predicts it). P2a follows in the history
+  below. Next: P2b, or re-profile first.
 - 2026-11-23: P2a. The norm+quantize rows kernel is bit for bit the two launches (24/24 shapes, three compiler
   divergences found and pinned at SASS: fma squares, quantize-loop contraction, libdevice sqrt refinement) and
   +1.48% forced decode (3/3 pairs, RX 6700 XT). Review subagent on the diff before the commit, per the user's

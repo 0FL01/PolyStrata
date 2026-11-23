@@ -208,6 +208,18 @@ struct Image {
     const float* rows = nullptr;
 };
 
+/// A visit's routed experts as add_scaled() would sum them: the rows their down products landed in (the scratch
+/// ring moe() hands one launch after another) and the router's weights, in the order the router gave them.
+/// A model's layer_tail() can take them to fold the sum into a launch of its own (STRATA_INKLING_TAIL_MOE),
+/// where they are one token's experts: n <= kMax (kMaxUsed, runtime.hpp), and the one row is the x that kernel
+/// writes and convolves.
+struct TailSum {
+    static constexpr int kMax = 32;   ///< kMaxUsed: the most experts a token uses
+    const float* x[kMax];
+    float w[kMax];
+    int n = 0;
+};
+
 class Engine {
 public:
     Engine();
@@ -857,6 +869,9 @@ protected:
 
     // device scratch: a layer's input streams, one stream, the normed input, the attention's and the FFN's output
     float *r_ = nullptr, *cur_ = nullptr, *xn_ = nullptr, *ao_ = nullptr, *fo_ = nullptr;
+    bool tail_record_ = false;  ///< STRATA_INKLING_TAIL_MOE: a model's layer_head() asks moe() to leave the visit's
+                                ///< routed experts for its layer_tail() to sum in its own launch, not add_scaled()
+    TailSum tail_sum_{};        ///< those experts (moe() fills this; one token's: n <= kMaxUsed, at n == 1)
     float* wf_ = nullptr;      ///< the largest BF16 matrix as floats: lin() multiplies a prompt batch by cuBLAS
     size_t bf16_max_ = 0;      ///< that matrix's values
     float *g_ = nullptr, *u_ = nullptr, *h_ = nullptr, *d_ = nullptr, *rl_ = nullptr,
