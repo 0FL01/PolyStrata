@@ -9,4 +9,8 @@ namespace strata::poly::inkling {
 
 void attend_flash_lean(const Attend& a, cudaStream_t st);
 
+/// STRATA_INKLING_FLASH_H2=1 (with STRATA_INKLING_LANE_PROB=1 on gfx1031, Q8_0 cache): the lean kernel with its
+/// products in packed halves (v_dot2_f32_f16, FP32 sums) - a precision change, opt-in.
+void attend_flash_h2(const Attend& a, cudaStream_t st);
+
 }  // namespace strata::poly::inkling

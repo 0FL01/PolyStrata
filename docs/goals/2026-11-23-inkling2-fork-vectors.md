@@ -373,6 +373,27 @@ unroll 4 and batched softmax; fp16-output GEMMs and split-K gate as fork patholo
   Not taken: the same wrapper for the Q8_0 dense MMQ (one zero start per 8 DP4A there, half NVFP4's share; est.
   <0.5% E2E).
 
+- **P1c kept (opt-in, precision change): `STRATA_INKLING_FLASH_H2=1`** (`src/poly/inkling_attend_h2.cu`; shared helpers
+  moved to `inkling_flash_common.cuh`, lean ISA unchanged). The lean kernel with QK and PV in `v_dot2_f32_f16` (FP32
+  sums): Q as half pairs, K as halves, V as halves of key pairs (c, c+8) so a lane's two probabilities pack into one
+  half pair and one DPP8 move broadcasts it; running max over keys only (a sink far above every key would make the
+  half probabilities subnormal: the attend test's "sink above 60K keys" case failed at 5.5e-3 before that), sink
+  merged at the end in the frame of max(sink, keys). 175 VGPRs, 5 waves/SIMD. Kernel: full 32K 131.7 -> 87.9 ms,
+  196K 752.0 -> 485.7 ms (production 983.8: x2.03), SWA 4.78 -> 3.24 ms; attend test (1e-3 for these cases) PASS,
+  worst 5.1e-4. E2E 32K (both arms FLASH_LEAN + NVFP4_LEAN): A 39.89/40.08 s -> B 36.28/36.31 s (**-9.2%**).
+  Quality protocol (`q.py`: 3 real texts x 16,384 prompt tokens, 128 forced tokens, top-64 per step, KL over the
+  reference's top-64): FP32 flash vs FP32 flash at other expert residencies (decode-side noise) 0.00153
+  [0.00119..0.00200], top-1 99.0%; **FP32 flash vs FP32 plain attention** (the two FP32 attention paths the engine
+  already treats as equal, sum order only) **0.00360 [0.00289..0.00477], top-1 98.4%**; FP32 flash vs H2 0.00345
+  [0.00260..0.00476], top-1 98.4%; plain vs H2 0.00350. So H2 moves the logits as much as an FP32 reordering of the
+  prompt attention does (the fork's observation too). Answer battery: at the deploy step.
+  Refuted on the way (each measured, scratch v6-v8): (a) K as exact int8 codes with FP32 block scales: only -20..30%
+  RMS error, -17% speed; (b) PV-only halves (QK FP32): KL 0.00420, worse, 1.17x; (c) tile-local probability scaling
+  against subnormals: KL 0.00388, slower (551 vs 483 ms). The error lives in the half P/V representation and is the
+  size of FP32 reorder noise end to end. Review (general subagent) found: sink overflow when sink - max > 128 (fixed:
+  common max frame), the far-loop non-finite guard missing (restored), the test relaxing on non-gfx1031 (fixed).
+  Fixture lesson: `fvbench`'s K scales were 1/64 (codes*scale exact in F16); scales are random now.
+
 ## Current Checkpoint
 
 - Closes: R1 (re-measured: ceilings, flash and decode span curves, fresh 32K trace, ISA mixes), R2 (plan above).

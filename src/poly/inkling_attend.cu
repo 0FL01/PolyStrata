@@ -867,6 +867,21 @@ void attend_flash(const Attend& a, cudaStream_t st) {
         std::fputs("strata-poly: STRATA_INKLING_FLASH_LEAN=1: fused DPP8 and bias-free far key blocks in flash\n", stderr);
         return true;
     }();
+    static const bool half = [] {
+        const char* value = std::getenv("STRATA_INKLING_FLASH_H2");
+        if (!value || value[0] != '1' || value[1] != '\0') return false;
+        if (!lane_prob) {
+            std::fputs("strata-poly: STRATA_INKLING_FLASH_H2=1 needs STRATA_INKLING_LANE_PROB=1 on gfx1031; ignored\n",
+                       stderr);
+            return false;
+        }
+        std::fputs("strata-poly: STRATA_INKLING_FLASH_H2=1: flash products in packed halves (FP32 sums)\n", stderr);
+        return true;
+    }();
+    if (half && a.k.scales) {
+        attend_flash_h2(a, st);
+        return;
+    }
     if (lean) {
         attend_flash_lean(a, st);
         return;

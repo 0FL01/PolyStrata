@@ -7,9 +7,14 @@
 //
 // usage: poly_inkling_attend_test   (exit 0: every case within 1e-4 of the plain path's largest output, no NaN;
 //                                    77: no card)
+// With STRATA_INKLING_FLASH_H2=1 (and LANE_PROB=1) the flash cases on a Q8_0 cache take the half-product kernel:
+// its operands are rounded to 11 bits, so those cases are held to 1e-3 instead.
 #include "inkling_attend.hpp"
 
 #include <cuda_fp16.h>
+#include <cstdlib>
+
+#include <string>
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -142,7 +147,17 @@ bool run(const Case& c, float* scores, float* partial, int tiles, bool timed) {
         diff = std::max(diff, (double) std::fabs(hp[i] - hf[i]));
     }
     const double relative = diff / std::max(top, 1e-30);
-    const bool ok = finite && relative <= 1e-4;
+    static const bool half = [] {   // as attend_flash() decides it: both switches, on gfx1031
+        const char* v = std::getenv("STRATA_INKLING_FLASH_H2");
+        const char* l = std::getenv("STRATA_INKLING_LANE_PROB");
+        cudaDeviceProp prop{};
+        int device = 0;
+        const bool gfx1031 = cudaGetDevice(&device) == cudaSuccess && cudaGetDeviceProperties(&prop, device) == cudaSuccess &&
+                             std::string(prop.gcnArchName).rfind("gfx1031", 0) == 0;
+        return v && std::string(v) == "1" && l && std::string(l) == "1" && gfx1031;
+    }();
+    const double limit = half && !c.dec && a.k.scales ? 1e-3 : 1e-4;
+    const bool ok = finite && relative <= limit;
     std::printf("%-26s pos %6lld n %4d: largest %.4g, difference %.3g (%.2e of largest)%s\n", c.name,
                 (long long) c.pos, c.n, top, diff, relative, ok ? "" : finite ? "  FAIL" : "  NaN FAIL");
 
