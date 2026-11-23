@@ -823,7 +823,19 @@ void attend_decode(const Attend& a, float* scratch, cudaStream_t st, void* q8) {
     if (a.k.scales) {
         // up to kAttChunks chunks of at least kAttMin keys (whole steps of a wave's keys): enough blocks to keep the
         // card's memory busy at long spans, and few steps a block at short ones
-        constexpr int kAttChunks = 128, kAttMin = 32, kStep = 4 * kAttUnroll;
+        // STRATA_INKLING_DECODE_CHUNKS=N: up to N chunks instead of 128. 128 eight-wave blocks are 3.2 rounds of the
+        // 40 that fit on RX 6700 XT at once (two a WGP at 173 VGPRs), the last round a fifth full; 160 (or 80) chunks
+        // took a 190K span 1.41 -> 1.24 ms (read-flushed caches), 65K 0.51 -> 0.45 ms. Other sums than 128's.
+        static const int kAttChunks = [] {
+            const char* v = std::getenv("STRATA_INKLING_DECODE_CHUNKS");
+            char* end = nullptr;
+            const long n = v ? std::strtol(v, &end, 10) : 0;
+            if (!v || end == v || *end != '\0' || n < 1 || n > 512) return 128;   // the whole value, 1..512
+            std::fprintf(stderr, "strata-poly: STRATA_INKLING_DECODE_CHUNKS=%ld: decode attention in up to %ld chunks\n",
+                         n, n);
+            return (int) n;
+        }();
+        constexpr int kAttMin = 32, kStep = 4 * kAttUnroll;
         const int chunk = std::max(kAttMin, div_up(div_up(span, std::min(most, kAttChunks)), kStep) * kStep);
         chunks = div_up(span, chunk);
         decode_q8_kernel<<<dim3(chunks, a.n), kAttThreads, 0, st>>>(a.q, a.rel, a.table, a.k, a.v, a.pos, a.window,

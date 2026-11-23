@@ -409,6 +409,13 @@ unroll 4 and batched softmax; fp16-output GEMMs and split-K gate as fork patholo
   queuing the bounced copies first (`BOUNCE_FIRST`) removed that wait from the host but did not move the end to
   end time (36.12/36.03 vs 36.11/35.78 s): the host wait was off the critical path. Both reverted.
 
+- **P4 kept: `STRATA_INKLING_DECODE_CHUNKS=N`** (default 128 unchanged; the deploy takes 160). 128 eight-wave blocks are
+  3.2 rounds of the 40 resident blocks. Kernel (read flush): 190K 1.41 -> 1.24 ms, 65K 0.51 -> 0.45 ms; attend test
+  PASS at 160 (decode cases within 1e-4 of plain). E2E 64K prompt + 128 decoded tokens (all prefill switches on):
+  decode 30.6/31.5 -> 31.9/31.9 tok/s (+2.7%); greedy tokens identical between A2 and B. Review: strict parsing (applied).
+- Not taken: J128 NVFP4 tiles (RDNA2's config stops at J64; the accumulators double on a 218-240 VGPR kernel, and
+  the config lives in the unversioned llama.cpp checkout - its own kernel like nvfp4_tail would be needed).
+
 ## Current Checkpoint
 
 - Closes: R1 (re-measured: ceilings, flash and decode span curves, fresh 32K trace, ISA mixes), R2 (plan above).
