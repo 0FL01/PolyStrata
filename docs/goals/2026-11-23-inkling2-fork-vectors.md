@@ -1,7 +1,6 @@
 # Goal: lift the reference fork's prefill/TTFT and decode vectors into Inkling-2-Mini on RDNA2
 
-Status: active (RECON measured where the boot allows; the GPU-fault rule below stops the remaining kernel runs until
-a reboot; the plan is frozen from the measurements already in hand)
+Status: active (session 2 re-measured the RECON on the GPU and rewrote the plan from kernel experiments; next: P1a)
 Source: user request of 2026-11-23 (verbatim quote below): study the latest commits and goals, port the optimization
 vectors of the Canahmetozguven fork (RX 7900 XTX) "для поднятия prefill/TTTF/decode, по очереди", profile at the
 kernel level with temporary benchmarks during planning, fold all hypotheses into this goal, probe iteratively, then
@@ -53,10 +52,9 @@ approaches and remaining limits, and deploy to production.
   - Acceptance: the numbers below in "Profiling" carry this round's own measurements (trace archaeology done; the
     bench1 sweeps run once the reboot rule below is lifted), each with the hardware and config it was measured on.
   - Primary evidence: the 8K/32K trace tables, bench1 logs under the guard.
-  - Status: in_progress (trace tables and fork comparison measured; bench1 GPU runs blocked on the reboot, see the
-    incident)
-  - Evidence: the "Profiling" section; scratch `prefill-opt3/` (bench1.hip built, run-check/run-dbg logs, the fault
-    record in `run-check2/`).
+  - Status: verified (session 2)
+  - Evidence: "Session 2 RECON" below; scratch `~/.cache/claude-fv/` (fvbench, eng.py, ktab.py, runs/, tr32k/). The
+    first session's scratch `prefill-opt3/` does not exist.
 - R2: The action plan is written from those measurements, ordered by measured gain per risk, with every fork vector
   either mapped to a concrete experiment or rejected with a measured reason.
   - Source: "сложить все гипотезы в цель, итеративно прощупать и после предложить план".
@@ -115,8 +113,9 @@ approaches and remaining limits, and deploy to production.
   engine at a time; the production unit is stopped during standalone GPU work and restored afterwards.
 - C4: The black-screen rules of 2026-11-23 stand: no kernel that can wait without a limit (no software grid barrier,
   no persistent/spinning kernel), no `rocprofv3 --pmc`; buffers sized for the largest call, checked before the first
-  run; after any GPU fault, GPU work stops for the day and the next run needs a reboot - this rule is ACTIVE now (see
-  the incident below).
+  run; after any GPU fault, GPU work stops for the day and the next run needs a reboot. For the 17:15:23 fault of
+  2026-11-23 the user lifted the reboot part (session 2, Material Decisions); every other part stands, and a new
+  fault stops GPU work again.
 - C5: A fusion keeps its kernels' arithmetic and reduction order; a kept fusion is bitwise or inside the existing
   attention-test tolerance. Frozen production kernels take no new stores (the P2b lesson).
 - C6: Every engine-code commit goes through an independent review subagent on the diff before the commit (the user's
@@ -174,175 +173,182 @@ Hardware: RX 6700 XT (gfx1031, 12 GB, 96 MB Infinity Cache, the desktop's card),
   unchanged; a per-process 2x slow decode state at 256K (one cause: Windows moved the unembedding matrix out of a
   full card, +31 ms/token; a second state unexplained).
 
-### Our engine's measured state (trace archaeology, retained build; the 32K/8K tables from
-`inkling-prefill-e2e-20261122/attention-retained-trace`, decode from the second round's `rp4`)
+### Session 2 RECON (2026-11-23 evening): every number below re-measured today
 
-32K prefill, 43.5 s wall, 40.85 s kernel-sum, 55,530 launches (16 chunks x 48 visits):
+The first session's commits are treated as evidence to re-check, not as facts. Hardware: RX 6700 XT (gfx1031, 20 WGP /
+40 CU, 12 GB), Ryzen 7 5700X, 32 GB DDR4, kernel 7.2.15-300.fc45, TheRock HIP 7.13 (repo venv). GPU runs under
+`run_guarded.py --accept-faults-before '2026-11-23 17:16:00'` (see Material Decisions); every run below exited 0 with
+empty stop-reasons. Scratch outside Git: `~/.cache/claude-fv/` (fvbench.hip, variants v0..v3d and vd, eng.py,
+ktab.py, idle.py, runs/, tr32k/).
 
-| Line | ms | share | measured rate |
-|---|---:|---:|---|
-| flash_kernel (48 visits, 768 launches) | 12,948 | 29.7% | ~5.95 TFLOP/s (77 TFLOP incl. 40 SWA visits) = ~51% of the 11.6 TFLOP/s F32-FMA peak |
-| NVFP4 gate/up MMQ (4,641) | 10,956 | 25.2% | 12.2 nominal TOPS = 31% of the 39.2 TOPS dot4 roof |
-| nvfp4 down tail (1,619) | 4,629 | 10.6% | 14.4 nominal TOPS = 37% of roof |
-| Q8_0 dense MMQ (4,240) | 4,352 | 10.0% | 19.4 TOPS = 49% of roof; stores 89.2 MB/chunk-visit exceed the 7.5 MB weight payload per Q/gate launch |
-| copy H2D (expert staging) | 8,899 | - | overlapped (the shipped prefetch); copy-only idle is small |
-| mix 867, gemm_small_2x2 838, quantize 745, rms_norm 684, Q6_K dense 600+519, situ_rows (F32, unfused at prefill) 475, router gemm_tile 420, moe_sum 396, head_norm 373, Q5_K 364, control 281, coda experts (Q4_K/IQ4) 537, add_rms_norm 219, conv_span 172, axpy 153 | ~5,000 | 11.5% | the launch-bound tail |
-| rocBLAS SGEMM (controller gain/forget, 3,072 launches, 2048x2304x64) | 226 | 0.55% | 8.2 TFLOP/s, at the store roofline - healthy |
+**What the first session left that did not hold:**
+- The scratch it names (`~/.cache/opencode-tmp/opencode/prefill-opt3/`, `bench1.hip`, `post-reboot.sh`) does not
+  exist; only compiler temporaries of `bench1` remain. The benches here were written anew.
+- Its decode driver (`decode-opt2/bench.py`) reads `claude-inkling-pp/prod-before.json`, an old config, not the
+  live `~/.config/strata/inkling2-mini/strata-inkling-2-mini.json`. `eng.py` reads the live args and env and runs
+  long prompts through `--serve` (a 32K id list is 160 KB, over Linux's 128 KB single-argument limit).
+- "Cold" decode-attention numbers (its 2.023 ms at 190K, the attend test's cold lines, the previous round's
+  2.453 -> 2.023 ms) flush with a 256 MiB **write** (`cudaMemsetAsync`). Dirty lines then cost write-backs during the
+  measured kernel. With a 256 MiB **read** flush the same kernel takes 1.41 ms at 190K (write flush: 1.96 ms).
+  Engine decode is read-dominated, so the read-flush number is the representative one.
+- Confirmed: the 8K/32K prefill trace table (fresh trace below: flash 12,906 ms vs its 12,948), the 413.44 MB/visit
+  KV payload at 190K, `kAttUnroll=2`, the flash geometry (16 tokens x 16 keys, 128 threads, char4 + 2-byte scale
+  fetches), and `21544cc0` changing only `__launch_bounds__(256)` -> `(256, 2)`.
 
-8K (warm segment): MMQ-40 2,741, flash 1,387, tail 1,154, MMQ-8 1,097, then the same tail at 1/4 scale; span 8,780 ms.
+**Card ceilings (`fvbench ceil`):** DRAM read 380 GB/s (1 GiB), write 374 GB/s; Infinity Cache 1,000 GB/s for
+64-96 MiB; FP32 FMA 11.69 TFLOP/s (2.28 GHz sustained); `v_pk_fma_f16` 23.8 and `v_dot2_f32_f16` 23.7 TFLOP/s;
+`v_dot4_i32_i8` 46.8 TOPS (the first session's 39.2 was assumed, not measured); LDS `ds_read_b128` in flash's
+pattern 6.04 TB/s.
 
-Decode (from `rp4`, 64 tokens, all switches on): 960.7 launches/token, GPU busy 15.09 ms - MmvqSlots 5.448, dense Q8_0
-segments 2.846, o-proj 1.113, LM head 1.016, decode_q8 0.581 + combine 0.171, mix 0.502, conv_add 0.382, gemv_rows
-0.312, add_rms_norm 0.294, segments/dual/out3 ~0.29 each, mmvq<14> 0.276, rms_norm rows 0.218, mix3 0.215, heads_kv
-0.193, situ_rows_q8_1 0.118 (48).
+**E2E, production binary `strata-poly-56eb42bd`, live config, 32K prompt, `rocprofv3 --kernel-trace`:**
+untraced 43.28 s prefill (757 tok/s) and 33.1 tok/s decode at 32K; traced 42.75 s.
 
-### Fork-vector comparison (what transfers, measured)
+| Prefill line (32K) | ms | share of 40,772 ms kernel time |
+|---|---:|---:|
+| `flash_kernel<true,true>` (768) | 12,906 | 31.7% |
+| NVFP4 gate/up `mul_mat_q<40,64>` (2,617) + other J | 10,244 + ~640 | 26.7% |
+| `nvfp4_tail_kernel` (1,479) | 4,700 | 11.5% |
+| Q8_0 dense `mul_mat_q<8,64>` (4,240) | 4,374 | 10.7% |
+| mix 846, 2x2 GEMM 827, quantize 721, rms_norm 673, Q5_K 582, Q6_K 517, situ_rows 494, router 421, moe_sum 384, head_norm 371, control 278, others | ~7,300 | ~18% |
+| GPU idle inside the 43.9 s span (union of busy intervals) | 3,178 | 7.2% of span |
 
-- **Fused relative-bias flash: already ours.** Our flash computes the bias in-kernel from the projected `rel_` rows
-  and a 64 KB table (no dense bias table); OWNED16 already lane-owns the probabilities (P in registers). The fork's
-  table->fused win (their 11.7) does not apply. What remains is raw kernel rate: we are at ~51% of the F32-FMA peak
-  (their kernels: 22-45% of their WMMA peak) with known overheads inside our tile loop: the serialized per-tile
-  stage (16 KB FP32 unpack into LDS behind two barriers), scalar 4-byte Q8 fetches (char4 + a 2-byte scale), the
-  31-distance ts restage per tile, and FP32-only math. This is P1.
-- **Split-key decode: already ours.** `decode_q8_kernel` splits the span into up to 128 chunk blocks (one block per
-  chunk covering all 8 KV heads, 8 waves), 16-byte `global_load_dwordx4` code loads, online softmax with a combine
-  kernel. Cold at 190K: 2.023 ms for 413.44 MB = 204 GB/s = 54% of our 376 GB/s streaming; the fork's post-fix is
-  527 of 925 = 57% - the same fraction of the respective card. The remaining levers are per-lane memory-level
-  parallelism (our `kAttUnroll=2`, the fork keeps up to 8 key rows in flight), the chunk cap, and scale-load pairing.
-  This is P4. Note: `21544cc0`'s `__launch_bounds__(256,2)` has 173-176 VGPRs in every archived trace (<=128 is
-  needed for two 256-thread blocks a CU) and the kernel symbol is byte-identical between `ebab4fad` and `21544cc0`
-  binaries; the measured -17.5% cold win stands as recorded, but its residency mechanism is not established. The
-  post-reboot bench re-measures the span curve.
-- **fp16-output projection GEMMs: the pathology is not ours, the idea survives as an opt-in.** Our dense projections
-  run custom Q8_0 MMQ at 49% of the dot4 roof (not a broken 9%-of-peak library path), and our gain/forget SGEMM runs
-  at 8.2 TFLOP/s (0.55% of the profile). The fork's +43% was fixing their library; for us the analogous change is
-  F16 (or Q8_1) output from our MMQ epilogue: every dense projection stores more F32 bytes than its weight payload
-  (Q/gate: 25.2 MB out vs 7.5 MB weights per launch at M=2048). Expected 5-15% of the 10% line; a precision change,
-  so opt-in with the R7 gates. This is P3.
-- **Skinny-gate split-K: dead here (measured).** Our controller down (4608->64) already runs the pipelined 2x2 F32
-  kernel (0.46 ms/launch), and the gain/forget SGEMM is at the store roofline (above). The fork's 1,115 ms pathology
-  has no counterpart: our router+controller total is 646 ms = 1.5% of a 32K prefill.
-- **KV SAVE/LOAD: a real gap.** `strata-poly` rejects the Qwen engine's SAVE/RESTORE (HTTP 501); a restart re-prefills
-  everything. A 200K prefix is 3.57 GB (92.88 MB conv+SWA checkpoint + 3.48 GB full-attention rows; entry points
-  `save_state`/`save_rows` exist). This machine's LUKS NVMe does 2.8 GB/s write / 1.5 GB/s read (O_DIRECT, measured
-  today): a 200K snapshot is ~1.3 s to write, ~2.4 s to read, against a multi-minute re-prefill. This is P6.
-- **BAR-eviction guard: N/A on Linux** (recorded, not ported).
+Idle: ~1.23 s is the per-visit router round trip through the host (`add_rms_norm -> router` 397 us,
+`router -> fill` 662 us, `fill -> quantize` 580 us, x768 visits); ~0.9 s is 147 gaps of ~6 ms between memsets (not yet
+attributed; the memory-copy trace in `tr32k/` can tell whether expert uploads are behind them).
 
-### The 2026-11-23 GPU fault (this round's incident; the rules held)
+Decode at 32K (63 traced tokens): 954 launches/token, GPU busy **16.8 ms** of ~30 ms/token. Kernels:
+`mmvq_slot_lanes<40,16>` 4.66, `native_mmvq_segments<8>` 2.88, `decode_q8_kernel` 2.69, o-proj 1.12, LM head 1.02 ms.
+Idle per token: 5.96 ms waiting after the GPU experts for the CPU experts' sum (`mmvq_slot_lanes -> conv_add`,
+137 us x 43.6), 2.3 ms on visits with no GPU expert, 1.43 ms router round trips. So decode at 32K is about half
+GPU kernels, half CPU experts (DDR4) and syncs; 1,201 of 3,072 experts are in VRAM.
 
-19:15:23, this boot: `[gfxhub] page fault ... Process bench1 pid 228167 ... PERMISSION_FAULTS: 0x3` - my first
-`bench1 check` wired the attention `gate` buffer as `[n][24]` while `gate_kernel` reads `[n][24][128]`; the OOB read
-faulted, the guard caught it, ROCm killed the process, and the desktop survived (no ring timeout, no reset followed).
-Per C4 the boot is now refused by the guard ("the GPU took a fault or a reset earlier in this boot; reboot first"),
-so the remaining bench1 GPU runs wait for a reboot. The buffer is fixed (gate sized `[n][24][128]`, scales 64 B/row
-- the same class of sizing bug as the round's C5 rule was written for) and `bench1` is rebuilt; `bench1 dbg` (the
-allocation probe) passed clean before the fault and the wiring-check mode is ready to run first after the reboot.
+**Prefill flash attention (`fvbench flash`, n=2048, Q8_0 KV, ring 3,071 as the engine's `ring_`):** 5.0-5.5 TFLOP/s
+= 43-47% of FP32 at every position (0 to 196K), so it is not memory-bound. ISA of the tile loop (one 16-key tile,
+one wave): 2,547 VALU, 1,536 of them the useful FMAs. Each DPP8 reduction step compiled to three instructions
+(copy, `v_mov_b32_dpp`, `v_add_f32`) where one `v_add_f32_dpp` does it; 201 such steps a tile. LDS is not the limit
+(needs 3.5 of 6.04 TB/s at today's rate).
 
-## Plan (hypothesis map, ordered by measured gain per risk; prefill first, then decode, then the feature)
+| Flash experiment (all bitwise vs production on 10 dumped configs: full/SWA flash, decode) | full 32K | full 196K | SWA |
+|---|---:|---:|---:|
+| v0 production | 160.1 ms | 983.8 ms | 5.08 ms |
+| v1: fused DPP via `asm volatile` | 162.1 (+1.3%) | - | 5.21 |
+| v1b: same, plain `asm` (schedulable), 203 VGPR | 145.7 (-9.0%) | - | 4.70 |
+| v2: + in-tile branches (far-tile bias skip, inner-tile mask skip, rescale skip) | 161.8 (+1%), and NOT bitwise | - | 6.33 |
+| v3 / v3b: tile body as template, chosen by a branch (3 or 2 copies) | spills 212 / 200 B | - | - |
+| **v3c: v1b + far tiles in their own loop (no table slice, no bias), 221 VGPR, no spill** | **129.7 (-19.0%)** | **757.8 (-23.0%)** | **4.69 (-7.7%)** |
+| v3d: v3c forced to 5 waves/SIMD | 191.7 (spills 120 B) | - | 6.39 |
 
-1. **P1 prefill flash attention rate (the largest scalable lever; 29.7% at 32K and growing with N^2 - at 200K it is
-   the dominant prefill term).** Experiments, cheapest first, each behind the guard after the reboot:
-   - a. bench1 spans: flash n=512/2048 at pos 8K-196K, hot and L2-flushed; the TFLOP/s curve and the flush delta tell
-     how much of the gap is DRAM vs loop overhead before any kernel edit.
-   - b. Structural, bitwise-or-tolerance candidates in `flash_kernel`: 16-byte Q8 fetches (uint4 instead of char4 +
-     scalar scale); split the per-tile staging so K unpacks before QK and V unpacks only after the scores (halves the
-     barrier-to-use distance and the live LDS); restage the 31-distance rel window as a sliding ring instead of a full
-     62-float reload per tile. Measure each alone; keep only wins.
-   - c. Occupancy/pipelining probes: 16-token x 16-key is the tested-best geometry on this card, but the 208-VGPR
-     OWNED16 build allows 2 blocks a CU - check whether a 3rd query group (48 queries a block) fits and helps at long
-     pos.
-   - d. Only if b/c stall: packed-F16 QK/PV (`__hfma2`) - a precision change; opt-in, gated by the R7 KL/battery
-     protocol, expected up to ~1.9x the line on paper, rejected if the KL moves outside the engine's own noise floor.
-   Expected from b/c: 1.2-1.5x the line (-1.7 to -4.3 s at 32K; at 200K the same factor is worth several minutes of
-   TTFT). Reference: the fork's kernel lineage went 3.5x on WMMA hardware; RDNA2 has no matrix path, so the VALU
-   ceiling bounds us near 2x.
-2. **P2 NVFP4 expert line (35.8%; incremental, known surfaces).** Port the decode round's fused
-   `situ_rows_q8_1` to the prefill grouped path (today prefill runs F32 `situ_rows_kernel` 475 ms + a separate
-   quantize of `hx_`); the three bitwise surfaces are already mapped from the decode round. Expected 0.5-1.5% E2E;
-   low risk. The gate/up rate itself (31% of roof) has no cheap lever left (K128, tile sweeps, vectorized loads all
-   measured dead in the earlier rounds); revisit only with a captured-groups bench1-style microbench if P1 finishes
-   early.
-3. **P3 dense MMQ output precision (10% line; opt-in).** F16 (or Q8_1) output from the Q8_0 MMQ epilogue where the
-   consumer allows it, halving the 89.2 MB/chunk-visit store traffic. Precision change: same R7 protocol as P1d;
-   the fork's own accuracy result (KL inside their noise floor) is the reference. Expected 0.5-1.5% E2E.
-4. **P4 long-context decode attention (production context is 200K).** bench1 decode spans (16K-190K, hot/flushed)
-   re-establish the curve; then: `kAttUnroll` 2->4 (more loads in flight a lane; ~10 VGPRs a key; watch the 128-VGPR
-   2-blocks-a-CU line); chunk cap 128->256 at long spans (scratch 1.6->3.2 MB a row); scale loads paired per lane.
-   Each is a small kernel edit with the attend test as the gate. Expected 10-30% on the span line at 64K+; at 200K
-   decode that is ~4-12% tok/s; nothing at 16K (0.75 ms of 21 ms).
-5. **P5 the situ+down merge at decode (the mapped remainder, est +1.2%).** The three bitwise surfaces and the merge
-   site are recorded in the decode round's map; its own commit and A/B.
-6. **P6 KV snapshot SAVE/LOAD (TTFT across restarts).** Versioned file around `save_state` + `save_rows` (conv
-   history, SWA rings, full-attention rows, token list, position, layout/config metadata, integrity check); a LOAD
-   path that provisions KV, uploads, restores state and registers the prefix with `Conversations` so only the suffix
-   prefills; refuse incompatible formats. Acceptance per R6 with the fork's test pattern (fresh process, same greedy
-   tokens, suffix-only prefill).
-7. **P7 deploy and close.** Stop: re-run the answer battery on the deployed config; restore the service (and fix the
-   live-env drift noted below); final account with kept/rejected/limits.
+Lessons: the tile loop's one big basic block is what hides LDS latency, so any branch inside it costs more than it
+saves; uniform specializations must be separate loops. v2 also broke bitwise identity because the compiler had
+contracted `l*shrink + y` into one FMA, which a branch splits.
 
-Rejected on measurement (do not reopen without new evidence): the fork's f32-output GEMM fix (our SGEMM is at the
-store roofline, 0.55% of prefill); the router split-K (420 ms = 1%; a cheap follow-up only if the round idles);
-"add split-key" as such (already our design); speculative decoding; cache policy; a transposed-WMMA port (no WMMA on
-gfx1031; the register-level ideas that survive it are in P1b).
+**Decode attention (`fvbench decode-long`, read flush; variants in `vd/`):**
+
+| 190K span (413 MB) | 128 chunks (production) | 80 | 160 | 40 |
+|---|---:|---:|---:|---:|
+| unroll 2 (production) | 1.407 ms (294 GB/s) | 1.243 (333) | 1.239 (334) | 1.252 (330) |
+| unroll 4 + batched softmax | 1.335 | 1.269 | 1.310 | 1.262 |
+
+At 65K: 0.506 ms (128 chunks) vs 0.454-0.465 (80/160). 128 chunks of 8-wave blocks are 3.2 rounds of the 40
+resident blocks (2 a WGP at 173 VGPR); a multiple of 40 removes the partial round: -12% at 190K, 87% of DRAM read.
+Unroll 4, batched online softmax (one rescale per 2-4 keys) and the write/read flush aside, nothing else moved the
+long-span time: the per-lane-latency hypothesis is refuted. Decode attention at 16K is 0.14-0.15 ms a visit; its
+lever is long context only (8 visits x ~0.17 ms saved at 190K = ~1.3 ms/token).
+
+**NVFP4 MMQ (`mul_mat_q<40,64>`, 240 VGPR, 4 waves/SIMD):** 10.9 TOPS = 23% of the measured dot4 peak. Inner dot loop:
+534 VALU, 256 `v_dot4c_i32_i8` (48%); 64 `v_mov` that zero the tied VOP2 accumulators, 64 `cvt` + 64 `fmac` (the
+per-16 UE4M3 scales, inherent), 54 LDS address adds. With tile loading dot4 is ~30% of VALU: like flash, the line is
+bound by instruction overhead, not bandwidth.
+
+### Fork-vector map after session 2
+
+| Fork vector | Here | Verdict |
+|---|---|---|
+| Fused relative-bias flash, P in registers | already ours (in-kernel bias from a 64 KB table; OWNED16 lane-owned P) | the fork's kernel work transfers as **instruction economy**: v3c -19..-23%, bitwise |
+| Transposed formulation / WMMA | no WMMA on gfx1031 | the transferable part is "fewer instructions per FMA"; `v_dot2_f32_f16` (2x FP32) is the packed-math route, precision-gated |
+| Split-key decode, 527 GB/s | ours, 294 GB/s at 190K | chunk count a multiple of the resident blocks: 334 GB/s (-12%) |
+| fp16-output GEMMs | our MMQ is not the broken hipBLAS path | rejected as such; MMQ's own instruction overhead is the lever |
+| Split-K skinny gate | 2x2 GEMM 827 ms + SGEMM 221 ms = 2.6% | rejected (no pathology) |
+| KV SAVE/LOAD | missing (`SERR ... keeps no disk sessions`, HTTP 501) | P6, unchanged |
+| Windows BAR guard | n/a on Linux | rejected |
+
+## Plan (session 2; ordered by measured gain per risk; prefill/TTFT first, then decode)
+
+Every step: a `STRATA_INKLING_*` opt-in switch, off path byte-identical; `fvbench dump` bitwise vs production (or
+inside the attend test's 1e-4 for the non-bitwise ones); `poly_inkling_attend_test` both `LANE_PROB` settings; an
+ABBA end-to-end A/B with `eng.py` (live config) at 8K and 32K, plus 128K for attention; independent review subagent
+on the diff before each commit (C6).
+
+1. **P1a: flash v3c into the engine** (`STRATA_INKLING_FLASH_FAST=1`, gfx1031 lane-prob path). Measured: -19% at
+   32K, -23% at 196K, -7.7% SWA, bitwise. Expected E2E: ~-2.0 s at 32K (-4.6%), ~-85 s on a 200K prompt (~-15%).
+   Then re-profile.
+2. **P1b: flash, more of the same economy (bitwise):** the 48 owner `cndmask` per tile through a reduce-scatter
+   ordering of the partial dots; the rescale skip as a third loop version only if it fits without spills; fold the
+   SWA ring modulo out of the fetch (64-bit `%`, ~460 instructions on SWA tiles per fetch block). Expected +5-10% on
+   the line; each kept only if measured.
+3. **P1c: packed-math flash (precision; opt-in).** Minimal experiment first: QK with Q and K codes in F16 through
+   `v_dot2_f32_f16` (FP32 sums; K codes are exact in F16, the scale applied per 32), PV unchanged; measure the
+   kernel rate and the attend-test error. Only if the kernel gains >1.3x and the error is inside the fork's
+   noise-floor protocol (logits KL vs the current engine within its own CPU/GPU-expert noise, answer battery 14/14)
+   does it continue.
+4. **P2: NVFP4 MMQ instruction economy (bitwise, integer):** the VOP3 `v_dot4_i32_i8` with a zero inline constant
+   instead of `mov 0` + `v_dot4c`, and immediate LDS offsets; measure on a captured-shape microbench first
+   (expected -10..-15% of the 37% line: -1.5..-2.3 s at 32K). The 4-byte tied-accumulator pattern is in
+   `third_party/llama.cpp/ggml/src/ggml-cuda/mmq-load-tiles.cuh` / the NVFP4 vec_dot; same check for
+   `nvfp4_tail_kernel`.
+5. **P3: prefill router round trip (TTFT, 2.8%):** the ~1.2 s of host time between the router GEMM and the expert
+   products. Measure first where the 662 + 580 us go (host top-k of 2048x128, grouping, uploads); a GPU top-k +
+   grouping kernel only if the host part is the bulk. The 147 x 6 ms memset gaps get attributed from the copy trace.
+6. **P4: decode attention chunk count** = a multiple of the resident blocks (160 at 190K): -12% on the long-span
+   kernel, ~-1.3 ms/token at 190K, nothing at short context. Not bitwise (chunk sums), inside the attend-test
+   tolerance.
+7. **P5: decode CPU-expert wait (the largest decode term at 32K, ~6-8 ms/token).** RECON first: per-token count of
+   CPU expert-visits and their bytes vs DDR4 read speed, to see whether the wait is bandwidth (then only VRAM
+   residency helps: the fixed 2,048 MiB reserve stays, C1) or scheduling (CPU starts late after the router
+   readback).
+8. **P6: KV snapshot SAVE/LOAD** for `strata-poly` (unchanged from the first plan, mirrors the Qwen engine's
+   `STRSESS` v1 format and the `SAVE/RESTORE` protocol, `src/core/conversation_file.cpp`).
+9. **P7: deploy, battery, final account.**
+
+Rejected on measurement this session: in-tile branches in flash; 5 waves/SIMD flash (spills); decode-attention
+unroll 4 and batched softmax; fp16-output GEMMs and split-K gate as fork pathologies with no counterpart.
 
 ## Current Checkpoint
 
-- Closes: R1 (partially - the trace tables are in), R2 (done - the plan above).
-- Smallest next action: after the user reboots, run one command -
-  `~/.cache/opencode-tmp/opencode/prefill-opt3/post-reboot.sh` - which chains `dbg` (staged
-  allocation probes of all three geometries) -> `check` (wiring) -> `ceil` -> `flash` -> `decode`,
-  every mode under the guard, stops/starts production itself, and stops the batch on the first
-  nonzero exit or non-empty stop-reasons; then fold the numbers into the Profiling section and
-  start P1b.
-- Expected evidence: bench1 logs (hot/flushed span curves, card ceilings), guard-clean runs.
-- Stop or replan if: the flash structural edits (P1b) cannot beat the tile-loop overhead (the flushed span curve
-  will say), or the quality protocol rejects the precision paths (then P1 stops at the bitwise wins).
+- Closes: R1 (re-measured: ceilings, flash and decode span curves, fresh 32K trace, ISA mixes), R2 (plan above).
+- Smallest next action: P1a - port v3c's two changes (`~/.cache/claude-fv/v3c/inkling_attend.cu`: fused DPP8 asm
+  helpers and the far-tile loop) into `src/poly/inkling_attend.cu` behind an opt-in switch, run
+  `poly_inkling_attend_test` and `fvbench dump`, then the E2E A/B.
+- Stop or replan if: v3c is not bitwise inside the engine build, or the E2E A/B does not show the kernel gain.
 
 ## Current State
 
-- Resolved: the fork's account is fully mapped (webfetch of inkling-rocm docs/02_results.md incl. sections 11.2-11.12);
-  six explore agents mapped our flash, decode attention, GEMM inventory, decode visit structure, KV persistence and
-  bench tooling; the retained 8K/32K trace tables are extracted above; the fork-vector comparison is measured.
-- Last relevant evidence: the tables above; `prefill-opt3/` scratch (bench1.hip built; `run-dbg3` alloc probe PASS;
-  `run-check2` the fault record).
-- Blocker: the guard refuses this boot after the 19:15:23 bench1 fault (my gate-buffer sizing bug; desktop survived);
-  the remaining GPU RECON (bench1 runs) and all kernel experiments wait for a reboot, per the standing rule C4.
-- Next: user reboots (or lifts the rule explicitly) -> `post-reboot.sh` (the whole bench1 batch) -> P1b.
-- Blocked-time prep (19:17-19:27, no GPU touched): bench1 re-verified against the header
-  (`Attend` field shapes, `attend_plain/flash/decode` signatures - all match); fixture gate fill
-  fixed (the loop under-filled `[n][24][128]` to `[n][24]`, benign for parity but unrepresentative);
-  `dbg` mode now stages allocation probes through the small, flash (198,656 rows) and decode
-  (190,008 rows) geometries with a Buffers destructor between them, so an OOM/mapping problem
-  surfaces before any kernel runs; `post-reboot.sh` written and bash -n checked. bench1 rebuilt
-  (BUILD-OK 19:26).
+- Resolved: the first session's claims checked (list above); a fresh profile of the deployed binary; four kernel
+  experiments on flash (one kept, bitwise, -19..-23%), three on decode attention (one kept, -12% at long span).
+- Production: `strata.service` restarted at the end of the session on the deployed config; `/proc` shows
+  `STRATA_INKLING_{FLASH,NORM_Q8,TAIL_MOE,ROUTE_DUAL}=1`.
+- No engine code changed in this session.
 
 ## Material Decisions
 
 - 2026-11-23: The three fork vectors below are rejected on our own measurements, not by assumption: the f32-output
-  GEMM pathology (our rocBLAS SGEMM: 8.2 TFLOP/s, 226 ms = 0.55% of a 32K prefill), the skinny-gate split-K (the
-  same product family; our down is the pipelined 2x2 kernel at 0.46 ms/launch), and "add split-key decode" (our
-  decode_q8 is already that design at the same fraction-of-streaming as the fork's fixed kernel).
-- 2026-11-23: Precision-level changes (P1d, P3) are allowed in this round but only opt-in and only through the R7
-  gates (KL inside the engine's own noise floor + the answer battery + byte-identical off path). The user's hint
-  itself ships such changes with measured accuracy; the fork's noise-floor method is adopted as the protocol.
-- 2026-11-23: After the bench1 fault, the C4 reboot rule is enforced on this round too: no GPU run until a reboot;
-  bench1 is fixed and rebuilt first so the post-reboot run starts clean.
-- 2026-11-23: Noted for the deploy step: the live production process at inspection ran `strata-poly-21544cc0` with
-  `STRATA_INKLING_{NORM_Q8,TAIL_MOE,ROUTE_DUAL}=0` in its environment while the on-disk config points at
-  `strata-poly-56eb42bd` with all three `=1` - the deployed switches were not active in the running process. The
-  19:21:25 service restart after the fault (done to restore production while GPU work is paused) loaded the on-disk
-  config with the switches on; the deploy step (P7) still verifies the switches from `/proc` after its restart.
+  GEMM pathology, the skinny-gate split-K, and "add split-key decode" (already our design).
+- 2026-11-23: Precision-level changes (P1c and any later packed-math path) only opt-in and only through the R7 gates.
+- 2026-11-23 (session 2): the user lifted the reboot rule of C4 for this boot ("гпу использовать для бенчей и тестов,
+  не смотря на глупую ошибку, исправь её и используй gpu"). `run_guarded.py` gained `--accept-faults-before`: it
+  ignores only this boot's faults logged before the given time; any later fault, and any fresh fault during a run,
+  still stops the run. Default behavior unchanged.
+- 2026-11-23 (session 2): the first session's commits are evidence to be re-checked (the user's instruction); the
+  checks are listed in the session 2 RECON.
+- 2026-11-23: For the deploy step, the live switches are verified from `/proc` (see the first session's env-drift
+  note; at the end of session 2 they are on).
 
 ## Checkpoint History
 
-- 2026-11-23: RECON opened. Read the two prior rounds' goals in full; fetched the fork's docs/02_results.md (all
-  sections) and its repo layout; launched six explore agents (flash, decode attention, GEMM inventory, KV persistence,
-  decode visit structure, tooling/dims); extracted the retained 8K/32K per-kernel trace tables and the decode token
-  table; measured the snapshot-relevant disk rates (2.8/1.5 GB/s O_DIRECT); wrote and built `bench1` (ceilings,
-  flash/decode span sweeps, wiring checks) in scratch.
-- 2026-11-23: GPU fault at 19:15:23 (bench1 gate buffer `[n][24]` vs the kernel's `[n][24][128]`); guard caught it,
-  desktop survived, boot refused per C4. Fixed the sizing (gate `[n][24][128]`, KV scales 64 B/row), rebuilt bench1;
-  the allocation probe passes; GPU runs resume after a reboot. Plan frozen from the trace tables meanwhile.
+- 2026-11-23: RECON opened; plan P1-P7 frozen from trace archaeology; bench1 faulted at 17:15:23 (gate buffer sized
+  `[n][24]` against the kernel's `[n][24][128]`), boot refused per C4.
+- 2026-11-23 (session 2): guard flag; fvbench (ceilings, flash/decode sweeps, bitwise dumps) and eng.py (live config,
+  serve mode) written; fresh 32K trace; flash v1..v3d and decode vd experiments; plan rewritten from them.
 
 ## Completion
 
