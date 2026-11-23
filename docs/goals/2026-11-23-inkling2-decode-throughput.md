@@ -167,7 +167,9 @@ several tokens a call (batching or speculation), or a different model; none is i
 ## Plan
 
 Ordered by measured gain per risk. Every kept change is bitwise or passes the existing attention test; any change
-that moves a formula or a reduction order is not taken for speed alone.
+that moves a formula or a reduction order is not taken for speed alone. Stages 1-6 are the map after the RECON;
+only the attention stage (3) produced a kept change in this round. Stage 1 is rejected; stages 2 and 4 were tried
+and failed or are blocked; stages 5 and 6 remain conditional.
 
 1. **Rejected: 1600 MiB reserve.** The user rejected it on 2026-11-23; the reserve stays 2,048 MiB. The measured
    +0.5-1.6% short / +2.2% at 16K is recorded, not taken. No swap change either unless a later run earns it.
@@ -192,8 +194,8 @@ that moves a formula or a reduction order is not taken for speed alone.
    at short or 16K. Keep the vectorized patch for a cold/long-context test; if a 200K trace shows the expert kernel
    at DRAM speed, take it there. Do not lower the reserve below 1536 at 200K without a shrink test.
 6. **Long-context memory and page cache.** At 200K the KV cache (about 3.5 GB for the full-attention visits) forces
-   the expert cache down; measure 32K/64K/200K end to end, add a dynamic reserve that starts at 1600 and gives rows
-   their VRAM as `cover()` grows, and warm or lock the expert pages so a 61 ms fault cannot appear in an answer.
+   the expert cache down; measure 32K/64K/200K end to end with the fixed 2,048 MiB reserve, and warm or lock the
+   expert pages so a 61 ms fault cannot appear in an answer.  No reserve change is part of this goal.
 
 Expected short-context result: 45.9 to about 50-53 tok/s (+9-15%), 16K 40.5 to about 44-46 (+9-13%), with the
 dense, head and expert bytes unchanged. These are not a promise: the trace's launch and gap numbers are the
@@ -266,7 +268,7 @@ upper bound for stages 2 and 4, and stage 3 is the only large lever at 200K.
 ## Checkpoint History
 
 - 2026-11-23: short trace 95 tokens, 15.75 ms busy / 9.46 ms gaps, 1,105 launches; kernel table above.
-- 2026-11-23: reserve/swaps sweep; 1600/16 chosen for the next stage.
+- 2026-11-23: reserve/swaps sweep; 1600 MiB measured better but rejected by the user. The reserve stays 2,048.
 - 2026-11-23: expert profile weight sweep; x2 stays.
 - 2026-11-23: NVFP4 cold microbenchmark; vector + shared memory 311/260-269 against 179/165 GB/s, bitwise; engine
   A/B no gain at short context.
