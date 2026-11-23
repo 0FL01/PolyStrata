@@ -113,6 +113,17 @@ limits, and deploy to production.
     construction; free-run streams are nondeterministic on this machine even between two runs of the same binary
     (CPU and GPU expert paths round differently, 1128-1180 experts in VRAM by desktop state), so free-run
     comparison is not a gate and was not used as one.
+  - Post-deploy measurement (2026-11-23 evening, the user asked for an answer-accuracy comparison): a 14-question
+    objective battery (arithmetic, sequences, logic, translation, counting; greedy, temperature 0) run through the
+    production server, 2 passes a config: old binary `strata-poly-21544cc0` 14/14 + 14/14; new binary flags off
+    14/14 + 14/14; new binary flags on (the deployed config) 14/14 + 14/14 - 84/84 correct with identical answer
+    strings in every config. Deterministic pairs under the guard (free-run greedy, one fixed question):
+    at a matched load (1205 experts both) flags off vs on produced bit-identical streams, 107/107 tokens (17*23,
+    answer 391) and, in a second pair, 400/400 tokens; a pair that diverged at token 2 was controlled by two
+    SAME-CONFIG off runs that diverge at token 2 the same way (the free-VRAM wobble at load is 0.01 MiB scale -
+    2025.566 vs 2025.570 vs 2025.574 MiB - flipping a boundary expert between GPU and CPU), and the on run
+    matched one of the off runs exactly. So: when the expert set matches, the three switches change not one output
+    bit; answer-level quality is indistinguishable across old and new binaries.
 - R4: The black screens' cause and the rules against them are recorded here, and the guard enforces them.
   - Source: user; "зафиксируй в цели из за чего был blackscreen".
   - Acceptance: this document has the incident and the rules; `rdna2-rnd/scripts/run_guarded.py` reads the journal
@@ -421,6 +432,17 @@ dense Q8_0 `segments<8>` 2.846 (48, 59.3 us); o-proj `Q80Block` 1.113 (48, 23.2)
   own geometry kept, so the P2d collapse does not apply; three bitwise surfaces: the gate_up product tree, the
   situ expression's compiled form, the quantize with the norm kernel's verified tools), then the user actions
   (`amdgpu.mes=0`, `coolercontrold`) and the structural limits below.
+- Answer-quality comparison after the deploy (the user asked "сравни точность ответов"): a 14-question objective
+  battery (greedy, temperature 0, max 500 tokens) through the production server, 2 passes a config - old binary
+  `strata-poly-21544cc0`, new binary flags off, new binary flags on. Result: 14/14 + 14/14 in EVERY config,
+  84/84, identical answer strings; reasoning token counts wobble freely across passes (e.g. the word-reversal
+  question took 208-282 tokens, the sort question 79-189) - that wobble exists in the old binary too and is the
+  pre-existing CPU/GPU expert nondeterminism, not the switches. Deterministic stream pairs (guarded, free-run
+  greedy, fixed question): matched load (1205 experts) -> off vs on bit-identical 107/107 and 400/400 tokens; a
+  diverging pair was controlled by same-config off-vs-off diverging at token 2 identically (the load-time free
+  VRAM wobbles at 0.01 MiB scale and flips a boundary expert). Live decode during the battery: 43-50 tok/s on
+  the prod instance with the desktop running. The battery script and raw responses:
+  `~/.cache/opencode-tmp/opencode/decode-opt2/{battery.py,qa/}` (outside Git).
 
 ## Black screens of 2026-11-23 (what not to repeat)
 
@@ -486,6 +508,9 @@ The rules (C3-C5), in plain words:
 - 2026-11-23: R1/R2/R3 verified (statuses above). Deploy: binary `strata-poly-56eb42bd` + the three switches in
   the service env, live check "test passed", service running; 16K direct pairs (all off vs all on) 41.84 ->
   42.81 tok/s mean. Next: P2d per the map above.
+- 2026-11-23: Answer-quality battery (post-deploy, the user's request): 84/84 correct across the old binary,
+  new-off and new-on configs, identical answers; deterministic stream pairs bit-identical at matched loads; the
+  free-run divergence controlled as pre-existing. Evidence: the R3 paragraph and the experiment log above.
 - 2026-11-23: P2d FAILED and reverted. Built as designed, bitwise 28/28 (mix_norm_test ALL OK), SASS
   instruction-identical phases; measured: A/B 5 pairs off 44.32 vs on 43.80 tok/s (off 4/5), trace busy +0.53
   ms a token (mix_norm_q8 18.8 us vs 13.1 two-launch; ctrl_norm_q8 33.0 vs 16.6). Mechanism: the norm's
