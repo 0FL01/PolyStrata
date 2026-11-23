@@ -319,7 +319,8 @@ gfx1031; the register-level ideas that survive it are in P1b).
 - 2026-11-23: Noted for the deploy step: the live production process at inspection ran `strata-poly-21544cc0` with
   `STRATA_INKLING_{NORM_Q8,TAIL_MOE,ROUTE_DUAL}=0` in its environment while the on-disk config points at
   `strata-poly-56eb42bd` with all three `=1` - the deployed switches were not active in the running process. The
-  deploy step (P7) verifies the switches from `/proc` after restart.
+  19:21:25 service restart after the fault (done to restore production while GPU work is paused) loaded the on-disk
+  config with the switches on; the deploy step (P7) still verifies the switches from `/proc` after its restart.
 
 ## Checkpoint History
 
