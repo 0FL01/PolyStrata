@@ -6,6 +6,7 @@
 // The protocol is the one `strata --serve` speaks (src/program/generate.cpp): GEN, GENI for a prompt with pictures,
 // STOP and QUIT in, and RESUME, PP, T, DONE and ERR out.
 #include "conversations.hpp"
+#include "disk_sessions.hpp"
 #include "engine.hpp"
 #include "guesses.hpp"
 #include "strata/core/conversation_memory.hpp"
@@ -705,16 +706,18 @@ struct Slot {
     Clock::time_point t0;
 };
 
-int serve(Session& ss) {
+int serve(Session& ss, bool want_disk_sessions) {
     Engine& engine = ss.engine;
     std::vector<Slot> slots((size_t) engine.sequences() - 1);
     engine.trim();
+    strata::poly::DiskSessions disk(engine, want_disk_sessions, (uint64_t) ss.flags.min_free_mib << 20);
     std::printf("INFO context=%d expert_slots=%d expert_cache_mib=%lld pool_workers=%d conversation_cache_mib=%lld "
                 "conversation_cache_slots=%d conversation_cache_min_free_mib=%lld vram_free_mib=%lld vram_elastic=1 "
                 "batch_slots=%d engine=" STRATA_VERSION "\n",
                 engine.max_context(), engine.cached_experts(), (long long) (engine.cached_gib() * 1024.0),
                 engine.threads(), (long long) ss.flags.o.park_mib, ss.flags.o.park_slots, ss.flags.min_free_mib,
-                (long long) engine.vram_free_mib(), (int) slots.size());
+                 (long long) engine.vram_free_mib(), (int) slots.size());
+    if (disk.supported()) std::puts("INFO disk_sessions=1");
     std::printf("READY %d stop\n", engine.max_context());
     std::fflush(stdout);
 
@@ -936,11 +939,9 @@ int serve(Session& ss) {
             std::fflush(stdout);
             continue;
         }
-        // Disk sessions are the Strata engine's.  Refused in the session protocol's own words: a bare ERR is a
-        // reply out of step there, and the server ended this engine for it (issue 114).
         if (line.rfind("SAVE ", 0) == 0 || line.rfind("RESTORE ", 0) == 0) {
-            std::printf("SERR invalid 0 strata-poly keeps no disk sessions\n");
-            std::fflush(stdout);
+            const bool save = line.front() == 'S';
+            if (!disk.run(save, line.substr(save ? 5 : 8), ss.kept)) return 1;
             continue;
         }
         if (line.rfind("GEN ", 0) != 0 && line.rfind("GENI ", 0) != 0) {
@@ -1314,6 +1315,7 @@ void usage() {
                  "  --conversation-cache-min-tokens N   a conversation shorter than this is not parked (default 1024)\n"
                  "  --conversation-cache-min-free-mib N park only while this much physical RAM stays free (default\n"
                  "                         2560)\n"
+                 "  --disk-sessions        with --serve: opt in to SAVE/RESTORE for Inkling-2-Mini without DSpark\n"
                  "  --batch N              N answers written together, each in a sequence of its own with its own\n"
                  "                         state and attention rows (default 0 = one at a time; at most 8);\n"
                  "                         --slots N is the same\n"
@@ -1365,7 +1367,7 @@ int main(int argc, char** argv) {
     Options o;
     CacheFlags cache;
     Sampling s;
-    bool want_serve = false;
+    bool want_serve = false, want_disk_sessions = false;
     long long max_new = 32;
     int top_probs = 0, lookup = 3, image_pad = -1, check = 0, draft_max = 0;
     std::string images;
@@ -1381,6 +1383,7 @@ int main(int argc, char** argv) {
         };
         if (a == "--model") o.model = val();
         else if (a == "--serve") want_serve = true;
+        else if (a == "--disk-sessions") want_disk_sessions = true;
 #if defined(STRATA_GPU_METAL)
         else if (a == "--metal-optimize") o.metal_optimize = true;
         else if (a == "--no-metal-optimize") o.metal_optimize = false;
@@ -1547,7 +1550,7 @@ int main(int argc, char** argv) {
         if (draft_max > 0) ss.draft_most = std::min(draft_max + 1, strata::spec::DraftPolicy::kMaxT);
         int rc = 0;
         if (want_serve) {
-            rc = serve(ss);
+            rc = serve(ss, want_disk_sessions);
         } else if ((long long) ids.size() + max_new > engine.max_context()) {
             throw std::runtime_error("the prompt and --max-new together exceed --max-context");
         } else if (check > 0) {

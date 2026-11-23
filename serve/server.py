@@ -834,8 +834,8 @@ class StrataEngine:
 
     @property
     def disk_sessions(self) -> bool:
-        """SAVE / RESTORE: the Strata project's engine has them, strata-poly does not (issue 114)."""
-        return not poly_engine({"exe": self.spawn[0]})
+        """SAVE / RESTORE: strata-poly advertises support only when it is enabled for the loaded model."""
+        return not poly_engine({"exe": self.spawn[0]}) or self.info.get("disk_sessions") == 1
 
     def __init__(self, exe: str, args: list[str], cwd: str | None = None, log: str | None = None,
                  env: dict | None = None, lazy: bool = False, cpus: list[int] | None = None, _attempt: int = 0):
@@ -2262,6 +2262,7 @@ class StrataEngine:
                 heard, allow = time.monotonic(), float(seconds)
                 continue
             if head == "FATAL":
+                self.ended = True
                 raise EngineDied(line[6:].strip() or "the engine ended during a session restore")
             if head == "SERR":
                 parts = line.rstrip("\r\n").split(" ", 3)
@@ -3724,8 +3725,7 @@ class Service:
                 waiting = False
                 if not self.loaded():
                     return error(503, "the model is not loaded")
-                # under the FIFO: a model switch replaces the engine there (issue 114: strata-poly got the command and
-                # its reply made the server end it)
+                # Under the FIFO: a model switch can replace the engine with one that does not support disk sessions.
                 if not getattr(self.engine, "disk_sessions", True):
                     return error(501, "slot save/restore is not available with strata-poly, this model's engine")
                 with self.status_lock:

@@ -221,6 +221,8 @@ struct TailSum {
 };
 
 class Engine {
+    friend class DiskSessions;
+
 public:
     Engine();
     virtual ~Engine();

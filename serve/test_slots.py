@@ -146,7 +146,7 @@ class Slots(unittest.TestCase):
         self.assertFalse(Path(self.dir.name, "x.bin").exists())
 
     def test_strata_poly_is_never_sent_a_session_command(self):
-        # issue 114: strata-poly keeps no disk sessions, and its answer to SAVE made the server end it
+        # Old and non-opted-in strata-poly starts do not advertise the capability (issue 114).
         spawn = self.engine.spawn
         self.engine.spawn = ("/opt/polystrata/engine-poly/strata-poly",) + spawn[1:]
         try:
@@ -157,6 +157,21 @@ class Slots(unittest.TestCase):
             self.assertEqual(self.engine.proc.sent, [])
             self.assertFalse(self.engine.ended)
         finally:
+            self.engine.spawn = spawn
+
+    def test_strata_poly_disk_session_capability_routes_both_actions(self):
+        spawn = self.engine.spawn
+        self.engine.spawn = ("/opt/polystrata/engine-poly/strata-poly-f442cbe2",) + spawn[1:]
+        self.engine.info["disk_sessions"] = 1
+        try:
+            for action, count in (("save", "n_saved"), ("restore", "n_restored")):
+                s, b = self.post(f"/slots/0?action={action}", {"filename": "inkling.bin"})
+                self.assertEqual(s, 200, b)
+                self.assertEqual(b[count], 62993)
+            path = Path(self.dir.name, "inkling.bin")
+            self.assertEqual(self.engine.proc.sent, [f"SAVE {path}\n", f"RESTORE {path}\n"])
+        finally:
+            self.engine.info.pop("disk_sessions", None)
             self.engine.spawn = spawn
 
     def test_save_writes_into_the_slot_save_path(self):
@@ -335,6 +350,8 @@ class Slots(unittest.TestCase):
         s, b = self.post("/slots/0?action=restore", {"filename": "t.bin"})
         self.assertEqual(s, 500, b)
         self.assertIn("device state", b["error"]["message"])
+        self.assertIsNone(self.engine.proc.poll())   # it can still be saving the expert profile before exit
+        self.assertFalse(self.engine.alive())
 
     def test_malformed_or_mismatched_reply_is_a_server_error(self):
         for script in (["RESTORED 1 2 3\n"], ["SAVED x y z\n"], ["SAVED 1 2\n"], ["T 5\n"]):

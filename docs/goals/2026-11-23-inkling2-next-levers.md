@@ -59,8 +59,11 @@ outcome is resolved and affected constraints remain satisfied.
   - Source: soft goal 2.
   - Acceptance: `mmqbench` faster and bitwise to the current lean kernel; 32K prefill A/B faster.
   - Primary evidence: `mmqbench` dumps compared byte for byte, `ab.sh` 32K pairs.
-  - Status: pending
-  - Evidence:
+  - Status: verified
+  - Evidence: `9f4a10ab`, pushed and deployed with `STRATA_HIP_NVFP4_SCALE_BITS=1`. J64 mean 10.920 -> 9.583 ms
+    with identical dumps; 32K ABBA 36.258/35.875 -> 34.732/34.748 s, identical 32 greedy IDs. The 65 default
+    lean kernel bodies match after ISA normalization. B2 aligned LDS reads were bitwise but only 10.762 ms
+    vs 10.995–11.151 ms, and slower in combination (9.699 vs 9.485 ms with B1 alone).
 - R3: Prompt idle: the measured steady-state idle at 32K is cut by a shipped opt-in change, or the components are
   recorded as not reachable.
   - Source: soft goal 3.
@@ -73,16 +76,21 @@ outcome is resolved and affected constraints remain satisfied.
   - Source: soft goal 4; `2026-11-23-inkling2-fork-vectors.md` R5.
   - Acceptance: a bitwise fused-vs-unfused test plus forced-decode A/B, or a recorded measured rejection.
   - Primary evidence: a scratch bitwise test, `ab.sh` logs.
-  - Status: pending
-  - Evidence:
+  - Status: verified
+  - Evidence: measured rejection. 1,024-thread gate/up + SiTU + Q8_1 kept all 9,072 output bytes and took
+    77.11 vs 79.51–79.52 us for seven DRAM-cold experts; the 512-thread variant took 79.11–79.12 us. Forced
+    2K+256 at the B1 baseline: 45.07/44.81 -> 44.36/42.20 tok/s. The 96 greedy IDs matched; no decode win.
+    Down itself cannot read fewer activation blocks, so direct SiTU + down was not repeated per down workgroup.
 - R5: R6 of the previous goal: the KV state can be saved to disk and loaded by a fresh `strata-poly` process.
   - Source: soft goal 4; `2026-11-23-inkling2-fork-vectors.md` R6 (its acceptance is kept unchanged).
   - Acceptance: versioned, validated snapshot (conv state, SWA ring tails, full-attention rows, token list,
     position); a fresh process after RESTORE reproduces the saved process's greedy tokens and prefills only the
     new suffix; an incompatible file is refused.
   - Primary evidence: a round-trip run with a token compare; save/restore times at 32K.
-  - Status: pending
-  - Evidence:
+  - Status: verified
+  - Evidence: guarded 32K round trip on RX 6700 XT: 663,435,880 bytes saved in 602.0 ms and restored in
+    979.5 ms. Fresh-process re-save was byte-identical; the continuation read 30 tokens, reused 32,768 and
+    matched all 24 greedy token IDs. Wrong magic and a bad payload checksum were refused before device writes.
 - R6: 200K end to end measured against the previous production build.
   - Source: soft goal 5.
   - Acceptance: one 199,000-token prompt on each binary, live config, same tokens.
@@ -201,19 +209,11 @@ reverted from the tree).
 
 ## Current Checkpoint
 
-- Closes: R1 (D3).
-- Done (step 1): the host's `expf` (glibc 2.44, `expf@plt` from `Inkling2::route()`) is reproduced bit for bit on
-  the GPU by a port of glibc's algorithm in double (`~/.cache/claude-fv/expf/expf.hip`: 32-entry table computed
-  from 2^(i/32) at 60 digits, shift 0x1.8p52, the three scaled polynomial constants, the >= 88 special cases).
-  Exhaustive over all 2^32 float bit patterns: **0 mismatches for `expf`, 0 for the router's `1/(1+expf(-x))`**,
-  for each of the four fused/unfused multiply-add variants (the double evaluation leaves no float rounding
-  flip). Sanity: OCML's `expf` in the same harness disagrees on 33,606,109 inputs (sigmoid 10,474,369), so the
-  check is not vacuous.
-- Smallest next action: the whole `route()` on the card (sigmoid, bias add, top-8 with the host's first-index
-  tie rule, the sequential weight sum, `expert_scale_ / (sum + 1e-20f)`, the NVFP4 down scale) against the host
-  on router scores recorded from a real decode (`--dump`-style capture of `h_rl_`), then the `MmvqIds` dispatch.
-- Expected evidence: identical ids and weight bits on every recorded visit.
-- Stop or replan if: the A/B of the finished path lands inside the spread (bound +4.5%).
+- Closes: R1 and R3.
+- Smallest next action: test stage lending and earlier cached-expert submit for decode, plus the exact eight-lane
+  down reduction. For R3 test host AVX2 top-eight with the same sigmoid, ties and weight sums on the new baseline.
+- Expected evidence: each retained change must beat the ABBA spread and meet the token/bitwise gate.
+- Stop or replan if: a candidate only improves a microbenchmark or moves time from compute idle to DMA.
 
 ## Material Decisions
 
@@ -227,8 +227,14 @@ reverted from the tree).
 
 ## Checkpoint History
 
-- 2026-11-23: D3 step 1: GPU port of glibc expf bit-exact over all 2^32 inputs (and the sigmoid); next: the whole
-  route() on recorded scores. Paused by the user.
+- IMPLEMENT: D3 and C1 not retained. GPU route matched all IDs and finite weight bits for 4,560 real + 8,192
+  synthetic rows, plus 544 packed-resident comparisons. Forced 2K+256 decode 46.28/45.59 -> 46.02/45.94 tok/s;
+  96 greedy tokens matched. C1 prompt route at 32K 35.855/35.966 -> 35.860/35.725 s, same 32 greedy IDs.
+- IMPLEMENT: deployed R2 B1. The post-first-batch 32K trace span fell 34.074 -> 32.868 s; kernel idle
+  1,422 -> 1,326 ms, of which 813 -> 751 ms already carried DMA. The Q5_0 waits and the norm-to-router gap
+  largely overlap transfers; small GEMM -> rocBLAS leaves only about 3 ms with neither a kernel nor a copy running.
+- 2026-11-23: D3 step 1: GPU port of glibc `expf` bit-exact over all 2^32 inputs (and sigmoid; NaN payloads
+  separate). OCML differed on 33,606,109 `expf` and 10,474,369 sigmoid inputs. Paused by the user after step 1.
 - 2026-11-23: RECON: decode trace and sensitivity runs, VRAM map, slot-kernel microbench, router hack, MMQ phase
   split, 32K idle re-analysis, 200K end to end on both binaries. R6 verified.
 
