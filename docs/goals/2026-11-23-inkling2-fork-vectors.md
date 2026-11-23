@@ -34,6 +34,37 @@ a split-key decode attention (KV reads 250-270 -> 527 GB/s), fp16-output project
 path: 11.1 -> 92.5 TFLOP/s), a split-K fix for a skinny 64x4608 gate GEMM at 1.7 TFLOP/s, a Windows BAR-eviction guard,
 and SAVE/LOAD of the KV state to disk.
 
+## User directive, session 3 (2026-11-23, verbatim)
+
+"Переходи от RECON к реализаци цели, план работ это GPS навигатор, а не рельсы
+
+Используй текущий план как карту гипотез, а не жёсткий маршрут, начинай с P1
+
+Работай автономно длинными циклами: профилирование -> гипотеза -> временный прототип/бенчмарк -> измерение -> анализ
+-> следующий эксперимент (если профит детерминирование получен - коммит и пуш в main, далее это будет как baseline для
+последующих правок (т.е закрепляем результат и идём дальше)
+
+При неудачах выясняй почему ожидания не подтвердились, пересматривай гипотезы и пробуй другие подходы, не Зацикливайся
+на одном направлении и свободно меняй приориты по результам экспериментов
+
+Успешные оптимизации интегрируй в main (прод бинарник), проверяй end to end прирост
+
+После существенных изменений, перепрофилируй движок, bottleneck может переместиться
+
+ПРодолжай исслендвоание и реализацию, пока останется перспективное проверяемые гипотезы, в финале покажи измеренные
+результатыы, неудачные подходы и оставшиеся ограничения, и деплой в прод
+
+---
+
+Делай копию плана и моей подсказки в цель, помни что документ с целью это глина, её можно мять как угодно по ходу
+работ, в эту глину пиши удачи/неудачи
+
+Используй саб агента general для ревью"
+
+How this session works: the Plan below is a hypothesis map; each kept, deterministic win is committed and pushed to
+main and becomes the baseline for the next experiment; failures are recorded with why the expectation broke; the
+engine is re-profiled after substantial changes; code review of each engine diff by a general-purpose subagent.
+
 ## Execution Directive
 
 Complete the frozen Required Outcomes using the listed Change Envelope and Primary Evidence. Work on the smallest
@@ -312,6 +343,21 @@ on the diff before each commit (C6).
 
 Rejected on measurement this session: in-tile branches in flash; 5 waves/SIMD flash (spills); decode-attention
 unroll 4 and batched softmax; fp16-output GEMMs and split-K gate as fork pathologies with no counterpart.
+
+## Session 3 log (implementation; newest last; each kept step is the next baseline)
+
+- **P1a kept: `STRATA_INKLING_FLASH_LEAN=1`** (`src/poly/inkling_attend_lean.cu`, used with `LANE_PROB=1` on gfx1031).
+  v3c as its own kernel in its own translation unit: added next to `flash_kernel`, it changed `flash_kernel`'s ISA
+  (register allocation) although that source was untouched; in a separate file all 13 functions of
+  `inkling_attend.cu` keep the HEAD ISA (normalized `-S` compare). Review (general subagent) found that the far loop
+  turns `fmaf(inf, 0, s)` = NaN into `s` for an infinite `rel` term; fixed by a block vote (`__syncthreads_and`) that
+  sends such a block through the general loop. Checks: `fvbench dump` 10/10 configs bitwise vs production; attend test
+  PASS for LANE_PROB 0/1 and LEAN 1; kernel full 32K 160.1 -> 131.7 ms, 196K 983.8 -> 752.0 ms, SWA 5.08 -> 4.78 ms.
+  E2E (`ab.sh`, live config, serve mode, same binary, only the switch; two ABBA rounds): 32K prefill
+  A 43.23/42.39/42.27 s (A1 of round 1, 47.71 s, an outlier with another expert residency), B 40.64/41.27/40.44/40.58
+  s: **-4.9%**; 8K 9.13/9.73 -> 8.99/9.00 s. Generated tokens equal within a residency (both token hashes occur with
+  either switch: 1,206-1,228 experts loaded per run). Accepted limit: like `LANE_PROB`, the switch is decided once per
+  process for the first device (one card, C1).
 
 ## Current Checkpoint
 
