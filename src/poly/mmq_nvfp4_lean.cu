@@ -16,8 +16,23 @@ static __device__ __forceinline__ int ggml_cuda_dp4a(const int a, const int b, i
 #endif
     return ggml_cuda_dp4a_ggml(a, b, c);
 }
+#ifdef STRATA_NVFP4_SCALE_BITS
+// All finite normal UE4M3 values are exact in FP32. Construct their exponent and fraction after ggml's
+// factor of 1/2, and keep the same subnormals and the original treatment of byte 0x7f (not 0xff).
+static __device__ __forceinline__ float strata_nvfp4_scale(uint8_t byte) {
+    const unsigned exp = (byte >> 3) & 15, man = byte & 7;
+    const float normal = __uint_as_float(((exp + 119) << 23) | (man << 20));
+    return byte == 0x7f ? 0.f : exp ? normal : (float) man * 0x1p-10f;
+}
+#define ggml_cuda_ue4m3_to_fp32 strata_nvfp4_scale
+#define STRATA_W4A8_NAME(x) strata_poly_w4a8_scale_bits_##x
+#define nvfp4_w4a8 nvfp4_w4a8_scale_bits
+#define nvfp4_w4a8_fits nvfp4_w4a8_scale_bits_fits
+#define nvfp4_w4a8_stream_k nvfp4_w4a8_scale_bits_stream_k
+#else
 #define STRATA_W4A8_NAME(x) strata_poly_w4a8_lean_##x
 #define nvfp4_w4a8 nvfp4_w4a8_lean
 #define nvfp4_w4a8_fits nvfp4_w4a8_lean_fits
 #define nvfp4_w4a8_stream_k nvfp4_w4a8_lean_stream_k
+#endif
 #include "mmq_nvfp4.cu"

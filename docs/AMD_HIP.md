@@ -757,6 +757,13 @@ IQ4_XS/Q8_0/batch2048 settings above, unfrozen A/B/B/A measured 8K 900-903 -> 90
 weight/activation formats and the default-off path are unchanged. The K128 full-kernel experiment was not kept:
 it accelerated down but slowed gate/up; this narrower change avoids that regression.
 
+`STRATA_HIP_NVFP4_SCALE_BITS=1` (opt-in, gfx1031) builds the lean NVFP4 MMQ loader's FP32 scales from the
+UE4M3 bits. It needs `STRATA_HIP_NVFP4_MMQ=1` and `STRATA_HIP_NVFP4_LEAN=1`; tiles of at most eight rows and
+eligible down-tail calls keep their previous kernels. On the same RX 6700 XT, J64 gate/up (128 experts ×
+128 rows, `[2304,2304]`) went from 10.92 to 9.58 ms with a byte-identical FP32 dump. A 32,768-token prompt
+with the production settings above took 35.88–36.26 s off and 34.73–34.75 s on (3.7% less time on average);
+all 32 greedy token IDs matched. Decode throughput was within the run-to-run spread.
+
 `STRATA_INKLING_BATCH_KV_RELEASE=1` (opt-in, gfx1031, VRAM pool off) waits for free-memory accounting once
 after a KV trim, instead of once per KV region. The device barrier, release/remap operations, retained
 addresses, KV policy and subsequent expert-cache refill stay on their existing paths. The wait allows at

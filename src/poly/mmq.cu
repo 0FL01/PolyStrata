@@ -23,6 +23,7 @@ bool nvfp4_w4a8_stream_k(int64_t w_rows, int cc);
 bool nvfp4_tail_try(const mmq_args& a, cudaStream_t s);
 // mmq_nvfp4_lean.cu, mmq_nvfp4_tail_lean.cu (STRATA_HIP_NVFP4_LEAN=1): the same products, fewer instructions
 void nvfp4_w4a8_lean(ggml_backend_cuda_context& ctx, const mmq_args& a, cudaStream_t s);
+void nvfp4_w4a8_scale_bits(ggml_backend_cuda_context& ctx, const mmq_args& a, cudaStream_t s);
 bool nvfp4_tail_lean_try(const mmq_args& a, cudaStream_t s);
 #endif
 
@@ -228,7 +229,17 @@ void Mmq::mul(const void* w, int type, int64_t w_rows, int64_t w_cols, size_t st
                 (void) logged_tail;
                 return;
             }
-            if (use_lean) nvfp4_w4a8_lean(ctx, a, s);
+            static const bool scale_bits = [] {
+                const char* v = std::getenv("STRATA_HIP_NVFP4_SCALE_BITS");
+                return v && v[0] == '1' && v[1] == '\0';
+            }();
+            if (use_lean && scale_bits) {
+                nvfp4_w4a8_scale_bits(ctx, a, s);
+                static const int logged_scale = std::fputs(
+                    "strata-poly: STRATA_HIP_NVFP4_SCALE_BITS=1: NVFP4 MMQ constructs FP32 scales from UE4M3 bits\n",
+                    stderr);
+                (void) logged_scale;
+            } else if (use_lean) nvfp4_w4a8_lean(ctx, a, s);
             else nvfp4_w4a8(ctx, a, s);   // Q8_1 activation scales live in xq, not in a.y_scale
             ck("mmq product");
             static const int logged = std::fputs(
