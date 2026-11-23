@@ -46,7 +46,7 @@ was left off.
 ## Run Inkling-2-Mini
 
 Inkling is not in the interactive installer yet. On Linux, set up the [HIP build prerequisites](docs/AMD_HIP.md#build)
-and get [Unsloth's `UD-IQ4_XS` GGUF](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF/blob/main/Inkling-2-Mini-UD-IQ4_XS.gguf)
+and [download Unsloth's `UD-IQ4_XS` GGUF weights](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF/resolve/45fd08764f2b0bf16b03a5483a80e5c7aaec8772/Inkling-2-Mini-UD-IQ4_XS.gguf?download=true)
 (14.7 GiB). This example targets the tested RX 6700 XT (`gfx1031`).
 
 <details>
