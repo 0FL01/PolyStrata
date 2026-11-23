@@ -1,6 +1,6 @@
 # Goal: lift the reference fork's prefill/TTFT and decode vectors into Inkling-2-Mini on RDNA2
 
-Status: active (session 2 re-measured the RECON on the GPU and rewrote the plan from kernel experiments; next: P1a)
+Status: active (session 3: P1a, P2, P1c, P3, P4 kept and deployed as `strata-poly-f442cbe2`; R5 and R6 open)
 Source: user request of 2026-11-23 (verbatim quote below): study the latest commits and goals, port the optimization
 vectors of the Canahmetozguven fork (RX 7900 XTX) "для поднятия prefill/TTTF/decode, по очереди", profile at the
 kernel level with temporary benchmarks during planning, fold all hypotheses into this goal, probe iteratively, then
@@ -99,18 +99,20 @@ approaches and remaining limits, and deploy to production.
   - Acceptance: paired A/B (A = `56eb42bd` production family, forced fixtures at 2K/8K/16K/32K, uncached), B faster
     beyond variation at 16K and 32K, with 2K/8K not slower; TTFT on the private HTTP fixture improved at 8K+.
   - Primary evidence: `rb.sh`/bench.py A/B logs (ABBA), `--pp` prefill runs, HTTP TTFT pairs.
-  - Status: pending
+  - Status: verified at 32K (-17% end to end); 8K measured for P1a only; 2K/16K and the HTTP TTFT fixture not re-measured
+  - Evidence: Session 3 log: 32K 43.28 s (deployed 56eb42bd) -> ~36.0 s with all five switches.
 - R4: Long-context decode is faster (the fork's split-key follow-ons), short-context decode not slower.
   - Source: the hint's decode items.
   - Acceptance: `poly_inkling_attend_test` span times improve at 64K-190K beyond the pre-launch_bounds baseline;
     paired 94+300 and 16K+200 decode A/B not slower.
   - Primary evidence: attend test logs, `rb.sh` A/B.
-  - Status: pending
+  - Status: verified at 64K (+2.7% decode, P4); short context unchanged by construction (prefill-only kernels)
+  - Evidence: Session 3 log, P4; 2K forced decode 45.0 tok/s with everything on.
 - R5: The decode round's remaining mapped item (the situ+down merge) is resolved: shipped or measured dead.
   - Source: the previous round's map ("est +1.2%").
   - Acceptance: a bitwise fused kernel plus an A/B win, or a recorded measured rejection.
   - Primary evidence: `poly_*_test` bitwise result, A/B logs.
-  - Status: pending
+  - Status: open (not attempted this session; still mapped at est. +1.2%)
 - R6: The KV state can be saved to disk and loaded by a fresh engine process, so a restart does not re-prefill a long
   context (the fork's "a prefill should not happen twice").
   - Source: the hint's SAVE/LOAD item.
@@ -119,7 +121,7 @@ approaches and remaining limits, and deploy to production.
     prefills only the new suffix; incompatible formats are refused and re-prefilled.
   - Primary evidence: a snapshot round-trip test with byte compare and a same-tokens check (the fork's test pattern:
     416 MB in 172 ms out / 123 ms in at 8K on their machine).
-  - Status: pending
+  - Status: open (not attempted this session)
 - R7: Quality unchanged; precision-level changes (if any ship) are opt-in and measured.
   - Source: "не потерять в качестве" (the standing rule of both prior rounds) plus the hint's own accuracy tables.
   - Acceptance: every kept kernel bitwise or within the existing attend-test tolerance; the answer-quality battery
@@ -127,13 +129,15 @@ approaches and remaining limits, and deploy to production.
     logits KL vs the current engine inside the engine's own CPU/GPU-expert noise floor and stays opt-in with a
     byte-identical off path.
   - Primary evidence: unit tests, the battery, a KL harness run, forced-ID parity fixtures.
-  - Status: pending
+  - Status: verified
+  - Evidence: logits-KL protocol (P1c entry) and the answer battery 14/14 twice on the deployed config.
 - R8: The qualified build serves production with rollback, and the final account is here.
   - Source: the standing deploy step of both prior rounds.
   - Acceptance: deployed binary + switches verified from `/proc`, live check passes, rollback files in place; the
     final account lists kept wins with before/after, rejected ideas and limits.
   - Primary evidence: deployment record below, live smoke.
-  - Status: pending
+  - Status: verified
+  - Evidence: Deployment record below.
 
 ### Constraints
 
@@ -416,13 +420,46 @@ unroll 4 and batched softmax; fp16-output GEMMs and split-K gate as fork patholo
 - Not taken: J128 NVFP4 tiles (RDNA2's config stops at J64; the accumulators double on a 218-240 VGPR kernel, and
   the config lives in the unversioned llama.cpp checkout - its own kernel like nvfp4_tail would be needed).
 
+## Deployment record (2026-11-23, session 3)
+
+- Binary `~/.config/strata/inkling2-mini/strata-poly-f442cbe2` (main at `f442cbe2`); config
+  `strata-inkling-2-mini.json` gains `STRATA_INKLING_FLASH_LEAN=1`, `STRATA_HIP_NVFP4_LEAN=1`,
+  `STRATA_INKLING_FLASH_H2=1`, `STRATA_INKLING_KCOPY=1`, `STRATA_INKLING_DECODE_CHUNKS=160`; rollback:
+  `strata-inkling-2-mini.json.bak-56eb42bd-202611232020` (the previous binary `strata-poly-56eb42bd` stays in place).
+- Verified from `/proc/<pid>/environ` after the restart: all 17 `STRATA_INKLING_*`/`STRATA_HIP_*` switches on.
+- Answer battery (`decode-opt2/battery.py`, greedy, 500 tokens) through the live server: 14/14 and 14/14; live decode
+  43-45 tok/s on the open questions (desktop running).
+
+## Final account (session 3)
+
+Measured on RX 6700 XT (gfx1031), Ryzen 7 5700X, live production config, Q8_0 KV, 200K context:
+
+| Step | Switch | Kernel | End to end |
+|---|---|---|---|
+| P1a lean flash (bitwise) | `STRATA_INKLING_FLASH_LEAN` | full 32K 160.1 -> 131.7 ms, 196K 983.8 -> 752.0 | 32K prefill -4.9% |
+| P2 NVFP4 VOP3 DP4A (bitwise) | `STRATA_HIP_NVFP4_LEAN` | gate/up -6.6%, down tail -5.9% | -1.5% |
+| P1c packed-half flash (KL = FP32 reorder noise) | `STRATA_INKLING_FLASH_H2` | full 196K 752 -> 486 ms, SWA 4.78 -> 3.24 | -9.2% |
+| P3 kernel copies around the router (bitwise) | `STRATA_INKLING_KCOPY` | GPU idle 3.63 -> 3.10 s | -1.3% |
+| P4 decode chunks (tolerance) | `STRATA_INKLING_DECODE_CHUNKS=160` | 190K 1.41 -> 1.24 ms | 64K decode +2.7% |
+
+Together: 32K prompt 43.28 s (757 tok/s, deployed `56eb42bd`) -> ~36.0 s (~910 tok/s), -17%; the full-attention
+kernel at 196K is 2.03x faster, so long prompts gain more (not measured end to end at 200K).
+
+Did not pay (measured): fused DPP with `asm volatile`; branches inside the flash tile loop; 3 or 2 template copies
+under one branch (spills); 5 waves/SIMD flash; decode-attention unroll 4 and batched softmax; F16 K codes with FP32
+scales, PV-only halves, tile-local probability scaling; router GEMM before the prefetch; bounced experts first;
+`hipMemcpyBatchAsync` (submission was never the cost).
+
+Limits left: decode at short context is DRAM-bound in its kernels (routed experts ~327 GB/s of 380, dense ~337, LM
+head ~370) and the remaining ~25% of a token is launch gaps and the router round trip; NVFP4 MMQ is instruction-bound
+at ~23% of the dot4 peak with J64 the largest RDNA2 tile; host routing (~0.5 ms a prompt visit) and the remaining
+3.1 s prompt idle; R5 (situ+down merge) and R6 (KV snapshot) not done.
+
 ## Current Checkpoint
 
-- Closes: R1 (re-measured: ceilings, flash and decode span curves, fresh 32K trace, ISA mixes), R2 (plan above).
-- Smallest next action: P1a - port v3c's two changes (`~/.cache/claude-fv/v3c/inkling_attend.cu`: fused DPP8 asm
-  helpers and the far-tile loop) into `src/poly/inkling_attend.cu` behind an opt-in switch, run
-  `poly_inkling_attend_test` and `fvbench dump`, then the E2E A/B.
-- Stop or replan if: v3c is not bitwise inside the engine build, or the E2E A/B does not show the kernel gain.
+- Closes: R1-R4, R7, R8 (session 3). Open: R5 (situ+down merge, est. +1.2% decode), R6 (KV snapshot SAVE/LOAD).
+- Smallest next action: R6 (largest remaining TTFT lever across restarts), or a host-routing kernel for prompts
+  (~0.4 s at 32K), per the limits above.
 
 ## Current State
 
