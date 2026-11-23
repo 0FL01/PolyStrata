@@ -359,6 +359,20 @@ unroll 4 and batched softmax; fp16-output GEMMs and split-K gate as fork patholo
   either switch: 1,206-1,228 experts loaded per run). Accepted limit: like `LANE_PROB`, the switch is decided once per
   process for the first device (one card, C1).
 
+- **P2 kept: `STRATA_HIP_NVFP4_LEAN=1`** (`src/poly/mmq_nvfp4_lean.cu`, `mmq_nvfp4_tail_lean.cu`). The NVFP4 vec_dot
+  starts each 16-value group's sum at 0; hipcc then moves 0 into a register for the tied `v_dot4c_i32_i8` (222 such
+  `v_mov` in the J64 kernel). The lean units route ggml's `ggml_cuda_dp4a` through a wrapper (renamed around
+  `common.cuh`) that emits VOP3 `v_dot4_i32_i8 r, a, b, 0` when the sum is the constant 0: `v_mov` 222 -> 94, VGPR
+  240 -> 218, same integers. third_party/llama.cpp is a gitignored FetchContent checkout, so the change lives in
+  Strata's own units; the default units' ISA is unchanged (65/65 and the tail kernel). Microbench (`mmq/mmqbench`,
+  128 experts, Mmq API, bitwise vs default): gate/up 2304x2304 at 128 rows 11.67 -> 10.90 ms, 64 rows 6.02 -> 5.58,
+  48: 4.95 -> 4.79, 32: 4.00 -> 3.91, 24: 3.53 -> 3.40, 16: 3.05 -> 3.01; **8 rows 2.73 -> 2.89 (worse: the review
+  found J8 grows to 175 VGPRs)**, so lean is used only above 8 rows; down tail 2304x1152 6.62 -> 6.23 ms. E2E 32K
+  (both with FLASH_LEAN): A 41.63/40.85/40.95/41.17 s, B 40.53/40.06/40.07/41.47 s (-1.5%, near the noise; one B run
+  had a slow decode too). Review (general subagent): no linkage or semantic defect; the J8 finding is applied.
+  Not taken: the same wrapper for the Q8_0 dense MMQ (one zero start per 8 DP4A there, half NVFP4's share; est.
+  <0.5% E2E).
+
 ## Current Checkpoint
 
 - Closes: R1 (re-measured: ceilings, flash and decode span curves, fresh 32K trace, ISA mixes), R2 (plan above).

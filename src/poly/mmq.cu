@@ -21,6 +21,9 @@ bool nvfp4_w4a8_stream_k(int64_t w_rows, int cc);
 #endif
 #if STRATA_POLY_HIP_NVFP4
 bool nvfp4_tail_try(const mmq_args& a, cudaStream_t s);
+// mmq_nvfp4_lean.cu, mmq_nvfp4_tail_lean.cu (STRATA_HIP_NVFP4_LEAN=1): the same products, fewer instructions
+void nvfp4_w4a8_lean(ggml_backend_cuda_context& ctx, const mmq_args& a, cudaStream_t s);
+bool nvfp4_tail_lean_try(const mmq_args& a, cudaStream_t s);
 #endif
 
 namespace {
@@ -207,14 +210,26 @@ void Mmq::mul(const void* w, int type, int64_t w_rows, int64_t w_cols, size_t st
                 const char* v = std::getenv("STRATA_HIP_NVFP4_TAIL");
                 return v && v[0] == '1' && v[1] == '\0';
             }();
-            if (tail && nvfp4_tail_try(a, s)) {
+            static const bool lean = [] {
+                const char* v = std::getenv("STRATA_HIP_NVFP4_LEAN");
+                const bool on = v && v[0] == '1' && v[1] == '\0';
+                if (on)
+                    std::fputs("strata-poly: STRATA_HIP_NVFP4_LEAN=1: NVFP4 products start each sum with a VOP3 DP4A\n",
+                               stderr);
+                return on;
+            }();
+            // J8 tiles (8 rows at most) grow with the VOP3 form: 94 -> 175 VGPRs, 2.73 -> 2.89 ms in a 128-expert
+            // launch on RX 6700 XT; from 16 rows on they gain (J64 6.02 -> 5.58 ms)
+            const bool use_lean = lean && max_rows > 8;
+            if (tail && (use_lean ? nvfp4_tail_lean_try(a, s) : nvfp4_tail_try(a, s))) {
                 ck("mmq NVFP4 tail product");
                 static const int logged_tail = std::fputs(
                     "strata-poly: STRATA_HIP_NVFP4_TAIL=1: NVFP4 down skips the padded K128 half on gfx1031\n", stderr);
                 (void) logged_tail;
                 return;
             }
-            nvfp4_w4a8(ctx, a, s);   // Q8_1 activation scales live in xq, not in a.y_scale
+            if (use_lean) nvfp4_w4a8_lean(ctx, a, s);
+            else nvfp4_w4a8(ctx, a, s);   // Q8_1 activation scales live in xq, not in a.y_scale
             ck("mmq product");
             static const int logged = std::fputs(
                 "strata-poly: STRATA_HIP_NVFP4_MMQ=1: using NVFP4 W4A8 MMQ on gfx1031\n", stderr);

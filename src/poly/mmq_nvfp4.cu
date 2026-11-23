@@ -13,8 +13,11 @@
 #undef BLACKWELL_MMA_AVAILABLE
 #define blackwell_mma_available(cc) false
 #endif
-#define mul_mat_q_switch_J strata_poly_w4a8_mul_mat_q_switch_J
-#define mul_mat_q_case strata_poly_w4a8_mul_mat_q_case
+#ifndef STRATA_W4A8_NAME   // mmq_nvfp4_lean.cu builds this unit again under other names
+#define STRATA_W4A8_NAME(x) strata_poly_w4a8_##x
+#endif
+#define mul_mat_q_switch_J STRATA_W4A8_NAME(mul_mat_q_switch_J)
+#define mul_mat_q_case STRATA_W4A8_NAME(mul_mat_q_case)
 #include "mmq.cuh"
 
 DECL_MMQ_CASE(GGML_TYPE_NVFP4);
@@ -22,7 +25,7 @@ DECL_MMQ_CASE(GGML_TYPE_NVFP4);
 namespace strata::poly {
 
 void nvfp4_w4a8(ggml_backend_cuda_context& ctx, const mmq_args& a, cudaStream_t s) {
-    strata_poly_w4a8_mul_mat_q_case<GGML_TYPE_NVFP4>(ctx, a, s);
+    mul_mat_q_case<GGML_TYPE_NVFP4>(ctx, a, s);
 }
 
 // Mmq::fits() and Mmq::split_exact() for these tiles: the host's config as this unit sees the card
