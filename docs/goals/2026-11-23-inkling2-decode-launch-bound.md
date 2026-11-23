@@ -81,12 +81,21 @@ limits, and deploy to production.
     stall-free time (the p10 token time of the HIP shim) both above A's run-to-run spread; stalls a token reported
     for every run (see "Black screens and the GPU stalls").
   - Primary evidence: `rb.sh` runs with `hipshim.so` (scratch), `ab.py` output, parity fixture.
-  - Status: pending
+  - Status: verified
+  - Evidence: 2026-11-23, RX 6700 XT, forced 94+300, each change against its parent build, same desktop: P2a
+    (`273fa1a0`) 45.15 -> 45.82 tok/s mean of 3 pairs (+1.48%, 3/3); P2c (`e2027e4b`) 46.88 -> 47.14 (+0.57%, 7
+    pairs, 5/7 positive, median +0.5%); P2b (`56eb42bd`) 47.47 -> 47.78 (+0.67%, 5 pairs, 5/5). Compounded
+    +2.7% on the same fixture; every kept change beat its parent deterministically (launch-count arithmetic, not
+    spread). Forced IDs, so the streams are identical by construction.
 - R2: 16K decode not slower; prefill within variation.
   - Source: the first round's R2, still the user's acceptance for decode work.
   - Acceptance: paired 16,384-prompt + 128-token decode A/B on the kept changes.
   - Primary evidence: `bench16k.py` logs.
-  - Status: pending
+  - Status: verified
+  - Evidence: 2026-11-23, forced 16384+200: per change - P2c 41.93 -> 41.95 (7 pairs), P2b 42.91 -> 43.02 (3
+    pairs); and the kept set as a whole, all switches off against all on, 2 direct pairs: 41.62 -> 42.94 and
+    42.06 -> 42.68 tok/s (mean 41.84 -> 42.81, +2.3%; prefill 862.6/859.6 against 863.8/862.6 tok/s, inside
+    variation). The 16K token is faster with the switches on, not slower.
 - R3: Quality unchanged.
   - Source: user; "Важно не потерять в качестве из за дивергенции/смены формул".
   - Acceptance: every kept kernel is bit for bit the old one, or passes the existing attention test tolerance; no
@@ -94,7 +103,16 @@ limits, and deploy to production.
     parity fixture match.
   - Primary evidence: the bitwise test of each fused kernel (the pattern of `native_add_rms_norm_q8_1`), parity
     fixture.
-  - Status: pending
+  - Status: verified
+  - Evidence: 2026-11-23: `poly_norm_q8_test` rows gate 48/48 bit for bit (and its output byte-identical to the
+    HEAD-built baseline after the P2b revert); `poly_tail_moe_test` 60/60 bit for bit; `poly_route_dual_test` all
+    passed (products bitwise, pinned host copies bitwise, refusal shapes write nothing). No formula, reduction
+    order or `route()` change anywhere in the three diffs; the old frozen kernels are untouched source. The
+    switch-off paths were verified equal to HEAD launch by launch by the review subagent each time (the user's
+    review rule, `ses_df7349d87ffe` and `ses_df71c40b1ff`). Forced-ID A/B makes token streams identical by
+    construction; free-run streams are nondeterministic on this machine even between two runs of the same binary
+    (CPU and GPU expert paths round differently, 1128-1180 experts in VRAM by desktop state), so free-run
+    comparison is not a gate and was not used as one.
 - R4: The black screens' cause and the rules against them are recorded here, and the guard enforces them.
   - Source: user; "зафиксируй в цели из за чего был blackscreen".
   - Acceptance: this document has the incident and the rules; `rdna2-rnd/scripts/run_guarded.py` reads the journal
@@ -142,20 +160,23 @@ limits, and deploy to production.
 
 ## Current Checkpoint
 
-- Closes: R1 (P2a and P2c won and shipped; the next steps below).
-- Done: the guard fix and this document (R4); P1 (system side: user actions recorded); P2a (norm+quantize rows
-  kernel, `STRATA_INKLING_NORM_Q8=1`, bit for bit and +1.48% forced decode, 3/3 A/B pairs); P2c (the tail's own
-  expert sum, `STRATA_INKLING_TAIL_MOE=1`, bit for bit 60/60, +0.57% forced decode, 7 pairs, launch table proof:
-  `add_scaled` 0 a token).
-- P1 result (system side, nothing to change in the engine): `coolercontrold` is a root system service and
-  `amdgpu.mes=0` needs root and a reboot; no sudo password on this machine (checked: `sudo -n` fails), so both are
-  user actions, recorded here. The engine-side part of P1 is the wake-up cost after GPU idle, which P4b shortens.
-- Smallest next action: P2b (copy2 into its producers) — the last launch-count fusion with a clear site — or
-  re-profile first if the trace says the small-kernel table moved (the two shipped fusions took ~27 of ~1,100
-  launches a token; the remaining ones are ~1 us host each, so weigh P3/P4 against that).
-- Expected evidence: one launch less a visit each; A/B 3 x 300 forced tokens, all pairs in the same direction.
-- Stop or replan if: a fusion is not bitwise or the A/B gain is inside the run-to-run spread — then P3 (Q8_0
-  segment bandwidth) next.
+- Closes: R1, R2, R3 (all three launch-count fusions won, shipped and deployed; statuses above).
+- Done: R4 (guard + incident); P1's system side (user actions recorded: `coolercontrold` is a root service,
+  `amdgpu.mes=0` needs root and a reboot, no sudo password on this machine); P2a (`273fa1a0`,
+  `STRATA_INKLING_NORM_Q8=1`, +1.48%); P2c (`e2027e4b`, `STRATA_INKLING_TAIL_MOE=1`, +0.57%); P2b (`56eb42bd`,
+  `STRATA_INKLING_ROUTE_DUAL=1`, +0.67%); the guard's kwin-monitor crash fix (`003e5fd9`); deployment to production
+  (binary `strata-poly-56eb42bd` + the three switches in the service env; live check passed; 16K direct pairs
+  above). Compounded forced-decode win +2.7% on the kept set; 16K +2.3% direct.
+- Smallest next action: P2d (mix + the rows-norm after it in one kernel, the last mapped launch fusion, est
+  +1.7-1.9%: 48 norm launches a token, 0.22 ms busy + ~0.16 ms of launch floor). The full recipe, call sites and
+  gates are in "The next cycle's map" below.
+- Expected evidence: a bitwise fused-vs-two-launch test in the pattern of `poly_norm_q8_test`, a launch-table trace
+  (mix path unchanged, `rms_norm_q8_1_rows` 48 -> 0 a token), A/B forced 94+300 (5 pairs) and 16K (3 pairs),
+  review subagent before the commit.
+- Stop or replan if: the mix phase's compiled form cannot be reproduced bit for bit in the fused kernel after the
+  SASS archaeology (the P2a fights were three; this one has ten reductions and an `expf`), or the A/B gain lands
+  inside the spread - then record the failure, and the next candidates are the situ+down merge and the user actions
+  of P1.
 
 ## Profiling (this round)
 
@@ -257,6 +278,49 @@ estimates from the measurements above, to be replaced by the A/B.
 - P5 Only off the card that drives a display: the barrier fusions (`conv_add` + `mix`, the control trio, `heads_kv` +
   decode + combine, the three-stream control): 1.2-1.5 ms on paper, the barrier's cost on RDNA2 unmeasured, and a
   barrier whose blocks are not all resident hangs the GPU, which on this driver ends in a black screen.
+
+## The next cycle's map (2026-11-23, after P2a/P2c/P2b; the profile moved, the sizes below are from it)
+
+Fresh trace after the three fusions (`rp4`, 64 tokens, all switches on, RX 6700 XT): 960.7 launches a token (was
+1,105 at the round's start), GPU busy 15.09 ms. The table: `MmvqSlots` 5.448 ms (95.75 a token, 56.9 us avg);
+dense Q8_0 `segments<8>` 2.846 (48, 59.3 us); o-proj `Q80Block` 1.113 (48, 23.2); LM head `q6_k_warps` 1.016 (1,
+1,016 us); `decode_q8` 0.581 + combine 0.171 (48); `mix` 0.502 (68, 7.4); `conv_add` 0.382 (96, 4.0); `gemv_rows`
+0.312 (88, 3.5); `add_rms_norm_q8_1` (frozen) 0.294 (48, 6.1); `gemv_rows_segments` 0.294 (24, 12.3);
+`control_out3` 0.291 (24); `gemv_rows_dual` 0.287 (48, 6.0); `mmvq<14>` 0.276 (15, 18.4); `rms_norm_q8_1_rows`
+0.218 (48, 4.5); `mix3` 0.215 (28, 7.7); `heads_kv` 0.193 (48); `control_in` 0.161 + `in3` 0.146 + `out` 0.131
+(72); `situ_rows_q8_1` 0.118 (48, 2.5); logits copy 0.031 (1).
+
+- P2d mix + rows-norm, est +1.7-1.9% (the 48 `rms_norm_q8_1_rows` launches: 0.22 ms busy + ~0.16 ms launch
+  floor). `mix_row` (inkling2.cu ~60-124) is an attention-style softmax over up to 5 banks: a thread owns
+  kPer = 2304/128 = 18 values a bank, per-bank ss and dot through explicit `__fmaf_rn` + wave-reduce trees,
+  `scale = rsqrtf(ss/kRowWidth + 1e-6)`, `w = dot*scale*rsqrtf(kRowWidth)`, softmax `expf(w - top)`, and the value
+  is `Σ __fmaf_rn(w*scale, x, val) / sum`. The fusable pairs: `mix_kernel` at 1153 (one-stream depth-mix ->
+  `cur_`) then the rows-norm at ~1289; `mix3_kernel` at 1200 (three-stream, in `heads()` -> `s3cur_`) then the
+  rows-norm right after it. NOT fusable: the msg mix at ~1161 (its output feeds `control_in3` without a norm) and
+  the loop control's mixes. Plan: one kernel, mix phase on threads 0..127 writing the row to shared, then the norm
+  phase over the shared row with the P2a recipe exactly (`__fmaf_rn` squares on the SUM stride, `1.0f/sqrtf`,
+  `#pragma clang fp contract(off)` around the quantize); the weight row and the y/q8_1 destinations are the same
+  buffers the two launches used. Gates: fused-vs-two-launch bitwise on the normed floats AND the q8_1 bytes
+  (`poly_norm_q8_test` pattern); SASS archaeology on `mix_row`'s compiled forms inside the fused context before any
+  run; A/B 5 pairs + 16K 3 pairs; review before the commit.
+- situ + down merge, est +1.2% (the 48 `situ_rows_q8_1` launches, ~0.28 ms with their floor): fold the SiTU
+  activation and the Q8_1 quantize into the NVFP4 slot kernel's down launch (elementwise in the warp that owns
+  the 32-value block; no barrier). Deep surgery in `iq_kernels.cu` + `kernels.cu`'s `situ_rows_q8_1`; THREE
+  bitwise surfaces (the gate_up product tree unchanged, the situ expression's compiled form, the quantize with
+  the P2a-verified tools). Only after P2d resolves.
+- P3 dense-segment bandwidth: DOWNGRADED. The plan's 238-256 GB/s was the COLD microbench number; in the engine
+  the five projections run hot (42-59 us for 21 MB a visit, ~357-500 GB/s effective, Infinity Cache reuse across
+  tokens) - the real headroom is a fraction of the 1.0 ms upper bound.
+- P4b L3 prefetch of the next visit's host experts: DOWNGRADED. The CPU experts are DRAM-bound at 43 GB/s reading
+  from the page-cached 15.7 GB model file; there is no page-fault premise, and the head's ~200 us a visit of idle
+  DRAM covers ~8.6 MB - one expert's worth. Revisit only with a measured cold/warm `cpu_experts()` delta.
+- P4a expert-launch fixed cost (2.0 ms a token of the 5.45 ms `MmvqSlots` line): the three sequential launches a
+  visit (gate_up -> situ -> down) are the floor; barrier merges are banned on this card; the situ+down merge above
+  is the only reachable cut.
+- Locked (user actions or measured dead ends): system stalls ~2 ms a token (`amdgpu.mes=0`, `coolercontrold` -
+  root, no sudo here); CPU-expert exposure ~2.6 ms a token at the fixed 2048 MiB reserve (the socket's 43 GB/s);
+  HIP graphs (2.98 us a kernel against 2.70 for launches, measured); the pinned-word spin (no gain); DSpark; the
+  router event's wait (host ahead, not a cost).
 
 ## Experiment log
 
@@ -371,28 +435,45 @@ The rules (C3-C5), in plain words:
 
 ## Material Decisions
 
-- 2026-11-23: GPU runs paused by the user; CPU-only work continues.
+- 2026-11-23: GPU runs paused by the user; CPU-only work continues. (Superseded the same day by the user's
+  implementation directive; C3 carries the current rule.)
 - 2026-11-23: The reserve stays 2048 MiB; the host experts stay on the CPU (DRAM-bound at 43 GB/s).
 - 2026-11-23: Fusions keep each kernel's arithmetic and reduction order; a fusion is kept only bit for bit.
 - 2026-11-23: Grid barriers and persistent kernels are not tried on the machine that drives the display.
+- 2026-11-23: Frozen production kernels take no new stores (the P2b norm-store revert); a value-level gate is a
+  byte-diff of the full test output against a HEAD-built baseline, not a SASS shape match.
+- 2026-11-23: Deploy at the final stage, after the round's kept changes: binary + switches together, live check,
+  service left running. Done after P2b (`strata-poly-56eb42bd`, the three switches on).
 
 ## Checkpoint History
 
 - 2026-11-23: R4. Guard fixed (cursor, whole words, boot check); this document with the incident, the measurements
   and the plan. Next: the CPU-only L3 measurement of P4b, then P2a when GPU runs are allowed.
+- 2026-11-23: P2a. The norm+quantize rows kernel is bit for bit the two launches (24/24 shapes, three compiler
+  divergences found and pinned at SASS: fma squares, quantize-loop contraction, libdevice sqrt refinement) and
+  +1.48% forced decode (3/3 pairs, RX 6700 XT). Review subagent on the diff before the commit, per the user's
+  rule. Next: P2b/P2c fusions.
 - 2026-11-23: P2c. The tail launch sums the visit's cached experts itself (`TailSum` record, opt-in
   `STRATA_INKLING_TAIL_MOE=1`): bit for bit (60/60 in `poly_tail_moe_test`, SASS conv segment identical), one
   launch less a MoE visit (`add_scaled` 0 a token in the trace), forced 94+300 46.88 -> 47.14 tok/s mean of 7
   pairs (+0.57%, 5/7 pairs positive; the launch floor's arithmetic predicts it). P2a follows in the history
   below. Next: P2b, or re-profile first.
-- 2026-11-23: P2a. The norm+quantize rows kernel is bit for bit the two launches (24/24 shapes, three compiler
-  divergences found and pinned at SASS: fma squares, quantize-loop contraction, libdevice sqrt refinement) and
-  +1.48% forced decode (3/3 pairs, RX 6700 XT). Review subagent on the diff before the commit, per the user's
-  rule. Next: P2b/P2c fusions.
+- 2026-11-23: Guard's kwin check fixed (`003e5fd9`): the monitor itself crashed on a Match-or-None `|=`, found by
+  the 16K runs; it had failed closed, the boot stayed clean.
+- 2026-11-23: P2b. The router's `copy2` rides its gemv (`STRATA_INKLING_ROUTE_DUAL=1`): first idea (route only
+  MoE visits) was a no-op - all 48 visits route - and was reverted; the norm-store variant changed the frozen
+  kernel's bits and was reverted (the lesson above); the shipped form writes `h_rl_`/`h_x_` from the router gemv
+  itself. Bitwise gates green, `copy2` 48.98 -> 0.98 a token, forced 94+300 +0.67% (5/5 pairs), 16K +0.26% (3/3).
+  Review before the commit; its three notes applied.
+- 2026-11-23: R1/R2/R3 verified (statuses above). Deploy: binary `strata-poly-56eb42bd` + the three switches in
+  the service env, live check "test passed", service running; 16K direct pairs (all off vs all on) 41.84 ->
+  42.81 tok/s mean. Next: P2d per the map above.
 
 ## Current State
 
-- Resolved: R4.
-- Last relevant evidence: the guard's 13-line check and the two flagged journals.
-- Blocker: R1-R3 need GPU runs; the user said not to touch the GPU.
-- Next: P4b's CPU measurement; P2a when allowed.
+- Resolved: R1, R2, R3, R4. Three wins shipped and pushed (`273fa1a0`, `e2027e4b`, `56eb42bd` + guard `003e5fd9`),
+  compounded +2.7% forced decode, +2.3% at 16K, deployed to production, service live.
+- Last relevant evidence: the 16K direct pairs and the live check; the trace table in "The next cycle's map".
+- Blocker: none. The remaining items are sized and mapped, not blocked.
+- Next: P2d (mix + rows-norm, est +1.7-1.9%), then the situ+down merge (est +1.2%); P1's system side and the
+  structural limits are user actions and measured dead ends, recorded in the map.
