@@ -22,6 +22,9 @@ offers the same steps as tools.
   the [paper](docs/paper/Strata-Paper.pdf).
 - Build the affected HIP target and run the closest relevant checks on RDNA2; report the GPU tested. See
   [docs/AMD_HIP.md](docs/AMD_HIP.md) for build and validation.
+- For each inference optimization, compare generated token IDs before and after on the same GPU and model,
+  using the same prompts that exercise the optimized path and the same greedy decoding settings.
+  Report whether the sequences match and where they first differ if they don't.
 - Work on `main` and push task commits to `origin/main` unless the user directs otherwise.
 - Give every commit a clear subject and a body separated by a blank line. In the body, explain what changed
   and why, naming the affected code paths or flags where relevant. Use bullets for distinct changes.
