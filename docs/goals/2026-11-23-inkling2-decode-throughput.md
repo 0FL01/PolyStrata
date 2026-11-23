@@ -1,6 +1,6 @@
 # Goal: more Inkling-2-Mini decode throughput on RDNA2
 
-Status: in progress (RECON; profiling done, implementation started)
+Status: complete (one deterministic long-context win, deployed; short/16K at the current limits)
 Source: user request of 2026-11-23: "Изучи последние коммиты и цели, нужен план по пооптимизации движка, цель
 поднять `decode` t/s ... проводить профилирование, писать бенчмарки ... на уровне ядра ... не потерять в качестве
 из за дивергенции/смены формул". Then: "Приступай к профилированию". Then the working directive quoted under
@@ -214,10 +214,43 @@ upper bound for stages 2 and 4, and stage 3 is the only large lever at 200K.
 - 2026-11-23, cache policy: a per-layer simulation of the 16-token routed IDs gives LRU + the frozen profile 51.4
   misses a token (the engine's 83-86% hit rate); LFU, previous-token prefetch and profile-initialized LFU are equal
   or worse.  The misses are structural at 1,340 slots; no policy change is kept.
+- 2026-11-23, a 256-thread `mix_row`: 5,000 forced decode fell to the same top-1 IDs but the top-5 probabilities
+  moved (0.376 -> 0.344, 0.675 -> 0.556).  The eight-wave reduction is another sum order; rejected for quality, not
+  measured further.
+- 2026-11-23, WIN: `decode_q8_kernel` with `__launch_bounds__(256, 2)`.  At 256 threads its 176 VGPR allowed one
+  resident block a CU; the cap allows two and keeps more long KV reads in flight.  poly_inkling_attend_test cold:
+  16K 0.658 -> 0.442 ms a call, 190K 2.453 -> 2.023 (-17.5%); 200 keys, the window and every hot case unchanged;
+  all cases PASS.  Forced decode parity with `STRATA_FREEZE_EXPERTS=1`: 8/8 top-5 rows identical.  Engine 16K
+  trace: decode_q8 1.621 -> 1.629 ms/token (the KV is in L2 there; no change), so the win is at spans whose KV
+  comes from DRAM.  Short A/B 44.12 -> 43.81 tok/s and 16K 40.96 -> 41.20, both inside variation: no regression.
+  Commit 21544cc0, pushed to main.
+
+## Final measurements
+
+- Short forced 94+96, production config (2,048 MiB reserve, 64 swaps, 8 threads): old `ebab4fad` 44.12 tok/s mean of
+  six; `21544cc0` 43.81 (inside the 1-2% run variation).
+- 16K (16,384 + 128): old 40.96 mean of three; `21544cc0` 41.20.
+- 190K attention kernel (`poly_inkling_attend_test`, cold caches, the engine's scratch): 2.453 -> 2.023 ms a full
+  visit (-17.5%); 16K cold 0.658 -> 0.442; all numerical cases PASS.
+- Live production after deploy: health 200, /v1/models 401 without the key, live agent round trip PASS (tool call
+  ID, cobalt-73, 42, cancel, MARBLE); agent requests decoded at 39.8-46.7 tok/s; 1,950 MiB VRAM free at the end.
+
+## Remaining limits
+
+- Short and 16K are no longer bound by a single kernel: the CPU experts wait 4.5-5.2 ms a token (about 51-60 misses
+  of 384 uses; the CPU reads at 53 GB/s of DDR4), the launch floor is 3.1 us x 1,105, and the dense Q8_0, small Q8_0
+  and LM head are at 326-372 GB/s, the card's streaming speed.
+- The reserve stays 2,048 MiB by the user's decision; the cache cannot grow, and the reserve experiment is recorded
+  but not taken.
+- Per-layer HIP graphs exist for non-looped models but `run_visits()` (Inkling) bypasses them; the decode kernels
+  take `pos_` as a scalar, so a graph would replay a stale position.  Making Inkling use the graph path is a larger
+  refactor (device-side position) and was not attempted.
+- At 190K a full attention visit is still 2.02 ms (about 413 MB, 204 GB/s); a further gain needs another K/V layout,
+  not a launch-bound change.
 
 ## Current State
 
-- Profiling done; no engine change kept. Working tree clean but for the pre-existing `.rocprofv3/`.
+- One engine change kept and deployed: 21544cc0. Working tree clean but for the pre-existing `.rocprofv3/`.
 - Scratch: `~/.cache/opencode-tmp/opencode/decode-opt-1795416366/` (`rbench.sh`, `bench16k.py`, `ana3.py`,
   `nvfp4_bench.hip`, `nvfp4-vec16.patch`, `route2.err`, traces under `tr-*`, `trA16`, `trB16`, `tr16`). Outside Git.
 
@@ -240,7 +273,18 @@ upper bound for stages 2 and 4, and stage 3 is the only large lever at 200K.
 - 2026-11-23: 16K decode 38.2-41.0 tok/s; attention 1.62 + 0.30 ms a token; 190K attention reference 2.20 ms.
 - 2026-11-23: routed-ID capture (16 tokens) and cache simulation; LRU 86.6% hits, previous-token prefetch no gain.
 
+## Deployment
+
+- Binary: `~/.config/strata/inkling2-mini/strata-poly-21544cc0`, SHA-256
+  `f3bb3a58f6e08953835c4977a79ededd1c52e149368a8bc889b88f04eeae5ee2`, the build of `21544cc0`.
+- Config: `strata-inkling-2-mini.json` points at it; rollback `strata-inkling-2-mini.json.before-21544cc0.bak` and
+  `strata-poly-ebab4fadff6f`.  `strata.service` active; 200,000 context, one slot, Inkling only.
+- Live test: `test-agent.py` PASS (tool call, cobalt-73, 42, cancel then MARBLE); `/health` 200, `/v1/models` 401
+  without the key; 1,950 MiB free after the test.
+
 ## Completion
 
-- Pending implementation. The next smallest step is stage 1's 200K reserve check, then stage 2's first fusion
-  (`conv_add` + `mix`) with a bitwise unit test.
+- Resolved: one deterministic win (long-context decode attention) committed, pushed and deployed.  The short/16K
+  paths are unchanged within variation; the failed fusions and the rejected reserve are recorded above.  Further
+  short-context gains need a different CPU-expert/cache balance (VRAM) or the looped-model graph refactor, neither
+  of which is a small, testable change.
