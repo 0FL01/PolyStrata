@@ -607,7 +607,7 @@ template <bool Q8> __global__ void decode_kernel(const float* q, const float* re
 // maximum, sum and values, and the four groups of a wave fold together at the end. Same output as decode_kernel
 // (decode_combine_kernel reads it), other sums.
 constexpr int kAttWaves = kKv, kAttThreads = 32 * kAttWaves, kAttUnroll = 2;
-__global__ void __launch_bounds__(kAttThreads)
+__global__ void __launch_bounds__(kAttThreads, 2)
 decode_q8_kernel(const float* q, const float* rel, const float* table, KvView k, KvView v, int64_t pos, int window,
                  int ring, int chunk, float* part) {
     const int c = blockIdx.x, row = blockIdx.y, g = threadIdx.x / 32, lane = threadIdx.x & 31;
