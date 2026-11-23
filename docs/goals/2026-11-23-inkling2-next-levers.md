@@ -1,6 +1,6 @@
 # Goal: Inkling-2-Mini next levers on RDNA2 (decode, NVFP4 MMQ, prompt idle, R5, R6, 200K)
 
-Status: active
+Status: complete
 Source: user instruction of 2026-11-23 (verbatim below); the limits listed at the end of
 `docs/goals/2026-11-23-inkling2-fork-vectors.md` (session 3 account)
 Last updated: 2026-11-24
@@ -105,12 +105,19 @@ outcome is resolved and affected constraints remain satisfied.
   - Evidence: guarded 32K round trip on RX 6700 XT: 663,435,880 bytes saved in 602.0 ms and restored in
     979.5 ms. Fresh-process re-save was byte-identical; the continuation read 30 tokens, reused 32,768 and
     matched all 24 greedy token IDs. Wrong magic and a bad payload checksum were refused before device writes.
+    The deployed build also refused a snapshot from a different context setting before device writes.
 - R6: 200K end to end measured against the previous production build.
   - Source: soft goal 5.
   - Acceptance: one 199,000-token prompt on each binary, live config, same tokens.
   - Primary evidence: `eng.py` serve runs under the guard.
   - Status: verified
   - Evidence: RECON below: 580.5 s (`56eb42bd`) -> 383.1 s (`f442cbe2`), the same 32 greedy tokens.
+    Same-day confirmation on private copies of one expert profile: 385.164 s (`f442cbe2`) -> 374.381 s
+    (`ed88e9ba`) -> 369.126 s (`cedd3bf3`); all 32 raw greedy IDs matched, including the first `cedd3bf3` run
+    (370.943 s). Decode was 22.1 -> 22.2 tok/s from old to final. The historical run's greedy digest differs
+    from the new series after the first 12 logged IDs; the difference also occurred on the unchanged old build.
+    The historical full sequence was not recorded. The new timings are one controlled run per build, not a
+    multi-run long-context throughput estimate.
 
 ### Constraints (inherited, unchanged)
 
@@ -223,11 +230,7 @@ reverted from the tree).
 
 ## Current Checkpoint
 
-- Closes: verify the deployed Release build and close the goal.
-- Smallest next action: deploy the confirmed down-tail build, trace that build at 32K, check that an
-  incompatible disk snapshot is refused, and compare a guarded 199K + 32 greedy run to the old baseline.
-- Expected evidence: production health and chat smoke, 32K steady trace, incompatible snapshot refused
-  before any device write, and the 199K greedy sequence agrees with the RECON baseline.
+- Closed. No remaining checkpoint within the frozen scope.
 
 ## Material Decisions
 
@@ -268,6 +271,9 @@ reverted from the tree).
   per arm. Scratch untraced A/Bs measured −0.09%, +0.88%, and +2.19% less prefill time. One scratch
   continuation differed after the logged first 12 IDs; the exact first divergence was not captured.
   Same-input comparisons over all eligible calls and all eight complete Release token sequences matched.
+- VALIDATE: deployed `cedd3bf3`; health, chat and restart/slot smoke passed. Its steady 32K trace took
+  32.074 s, with 560 ms of idle after excluding DMA. The main kernels were NVFP4 J64 at 7.971 s, H2 attention
+  at 7.228 s, Q8_0 J64 at 4.138 s and down-tail at 3.648 s. The same-day 199K series matched all greedy IDs.
 - 2026-11-23: D3 step 1: GPU port of glibc `expf` bit-exact over all 2^32 inputs (and sigmoid; NaN payloads
   separate). OCML differed on 33,606,109 `expf` and 10,474,369 sigmoid inputs. Paused by the user after step 1.
 - 2026-11-23: RECON: decode trace and sensitivity runs, VRAM map, slot-kernel microbench, router hack, MMQ phase
@@ -275,4 +281,15 @@ reverted from the tree).
 
 ## Completion
 
-- Pending.
+- All R1–R6 verified: R1, R3 and R4 closed with measured rejections; R2 and R5 shipped; R6 measured end to end.
+- Engine commits: `9f4a10ab` (J64 scale construction), `ed88e9ba` (disk sessions), `cedd3bf3` (J64 down-tail).
+  All on `origin/main`. `build-poly-hip/strata-poly` is byte-identical to the deployed `strata-poly-cedd3bf3`;
+  Release gfx1031 SHA-256 `607933d4190d067246f14ce6313bea0d05b7addf0287aa1435339277d40efe81`.
+- Validation: `cmake --build build-poly-hip --target strata-poly -j 6`; 57 focused server tests;
+  guarded ABBA/BAAB, exact kernel/greedy comparisons and kernel + DMA traces on RX 6700 XT / Ryzen 7 5700X;
+  32K disk round trip and incompatible-file rejection, and guarded 199K comparisons. Scratch evidence is in
+  `~/.cache/claude-fv/runs/` (`ab-scale-bits-*`, `tail-integrated-*`, `inkling-snapshot-final.txt`,
+  `e200k-pair-*`, `final-tr32k-strata-poly-cedd3bf3.txt`).
+- C1–C7 checked: production retained the agreed model, KV format, batch and reserve; switches remain opt-in,
+  existing tested ISA bodies match, GPU checks were serial and guarded, engine diffs had independent reviews,
+  and neither vendor code nor scratch artifacts were committed. No result is claimed for other cards or models.
