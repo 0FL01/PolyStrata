@@ -1,0 +1,2774 @@
+{
+  "schema_version": 1,
+  "sources": {
+    "H0": {
+      "repo": "bartowski/Inkling-2-Mini-GGUF",
+      "revision": "ad66863fd3b7f3236c0b7a0862412c9e00f78a6e",
+      "filename": "Inkling-2-Mini-Q4_0.gguf",
+      "size_bytes": 15064977088,
+      "advertised_sha256": "e8a583198523fe1119120061ed68fc3ce14dd1052ef53815014c867b307b9e37"
+    },
+    "U": {
+      "repo": "unsloth/Inkling-2-Mini-GGUF",
+      "revision": "8078d149286eec7193795413b9e0643da6d11fa1",
+      "filename": "Inkling-2-Mini-UD-Q4_K_M.gguf",
+      "size_bytes": 16610544608,
+      "advertised_sha256": "78fcedcf93c5d1bfe83e225513b71392bb52259be0eaa5f8899c856a2e5834ae"
+    }
+  },
+  "header_range_bytes": 12582912,
+  "header_sha256": {
+    "H0": "fe052a752bbcdbcfa3231f2f79d37544c5ac665a3ddc97fdddcf14f12723e1be",
+    "U": "d1ac3bf31d86b11fd38a80ce0161b5c6675740088d55b378fc8085caf9b7a2da"
+  },
+  "data_start": {
+    "H0": 11977792,
+    "U": 11979744
+  },
+  "tensor_counts": {
+    "H0": 704,
+    "U": 744
+  },
+  "compatible_metadata_sha256": {
+    "inkling2_loop.activation.situ_beta": "ec100bc8b137a0e5a4e64bcabb2c9139735aa424833276ac9bb1ba0b6684fbaa",
+    "inkling2_loop.activation.situ_linear_beta": "1e049d8455c9b893184145c8d3181f35a54169b7e4305fb4132f0405aa060553",
+    "inkling2_loop.attention.head_count": "eadf6953b4ba61d2e16b1c344ed4e6716ae7573b3c4d0be2910af1827bee5bb3",
+    "inkling2_loop.attention.head_count_kv": "6316e023ea42c85e99178a16afc4295f4fe61f109e281fb53894674bfef63208",
+    "inkling2_loop.attention.key_length": "9b57cdc783491f69ddff1d18912aba1fdce698187cf44006c4b4fe78cff8098f",
+    "inkling2_loop.attention.key_length_swa": "9b57cdc783491f69ddff1d18912aba1fdce698187cf44006c4b4fe78cff8098f",
+    "inkling2_loop.attention.layer_norm_rms_epsilon": "e9654c3bdd99748acfda68eac5aedc405ccf3505378e71ad19b6756f9850d04b",
+    "inkling2_loop.attention.log_scale_alpha": "9b1e28f00ab9a2035b3638e7d87be48a53537bbf654ed8c937e109e9e83535f7",
+    "inkling2_loop.attention.log_scale_floor": "861fa4688185f0de34ae90f62d400779539399a0a5afee3b9705ce6d75ac4a3d",
+    "inkling2_loop.attention.qk_clip": "a98092fc4beaf9ee1b6d6087168da2f76bda3707d9f8a7597edf1bba319c5a45",
+    "inkling2_loop.attention.relative_clip": "99fe4979f1a6fe6baec169cdea9b120a1300863db839ba0d1f065c98ad521c2f",
+    "inkling2_loop.attention.relative_extent": "f3dd21a98e37efdb57351c71f1eb1f7c22409930ad3ac7f1b244ee34d5f9cba1",
+    "inkling2_loop.attention.relative_length": "ec527c13558e581a393fb094c981b8fb6c316a44214d54cccb7eb4e39634c8e0",
+    "inkling2_loop.attention.sliding_window": "f3dd21a98e37efdb57351c71f1eb1f7c22409930ad3ac7f1b244ee34d5f9cba1",
+    "inkling2_loop.attention.sliding_window_pattern": "6ce7540023b496a8eafc48c37dddf93cf62e87fd1f33f0a8071132015bcc7450",
+    "inkling2_loop.attention.value_length": "9b57cdc783491f69ddff1d18912aba1fdce698187cf44006c4b4fe78cff8098f",
+    "inkling2_loop.attention.value_length_swa": "9b57cdc783491f69ddff1d18912aba1fdce698187cf44006c4b4fe78cff8098f",
+    "inkling2_loop.attn_res.block_size": "39e5a27f4f8679e3f662b980eac9961e5426079ac586acae68a8c2b9db559426",
+    "inkling2_loop.block_count": "bf1c89be8f5993c5cb511c0a23d469a4b763cfdbd9f2e93c8f813cde1c6c8cd2",
+    "inkling2_loop.context_length": "389ba8d91c90f4ceb817c487656f0c14f850598d933e80c35ccf55a6b8e3ec6b",
+    "inkling2_loop.embedding_length": "5d2a23b07110a3676104ad3ca80e157a9e419d3c97edf99fcc5c94e1c54b62f2",
+    "inkling2_loop.expert_count": "9b57cdc783491f69ddff1d18912aba1fdce698187cf44006c4b4fe78cff8098f",
+    "inkling2_loop.expert_feed_forward_length": "3bc1b8a757589e634e3d90986fb2b1a009f2c9a4e110ff72c7470b1779f3a3b7",
+    "inkling2_loop.expert_used_count": "e31674c55859188970b907f05e82a3fb985b9e0a9bb415c467d5ce21c8012feb",
+    "inkling2_loop.expert_weights_scale": "99fe4979f1a6fe6baec169cdea9b120a1300863db839ba0d1f065c98ad521c2f",
+    "inkling2_loop.feed_forward_length": "3bc1b8a757589e634e3d90986fb2b1a009f2c9a4e110ff72c7470b1779f3a3b7",
+    "inkling2_loop.final_logit_softcapping": "81728ad558c66a150c3af97f52fac806279b119de82eb201240ebb1d450c0b81",
+    "inkling2_loop.loop.count": "080d5756a63b046cb8e8c401b94e5f6ca20288e232a159239b13c25eef03fb65",
+    "inkling2_loop.loop.end": "2541dfdf2aceb7d441b74b0d44bff77c22ad015c70eb473807b7f0bcff25f61d",
+    "inkling2_loop.loop.gate_rank": "22df2f46a9c1dd0eee82f9ccee089bba549adfdeeff095f0215728f4f870ab84",
+    "inkling2_loop.loop.start": "39e5a27f4f8679e3f662b980eac9961e5426079ac586acae68a8c2b9db559426",
+    "inkling2_loop.loop.varying": "e16ab60aa1eeb7074ca590e8a95bc4ce6264aa74f4f79359e580ede60b892bbe",
+    "inkling2_loop.rope.dimension_count": "f0a0278e4372459cca6159cd5e71cfee638302a7b9ca9b05c34181ac0a65ac5d",
+    "inkling2_loop.shortconv.l_cache": "267833806a8e9c01c5355ae70125042abfa3e90ca6708f00e944a4e6e5addd9f",
+    "inkling2_loop.vocab_size": "3f207bc81b770dc30c95f5a7c966106eaf96e0608857ec0767df9468a34c839e",
+    "inkling2_loop.vocab_size_unpadded": "d10dd5448f0338ad912b5bba5ac3b6e6418c4416dee71d1e97cb6ffac0697fd6",
+    "tokenizer.chat_template": "224ba59f0b6093f3661d7894aa648c52016eecc41a14dffc20fc71c09c86b29d",
+    "tokenizer.ggml.add_bos_token": "e16ab60aa1eeb7074ca590e8a95bc4ce6264aa74f4f79359e580ede60b892bbe",
+    "tokenizer.ggml.add_eos_token": "e16ab60aa1eeb7074ca590e8a95bc4ce6264aa74f4f79359e580ede60b892bbe",
+    "tokenizer.ggml.clean_spaces": "e16ab60aa1eeb7074ca590e8a95bc4ce6264aa74f4f79359e580ede60b892bbe",
+    "tokenizer.ggml.eos_token_id": "468b3d120039326eda596cf32ff37bf42712872e21b42e4e5d9d5e3070dedf77",
+    "tokenizer.ggml.eot_token_id": "468b3d120039326eda596cf32ff37bf42712872e21b42e4e5d9d5e3070dedf77",
+    "tokenizer.ggml.merges": "000770f9dc9da613a91a55c3841dc72f19a4848b51c9f052dd430d06217f5246",
+    "tokenizer.ggml.model": "35b5fa96b5f7fc8c0addda0366ee9029c0e3f4c0fb1b604032bc88054dc127a6",
+    "tokenizer.ggml.padding_token_id": "e9def89b27d1698ad1ea289037be6fed2f4f6bedf4597bfae8a03fe326e227d3",
+    "tokenizer.ggml.pre": "c032a8776ade0b7de45fa3835e6ca6e41f7aaab2e28224b26e3a46fd734b250d",
+    "tokenizer.ggml.token_type": "8341e7af5aab8303ab52553fcc7d815a01263356bb30cb080b65d5f93effec11",
+    "tokenizer.ggml.tokens": "ef99927a65a8d4578060b0d6a3bcebe249d9e9f4d703ff9a559996fb6bfb63ec"
+  },
+  "not_imported_U_scales": [
+    "blk.0.ffn_down_exps.scale",
+    "blk.0.ffn_gate_up_exps.scale",
+    "blk.1.ffn_down_exps.scale",
+    "blk.1.ffn_gate_up_exps.scale",
+    "blk.10.ffn_down_exps.scale",
+    "blk.10.ffn_gate_up_exps.scale",
+    "blk.11.ffn_down_exps.scale",
+    "blk.11.ffn_gate_up_exps.scale",
+    "blk.12.ffn_down_exps.scale",
+    "blk.12.ffn_gate_up_exps.scale",
+    "blk.13.ffn_down_exps.scale",
+    "blk.13.ffn_gate_up_exps.scale",
+    "blk.14.ffn_down_exps.scale",
+    "blk.14.ffn_gate_up_exps.scale",
+    "blk.15.ffn_down_exps.scale",
+    "blk.15.ffn_gate_up_exps.scale",
+    "blk.16.ffn_down_exps.scale",
+    "blk.16.ffn_gate_up_exps.scale",
+    "blk.17.ffn_down_exps.scale",
+    "blk.17.ffn_gate_up_exps.scale",
+    "blk.18.ffn_down_exps.scale",
+    "blk.18.ffn_gate_up_exps.scale",
+    "blk.19.ffn_down_exps.scale",
+    "blk.19.ffn_gate_up_exps.scale",
+    "blk.2.ffn_down_exps.scale",
+    "blk.2.ffn_gate_up_exps.scale",
+    "blk.3.ffn_down_exps.scale",
+    "blk.3.ffn_gate_up_exps.scale",
+    "blk.4.ffn_down_exps.scale",
+    "blk.4.ffn_gate_up_exps.scale",
+    "blk.5.ffn_down_exps.scale",
+    "blk.5.ffn_gate_up_exps.scale",
+    "blk.6.ffn_down_exps.scale",
+    "blk.6.ffn_gate_up_exps.scale",
+    "blk.7.ffn_down_exps.scale",
+    "blk.7.ffn_gate_up_exps.scale",
+    "blk.8.ffn_down_exps.scale",
+    "blk.8.ffn_gate_up_exps.scale",
+    "blk.9.ffn_down_exps.scale",
+    "blk.9.ffn_gate_up_exps.scale"
+  ],
+  "incremental_groups": {
+    "H1": {
+      "new_tensor_count": 32,
+      "total_tensor_count_replaced": 32,
+      "payload_delta_bytes": 2755584,
+      "output_file_size": 15067732672,
+      "tensors": [
+        {
+          "name": "blk.0.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 657405056,
+            "absolute_offset": 669382848,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 1010390528,
+            "absolute_offset": 1022370272,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 657405056,
+            "absolute_offset": 669382848,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "cae29a3a905db0422505261c5a119cbdfa6dce626068963d4039c77e4cf76f4f",
+            "U": "57f796b1a9158a18e7f791993e15da0cf84dc5497c82cfdd357715b8e8e6170b"
+          }
+        },
+        {
+          "name": "blk.1.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 1272661504,
+            "absolute_offset": 1284639296,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 1613728256,
+            "absolute_offset": 1625708000,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 1272740992,
+            "absolute_offset": 1284718784,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "3f35b77035cf2163b9784d693b41c2c56bcd5fd6e450819f1df45166204f3485",
+            "U": "fcf29000fcf566405afeac77c1bd01499cafe009107670c2c64c8cdbebb48e8e"
+          }
+        },
+        {
+          "name": "blk.2.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 1887917952,
+            "absolute_offset": 1899895744,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 2217065984,
+            "absolute_offset": 2229045728,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 1888076928,
+            "absolute_offset": 1900054720,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "f625df49f4f47427b9ddbfdc8818aeff9d9cffe283e1b1ffaf12da4d77ef91ad",
+            "U": "cc45c42fd88e721ad717cce4a6691b7fc83ff8f5790d4ecc3c0cf989e05ab71a"
+          }
+        },
+        {
+          "name": "blk.3.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 2501349632,
+            "absolute_offset": 2513327424,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 2820403712,
+            "absolute_offset": 2832383456,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 2501588096,
+            "absolute_offset": 2513565888,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "39a61098d714db95e1afdbfffcbf8c3eac093dcb508d5ed98079c6cbfcb5ca89",
+            "U": "19751ba3e78ef5721fef13220404eb93f845b922447dc1b99074e032603ffaae"
+          }
+        },
+        {
+          "name": "blk.4.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 3093547648,
+            "absolute_offset": 3105525440,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 3423741440,
+            "absolute_offset": 3435721184,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 3093865600,
+            "absolute_offset": 3105843392,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "25190377d18897cf15d624781299924f2ece974a5af0732a29f88f8c23be5bb4",
+            "U": "5e67b334fd08b9f81635fefc272b83e0f253d29b323cf70b0b40fc3a10b1fafb"
+          }
+        },
+        {
+          "name": "blk.5.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 3687639552,
+            "absolute_offset": 3699617344,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 4027254272,
+            "absolute_offset": 4039234016,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 3688142976,
+            "absolute_offset": 3700120768,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "2307e9b5cf67bfce8918ee5789bbaedb9d395c1a6a24fea8d690a7aa441e2b15",
+            "U": "eb61a4b7445e0ba94d6bd8dc8fdfe00ec55ee401d7d26539a992f50669eeaa2f"
+          }
+        },
+        {
+          "name": "blk.6.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 4279888256,
+            "absolute_offset": 4291866048,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 4630748672,
+            "absolute_offset": 4642728416,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 4280577152,
+            "absolute_offset": 4292554944,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "df205389c00dcc36828bc0577334625928d3781e1b13ca2ab7694388cfce3133",
+            "U": "65baec998e1b7dcaf1f2ed677ebd8ef4bc0899e10c185ee892341ee401967f82"
+          }
+        },
+        {
+          "name": "blk.7.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 4881560320,
+            "absolute_offset": 4893538112,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 5243523584,
+            "absolute_offset": 5255503328,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 4882328704,
+            "absolute_offset": 4894306496,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "e78b12312ffa75d94513100a696139dd805e91ae8b3a79a9fa914bcb924813cb",
+            "U": "51519965e61f705df799557acdda7e630ab332f502d6fbab40d312304d8825e2"
+          }
+        },
+        {
+          "name": "blk.8.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 5485057152,
+            "absolute_offset": 5497034944,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 5856298496,
+            "absolute_offset": 5868278240,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 5485905024,
+            "absolute_offset": 5497882816,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "464d2cc6ddf7c53d47c069733e3ce2562909d8cc0551a7d74082dacdb0886aaf",
+            "U": "7e37fa6498ec22d22354abcd2c84e27d82a79d565030fdb9c0692114bd093da9"
+          }
+        },
+        {
+          "name": "blk.9.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 6086729216,
+            "absolute_offset": 6098707008,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 6469073408,
+            "absolute_offset": 6481053152,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 6087656576,
+            "absolute_offset": 6099634368,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "45362540ac9428a1cc8f0801872ec9b5ddfd1817767fd52d6209fc5983e3ee14",
+            "U": "797d1e69c898fd5f7cb1d957882b3f28da4800fca3cd39ea96b5123a77888963"
+          }
+        },
+        {
+          "name": "blk.10.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 6688401280,
+            "absolute_offset": 6700379072,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 7081848320,
+            "absolute_offset": 7093828064,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 6689408128,
+            "absolute_offset": 6701385920,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "4788cd3d4a635b3d136e7313811626385690d12ccb5388042a8f6af286d3499e",
+            "U": "7edb3c6a631a6639961fa365d8e2880546a9a470415a229c50e3af96a59bde3f"
+          }
+        },
+        {
+          "name": "blk.11.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 7291967232,
+            "absolute_offset": 7303945024,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 7694798336,
+            "absolute_offset": 7706778080,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 7293159552,
+            "absolute_offset": 7305137344,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "f2a7ca3710369e4e41c134dba136ec0d00855162152dfaa61e637cd286a26798",
+            "U": "b3553ced0e8ced5f9c80335d960c733ce126b4bb30db294d961b0eae92ae8a4a"
+          }
+        },
+        {
+          "name": "blk.12.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 7893689984,
+            "absolute_offset": 7905667776,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 8307729920,
+            "absolute_offset": 8319709664,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 7895067776,
+            "absolute_offset": 7907045568,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "cf7684ed7203153ba817567d91410216f31d733186affc4a4177c540c22c5736",
+            "U": "da40483aa4fcd077f3bb1157daab598c72e0ac6b31bb6e05cd366ddca3b16e54"
+          }
+        },
+        {
+          "name": "blk.13.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 8495362048,
+            "absolute_offset": 8507339840,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 8920504832,
+            "absolute_offset": 8932484576,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 8496819328,
+            "absolute_offset": 8508797120,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "4afc6711e162c418542181ec95a6cf1f5d38c26284f4965a5aa94c80a7ee4f75",
+            "U": "18c78483baf04df74868f9921d12534c590f021e400daf619aa8f22cefd80df2"
+          }
+        },
+        {
+          "name": "blk.14.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 9098858880,
+            "absolute_offset": 9110836672,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 9533279744,
+            "absolute_offset": 9545259488,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 9100395648,
+            "absolute_offset": 9112373440,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "43223b9206b35b0ed0be42c8a92e1db9cbcac95300c65fded2b0e168a41db865",
+            "U": "9792acac9c264de1965cb4d43679c21fdf7cc1fd66f9c5a45d19afa262af4605"
+          }
+        },
+        {
+          "name": "blk.15.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 9700530944,
+            "absolute_offset": 9712508736,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 10146054656,
+            "absolute_offset": 10158034400,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 9702147200,
+            "absolute_offset": 9714124992,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "bcab4fb7265f2677e835eaab25dd60e6b4212fd76ace01d67eee3f066d06d141",
+            "U": "ae3b10cd961621d4972eef30224c4769c7819eeafee39e0719dfca682fcae40d"
+          }
+        },
+        {
+          "name": "blk.16.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 10302203008,
+            "absolute_offset": 10314180800,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 10758829568,
+            "absolute_offset": 10770809312,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 10303898752,
+            "absolute_offset": 10315876544,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "d0a9cd25ffcab45c8f54a4283150131658e3efd3cfbff40cfeef26a01506db58",
+            "U": "848585f78642702552e6fed14260bd93501057760c8814df4ff0ae6532d4f5fd"
+          }
+        },
+        {
+          "name": "blk.17.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 10905768960,
+            "absolute_offset": 10917746752,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 11371779584,
+            "absolute_offset": 11383759328,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 10907650176,
+            "absolute_offset": 10919627968,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "8f9a3e263730688f2e4e7740f39b86f6f0366094896fdd7e05d83e9d1b7bbb9d",
+            "U": "8081a110435f3ffb6e84f667be6fbd02691b0fc399305fe70259c4c08053ca84"
+          }
+        },
+        {
+          "name": "blk.18.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 11507491712,
+            "absolute_offset": 11519469504,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 11984711168,
+            "absolute_offset": 11996690912,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 11509558400,
+            "absolute_offset": 11521536192,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "1156e7d365e97c6be3b9917585a73c1868da4252f86020258f7195c5491cbc8d",
+            "U": "eb2b0f77c1a76b636e2d7aec362707386335cbacbd82666c120bf0b91d4aacf7"
+          }
+        },
+        {
+          "name": "blk.19.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 12099689728,
+            "absolute_offset": 12111667520,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 12588048896,
+            "absolute_offset": 12600028640,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 12101835904,
+            "absolute_offset": 12113813696,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "e9acbfa11d2b242f500da0d3f6a66217931c061b0605716d5f64eea9ea82f320",
+            "U": "2f7dd6ce503b018470c8c1b596c92adda0320bb491661b2692b7a2e4d71b5dec"
+          }
+        },
+        {
+          "name": "blk.20.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 12693712512,
+            "absolute_offset": 12705690304,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 13191386624,
+            "absolute_offset": 13203366368,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 12695938176,
+            "absolute_offset": 12707915968,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "cdb94df3404d78b8aa8f5aec5c57ed599b1346ecb951f64bf224c0dfd9dd96a3",
+            "U": "e5d58466be9e849331f6c2317b2a9da0ef21c5786ba8f0294ea9637c0b7353db"
+          }
+        },
+        {
+          "name": "blk.21.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 13287735296,
+            "absolute_offset": 13299713088,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 14049527296,
+            "absolute_offset": 14061507040,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 13290040448,
+            "absolute_offset": 13302018240,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "2055e43b193982adc3cb390c4f3ee332b28fc35e5b98d094cdb4bf98949ce76d",
+            "U": "2f03844e7df8db3326c7cac09ca58e89824f511c3ceda03a04930e607f150ea3"
+          }
+        },
+        {
+          "name": "blk.22.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 13881758080,
+            "absolute_offset": 13893735872,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 14907667968,
+            "absolute_offset": 14919647712,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 13884142720,
+            "absolute_offset": 13896120512,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "fb4d03ce8f0c8b4e3de7f5f4ffa40ca828b38051d88b270b90d5a81e59bbed18",
+            "U": "f9fd4050330eb5b009d376a9a13064c6400535d93344180108f3d0e0e47d031f"
+          }
+        },
+        {
+          "name": "blk.23.attn_sink_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 14475849984,
+            "absolute_offset": 14487827776,
+            "bytes": 31104
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 15765983744,
+            "absolute_offset": 15777963488,
+            "bytes": 110592
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              24
+            ],
+            "offset": 14478420096,
+            "absolute_offset": 14490397888,
+            "bytes": 110592
+          },
+          "expected_payload_sha256": {
+            "H0": "3336f640cd5c1aad4c51c977f22307040249f924ba805b3162759ab1245509cd",
+            "U": "31ce7d5959fab397582edbd3d31317d0a05a2c1deed44104f9e7cdc8afa5cc34"
+          }
+        },
+        {
+          "name": "blk.5.attn_k_conv_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 3677150720,
+            "absolute_offset": 3689128512,
+            "bytes": 41472
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 4010963968,
+            "absolute_offset": 4022943712,
+            "bytes": 147456
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 3677548160,
+            "absolute_offset": 3689525952,
+            "bytes": 147456
+          },
+          "expected_payload_sha256": {
+            "H0": "974cdce91265574a5e75bde732db4f1b9def8b27e45dca8641a4967b12e5875b",
+            "U": "61fb7e4788465597211ca3715bd268e86601140f9efeb26c56c5e878d8a039ac"
+          }
+        },
+        {
+          "name": "blk.5.attn_v_conv_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 3690193792,
+            "absolute_offset": 3702171584,
+            "bytes": 41472
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 4029888000,
+            "absolute_offset": 4041867744,
+            "bytes": 147456
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 3690776704,
+            "absolute_offset": 3702754496,
+            "bytes": 147456
+          },
+          "expected_payload_sha256": {
+            "H0": "5915c670eed7202526020ac7e7f1c07f06a10f5a20afde5b3268c5b354b8009c",
+            "U": "74319fc1d78d398049cb84ec96b88fb22de6974528e7a86981a18e0c55b1afcb"
+          }
+        },
+        {
+          "name": "blk.11.attn_k_conv_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 7281478400,
+            "absolute_offset": 7293456192,
+            "bytes": 41472
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 7678508032,
+            "absolute_offset": 7690487776,
+            "bytes": 147456
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 7282564736,
+            "absolute_offset": 7294542528,
+            "bytes": 147456
+          },
+          "expected_payload_sha256": {
+            "H0": "34d9f2e74f4d18a031c706c2f169a0cb0c0001518f8292b54bd31bd00e408852",
+            "U": "2f9f6244ae7c873763ba093b4b52c9ad2cfe4a58b35862bd40130b116de5a11c"
+          }
+        },
+        {
+          "name": "blk.11.attn_v_conv_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 7294521472,
+            "absolute_offset": 7306499264,
+            "bytes": 41472
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 7697432064,
+            "absolute_offset": 7709411808,
+            "bytes": 147456
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 7295793280,
+            "absolute_offset": 7307771072,
+            "bytes": 147456
+          },
+          "expected_payload_sha256": {
+            "H0": "451e6b151008754ad0f37e6d2353bb05e213e8081c73641f6e764e9545403063",
+            "U": "90d4c7b3b506c30c6b37db008bd43879c981a61b64f4bc2190307f958e5cdfae"
+          }
+        },
+        {
+          "name": "blk.17.attn_k_conv_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 10895280128,
+            "absolute_offset": 10907257920,
+            "bytes": 41472
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 11355489280,
+            "absolute_offset": 11367469024,
+            "bytes": 147456
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 10897055360,
+            "absolute_offset": 10909033152,
+            "bytes": 147456
+          },
+          "expected_payload_sha256": {
+            "H0": "64fd9758f4deaaa787226653b3d5f9713f13d2c035f84f92b1004154875d1e88",
+            "U": "9d665b7e64b19fe93d1522f0bf6aa5a8ac0d4510bc64c43ed22d2e2444e923fd"
+          }
+        },
+        {
+          "name": "blk.17.attn_v_conv_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 10908323200,
+            "absolute_offset": 10920300992,
+            "bytes": 41472
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 11374413312,
+            "absolute_offset": 11386393056,
+            "bytes": 147456
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 10910283904,
+            "absolute_offset": 10922261696,
+            "bytes": 147456
+          },
+          "expected_payload_sha256": {
+            "H0": "18ee9c9ca5201d6583069314391f34c33bcdbbc6fa81eedc87a2b5a48d75ede3",
+            "U": "1ba4d207bdb680d07ca292fa164045952ba421815695857717465e901fcf6b45"
+          }
+        },
+        {
+          "name": "blk.23.attn_k_conv_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 14465361152,
+            "absolute_offset": 14477338944,
+            "bytes": 41472
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 15749693440,
+            "absolute_offset": 15761673184,
+            "bytes": 147456
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 14467825280,
+            "absolute_offset": 14479803072,
+            "bytes": 147456
+          },
+          "expected_payload_sha256": {
+            "H0": "e6734ece585443ac7615000092a5fc378d91afb0364009fcfaf291e88b868e85",
+            "U": "3accdf6bca8e89435ff2b874cc356c26f3dc128d0718b4f11e07222d7740ea14"
+          }
+        },
+        {
+          "name": "blk.23.attn_v_conv_proj.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 14478404224,
+            "absolute_offset": 14490382016,
+            "bytes": 41472
+          },
+          "U": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 15768617472,
+            "absolute_offset": 15780597216,
+            "bytes": 147456
+          },
+          "output": {
+            "type_id": 30,
+            "type": "BF16",
+            "shape": [
+              2304,
+              32
+            ],
+            "offset": 14481053824,
+            "absolute_offset": 14493031616,
+            "bytes": 147456
+          },
+          "expected_payload_sha256": {
+            "H0": "b9b76f963bb719cb017280a51708b7e4b182f18a400284335babf5010e3ce84b",
+            "U": "ce367ae8bfb200f9ae3cbded03c4b56de88d67bab1a98fd9b1dc775b9a2cd019"
+          }
+        }
+      ]
+    },
+    "H2": {
+      "new_tensor_count": 1,
+      "total_tensor_count_replaced": 33,
+      "payload_delta_bytes": 231579648,
+      "output_file_size": 15299312320,
+      "tensors": [
+        {
+          "name": "token_embd.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              201024
+            ],
+            "offset": 379953792,
+            "absolute_offset": 391931584,
+            "bytes": 260527104
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              201024
+            ],
+            "offset": 492125184,
+            "absolute_offset": 504104928,
+            "bytes": 492106752
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              201024
+            ],
+            "offset": 379953792,
+            "absolute_offset": 391931584,
+            "bytes": 492106752
+          }
+        }
+      ]
+    },
+    "H3": {
+      "new_tensor_count": 36,
+      "total_tensor_count_replaced": 69,
+      "payload_delta_bytes": 82944000,
+      "output_file_size": 15382256320,
+      "tensors": [
+        {
+          "name": "blk.6.attn_q.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 4275320704,
+            "absolute_offset": 4287298496,
+            "bytes": 3981312
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 4622199808,
+            "absolute_offset": 4634179552,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 4511128192,
+            "absolute_offset": 4523105984,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.6.attn_gate.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 4264788864,
+            "absolute_offset": 4276766656,
+            "bytes": 3981312
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 4604590080,
+            "absolute_offset": 4616569824,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 4497057408,
+            "absolute_offset": 4509035200,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.6.attn_rel.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 4279314304,
+            "absolute_offset": 4291292096,
+            "bytes": 497664
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 4629732352,
+            "absolute_offset": 4641712096,
+            "bytes": 940032
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 4518660736,
+            "absolute_offset": 4530638528,
+            "bytes": 940032
+          }
+        },
+        {
+          "name": "blk.7.attn_q.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 4876992768,
+            "absolute_offset": 4888970560,
+            "bytes": 3981312
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 5234974720,
+            "absolute_offset": 5246954464,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 5120400000,
+            "absolute_offset": 5132377792,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.7.attn_gate.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 4866460928,
+            "absolute_offset": 4878438720,
+            "bytes": 3981312
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 5217364992,
+            "absolute_offset": 5229344736,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 5106329216,
+            "absolute_offset": 5118307008,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.7.attn_rel.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 4880986368,
+            "absolute_offset": 4892964160,
+            "bytes": 497664
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 5242507264,
+            "absolute_offset": 5254487008,
+            "bytes": 940032
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 5127932544,
+            "absolute_offset": 5139910336,
+            "bytes": 940032
+          }
+        },
+        {
+          "name": "blk.8.attn_q.weight",
+          "H0": {
+            "type_id": 14,
+            "type": "Q6_K",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 5478664832,
+            "absolute_offset": 5490642624,
+            "bytes": 5806080
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 5847749632,
+            "absolute_offset": 5859729376,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 5729671808,
+            "absolute_offset": 5741649600,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.8.attn_gate.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 5468132992,
+            "absolute_offset": 5480110784,
+            "bytes": 3981312
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 5830139904,
+            "absolute_offset": 5842119648,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 5715601024,
+            "absolute_offset": 5727578816,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.8.attn_rel.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 5484483200,
+            "absolute_offset": 5496460992,
+            "bytes": 497664
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 5855282176,
+            "absolute_offset": 5867261920,
+            "bytes": 940032
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 5737204352,
+            "absolute_offset": 5749182144,
+            "bytes": 940032
+          }
+        },
+        {
+          "name": "blk.9.attn_q.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 6082161664,
+            "absolute_offset": 6094139456,
+            "bytes": 3981312
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 6460524544,
+            "absolute_offset": 6472504288,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 6338943616,
+            "absolute_offset": 6350921408,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.9.attn_gate.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 6071629824,
+            "absolute_offset": 6083607616,
+            "bytes": 3981312
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 6442914816,
+            "absolute_offset": 6454894560,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 6324872832,
+            "absolute_offset": 6336850624,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.9.attn_rel.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 6086155264,
+            "absolute_offset": 6098133056,
+            "bytes": 497664
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 6468057088,
+            "absolute_offset": 6480036832,
+            "bytes": 940032
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 6346476160,
+            "absolute_offset": 6358453952,
+            "bytes": 940032
+          }
+        },
+        {
+          "name": "blk.10.attn_q.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 6683833728,
+            "absolute_offset": 6695811520,
+            "bytes": 3981312
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 7073299456,
+            "absolute_offset": 7085279200,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 6948215424,
+            "absolute_offset": 6960193216,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.10.attn_gate.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 6673301888,
+            "absolute_offset": 6685279680,
+            "bytes": 3981312
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 7055689728,
+            "absolute_offset": 7067669472,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 6934144640,
+            "absolute_offset": 6946122432,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.10.attn_rel.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 6687827328,
+            "absolute_offset": 6699805120,
+            "bytes": 497664
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 7080832000,
+            "absolute_offset": 7092811744,
+            "bytes": 940032
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 6955747968,
+            "absolute_offset": 6967725760,
+            "bytes": 940032
+          }
+        },
+        {
+          "name": "blk.11.attn_q.weight",
+          "H0": {
+            "type_id": 14,
+            "type": "Q6_K",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 7285547264,
+            "absolute_offset": 7297525056,
+            "bytes": 5806080
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 7686221824,
+            "absolute_offset": 7698201568,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 7557634688,
+            "absolute_offset": 7569612480,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.11.attn_gate.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 7274973952,
+            "absolute_offset": 7286951744,
+            "bytes": 3981312
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 7668464640,
+            "absolute_offset": 7680444384,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 7543416448,
+            "absolute_offset": 7555394240,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.11.attn_rel.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 7291374848,
+            "absolute_offset": 7303352640,
+            "bytes": 497664
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 7693763584,
+            "absolute_offset": 7705743328,
+            "bytes": 940032
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 7565176448,
+            "absolute_offset": 7577154240,
+            "bytes": 940032
+          }
+        },
+        {
+          "name": "blk.12.attn_q.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 7889122432,
+            "absolute_offset": 7901100224,
+            "bytes": 3981312
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 8299181056,
+            "absolute_offset": 8311160800,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 8167090816,
+            "absolute_offset": 8179068608,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.12.attn_gate.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 7878590592,
+            "absolute_offset": 7890568384,
+            "bytes": 3981312
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 8281571328,
+            "absolute_offset": 8293551072,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 8153020032,
+            "absolute_offset": 8164997824,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.12.attn_rel.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 7893116032,
+            "absolute_offset": 7905093824,
+            "bytes": 497664
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 8306713600,
+            "absolute_offset": 8318693344,
+            "bytes": 940032
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 8174623360,
+            "absolute_offset": 8186601152,
+            "bytes": 940032
+          }
+        },
+        {
+          "name": "blk.13.attn_q.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 8490794496,
+            "absolute_offset": 8502772288,
+            "bytes": 3981312
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 8911955968,
+            "absolute_offset": 8923935712,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 8776362624,
+            "absolute_offset": 8788340416,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.13.attn_gate.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 8480262656,
+            "absolute_offset": 8492240448,
+            "bytes": 3981312
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 8894346240,
+            "absolute_offset": 8906325984,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 8762291840,
+            "absolute_offset": 8774269632,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.13.attn_rel.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 8494788096,
+            "absolute_offset": 8506765888,
+            "bytes": 497664
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 8919488512,
+            "absolute_offset": 8931468256,
+            "bytes": 940032
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 8783895168,
+            "absolute_offset": 8795872960,
+            "bytes": 940032
+          }
+        },
+        {
+          "name": "blk.14.attn_q.weight",
+          "H0": {
+            "type_id": 14,
+            "type": "Q6_K",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 9092466560,
+            "absolute_offset": 9104444352,
+            "bytes": 5806080
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 9524730880,
+            "absolute_offset": 9536710624,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 9385634432,
+            "absolute_offset": 9397612224,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.14.attn_gate.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 9081934720,
+            "absolute_offset": 9093912512,
+            "bytes": 3981312
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 9507121152,
+            "absolute_offset": 9519100896,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 9371563648,
+            "absolute_offset": 9383541440,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.14.attn_rel.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 9098284928,
+            "absolute_offset": 9110262720,
+            "bytes": 497664
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 9532263424,
+            "absolute_offset": 9544243168,
+            "bytes": 940032
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 9393166976,
+            "absolute_offset": 9405144768,
+            "bytes": 940032
+          }
+        },
+        {
+          "name": "blk.15.attn_q.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 9695963392,
+            "absolute_offset": 9707941184,
+            "bytes": 3981312
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 10137505792,
+            "absolute_offset": 10149485536,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 9994906240,
+            "absolute_offset": 10006884032,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.15.attn_gate.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 9685431552,
+            "absolute_offset": 9697409344,
+            "bytes": 3981312
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 10119896064,
+            "absolute_offset": 10131875808,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 9980835456,
+            "absolute_offset": 9992813248,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.15.attn_rel.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 9699956992,
+            "absolute_offset": 9711934784,
+            "bytes": 497664
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 10145038336,
+            "absolute_offset": 10157018080,
+            "bytes": 940032
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 10002438784,
+            "absolute_offset": 10014416576,
+            "bytes": 940032
+          }
+        },
+        {
+          "name": "blk.16.attn_q.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 10297635456,
+            "absolute_offset": 10309613248,
+            "bytes": 3981312
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 10750280704,
+            "absolute_offset": 10762260448,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 10604178048,
+            "absolute_offset": 10616155840,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.16.attn_gate.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 10287103616,
+            "absolute_offset": 10299081408,
+            "bytes": 3981312
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 10732670976,
+            "absolute_offset": 10744650720,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 10590107264,
+            "absolute_offset": 10602085056,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.16.attn_rel.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 10301629056,
+            "absolute_offset": 10313606848,
+            "bytes": 497664
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 10757813248,
+            "absolute_offset": 10769792992,
+            "bytes": 940032
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 10611710592,
+            "absolute_offset": 10623688384,
+            "bytes": 940032
+          }
+        },
+        {
+          "name": "blk.17.attn_q.weight",
+          "H0": {
+            "type_id": 14,
+            "type": "Q6_K",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 10899348992,
+            "absolute_offset": 10911326784,
+            "bytes": 5806080
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 11363203072,
+            "absolute_offset": 11375182816,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 11213597312,
+            "absolute_offset": 11225575104,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.17.attn_gate.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 10888775680,
+            "absolute_offset": 10900753472,
+            "bytes": 3981312
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 11345445888,
+            "absolute_offset": 11357425632,
+            "bytes": 7520256
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              3072
+            ],
+            "offset": 11199379072,
+            "absolute_offset": 11211356864,
+            "bytes": 7520256
+          }
+        },
+        {
+          "name": "blk.17.attn_rel.weight",
+          "H0": {
+            "type_id": 2,
+            "type": "Q4_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 10905176576,
+            "absolute_offset": 10917154368,
+            "bytes": 497664
+          },
+          "U": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 11370744832,
+            "absolute_offset": 11382724576,
+            "bytes": 940032
+          },
+          "output": {
+            "type_id": 8,
+            "type": "Q8_0",
+            "shape": [
+              2304,
+              384
+            ],
+            "offset": 11221139072,
+            "absolute_offset": 11233116864,
+            "bytes": 940032
+          }
+        }
+      ]
+    }
+  },
+  "selected_U_payload_bytes": 687707136,
+  "H0_output_weight": {
+    "type_id": 14,
+    "type": "Q6_K",
+    "shape": [
+      2304,
+      201024
+    ],
+    "offset": 0,
+    "absolute_offset": 11977792,
+    "bytes": 379935360
+  }
+}

@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-24",
+  "plan_sha256": "7769eda5e6ebbe6ebe35eab9e9a13db0499e6e1ff68060ec328e292269d55217",
+  "research_commit": "0051297f6d250f24fca26f68ee8f8ca6acb9f7e8",
+  "experiment_checkout_commit": "c0e42140230d38a74c2877752bd96ad5f7ec08de",
+  "corpus": "corpus-manifest.json",
+  "corpus_sha256": "7cd7d79bf597f5219b34b3f2402cd37f64fb40118225594e5f1ea99cfbc382ca",
+  "sources": {
+    "H0": {
+      "repo": "bartowski/Inkling-2-Mini-GGUF",
+      "revision": "ad66863fd3b7f3236c0b7a0862412c9e00f78a6e",
+      "filename": "Inkling-2-Mini-Q4_0.gguf",
+      "size_bytes": 15064977088,
+      "advertised_sha256": "e8a583198523fe1119120061ed68fc3ce14dd1052ef53815014c867b307b9e37",
+      "verified_sha256": "e8a583198523fe1119120061ed68fc3ce14dd1052ef53815014c867b307b9e37",
+      "local_path": "/home/stfu/.lmstudio/models/unsloth/Inkling-2-Mini/Inkling-2-Mini-Q4_0.gguf"
+    },
+    "U": {
+      "repo": "unsloth/Inkling-2-Mini-GGUF",
+      "revision": "8078d149286eec7193795413b9e0643da6d11fa1",
+      "filename": "Inkling-2-Mini-UD-Q4_K_M.gguf",
+      "size_bytes": 16610544608,
+      "advertised_sha256": "78fcedcf93c5d1bfe83e225513b71392bb52259be0eaa5f8899c856a2e5834ae",
+      "verified_sha256": null,
+      "access": "public; bounded Range probe returned 206"
+    },
+    "A": {
+      "repo": "orcarouter/Inkling-2-Mini-abliterated-GGUF",
+      "revision": "20b83559fef0b641145603d089210269ae721a74",
+      "filename": "Inkling-2-Mini-abliterated-Mix-16G.gguf",
+      "size_bytes": 15721831424,
+      "advertised_sha256": "0a8784aa059d6dba83ff99780371180b5376f2056af893c521b37792c64ffa02",
+      "verified_sha256": null,
+      "access": "blocked; authenticated HEAD returned 403 GatedRepo; no authorized local file found"
+    }
+  },
+  "variants": {
+    "H0": "pinned original, no replacements",
+    "H1": "H0 plus 24 sink and 8 k/v conv projections from U",
+    "H2": "H1 plus full token_embd.weight from U",
+    "H3": "H2 plus q/gate/rel on physical blocks 6–17 from U",
+    "D0": "pinned full Orca Mix-16G",
+    "A1": "H3 plus 24 attn_output tensors from A and only mandatory scales",
+    "A2": "conditional: A1 plus 24 ffn_down_exps tensors from A and only mandatory scales"
+  },
+  "hardware": {
+    "host": "phoenix",
+    "cpu": "AMD Ryzen 7 5700X, 8C/16T",
+    "gpu": "Sapphire Radeon RX 6700 XT (AMD Navi 22, gfx1031)",
+    "gpu_pci_id": "1002:73df",
+    "gpu_vram_bytes": 12868124672,
+    "system_ram": "31 GiB usable",
+    "kernel": "7.2.15-300.fc45.x86_64",
+    "rocm_sdk": "7.13.0a20260515",
+    "hip_compiler": "AMD clang 23.0.0git, 43215c73116c407735c85a180d174f718798c328+PATCHED:2506c552d8428e2cc1778bef048b20f818e06bb3"
+  },
+  "storage": {
+    "available_at_preflight_bytes": 144084074496,
+    "filesystem": "btrfs",
+    "repack_max_candidate_bytes_before_orca": 15382256320,
+    "largest_known_source_bytes": 16610544608,
+    "range_budget_U_all_selected_tensor_payload_bytes": 687707136
+  },
+  "release_binary": {
+    "source_commit": "c014d6ecc79d65b724cf98aae554cbdaab8242c5",
+    "path": "/home/stfu/.config/strata/inkling2-mini/strata-poly-c014d6ec",
+    "sha256": "981d969b87193eed0e7b48d329b4816b34142d247e1fcbbad4c95e025d6a642a",
+    "build": "Release HIP gfx1031; installed, running, and local build hashes match"
+  },
+  "production": {
+    "unit": "strata.service",
+    "launcher": "/home/stfu/.local/bin/strata-start",
+    "config": "/home/stfu/.config/strata/inkling2-mini/strata-inkling-2-mini.json",
+    "config_sha256": "f38fe0d68292a419fea2bbb4bf3eb23df4dc1bf7da73df17e2eb3d920d3e792c",
+    "listen": "127.0.0.1:8080",
+    "api_key_required": true,
+    "model_id": "inkling-2-mini",
+    "text_model": "H0",
+    "engine_argv_after_binary": ["--serve", "--model", "{H0}", "--kv", "q8_0", "--max-context", "200000", "--prompt-batch", "2048", "--vram-reserve-mib", "2048", "--threads", "8", "--expert-swaps", "64", "--conversation-cache-mib", "0", "--expert-profile", "/home/stfu/.local/state/strata/expert-profile.inkling2-mini-q4-0.txt", "--disk-sessions"],
+    "default_lookup": 3,
+    "dspark": false,
+    "template_sha256": "53a9035f3255945704b5857657cfb00c1165090c0641c4f782a0cbf268cc16dc",
+    "template_default_effort": "high (0.9); no configured override",
+    "sampling": {"temperature": 1.0, "top_p": 1.0, "top_k": 0, "min_p": 0.0}
+  },
+  "engine_env": {
+    "DEBUG_HIP_DYNAMIC_QUEUES": "0",
+    "LD_LIBRARY_PATH": "/home/stfu/ai/agent-frameworks/PolyStrata/.venv/lib/python3.13/site-packages/_rocm_sdk_devel/lib:/home/stfu/ai/agent-frameworks/PolyStrata/.venv/lib/python3.13/site-packages/_rocm_sdk_libraries_gfx103X_all/lib",
+    "STRATA_HIP_SMALL_GEMM_2X2": "1",
+    "STRATA_INKLING_DECODE_CHUNKS": "160",
+    "STRATA_INKLING_FLASH": "1",
+    "STRATA_INKLING_DECODE": "1",
+    "STRATA_INKLING_PREFETCH": "1",
+    "STRATA_INKLING_BATCH_KV_RELEASE": "1",
+    "STRATA_INKLING_LANE_PROB": "1",
+    "STRATA_INKLING_STATE_PACK": "1",
+    "STRATA_INKLING_NORM_Q8": "1",
+    "STRATA_INKLING_TAIL_MOE": "1",
+    "STRATA_INKLING_ROUTE_DUAL": "1",
+    "STRATA_INKLING_FLASH_LEAN": "1",
+    "STRATA_INKLING_FLASH_H2": "1",
+    "STRATA_INKLING_KCOPY": "1",
+    "STRATA_INKLING_Q4_0_SLOTS": "1",
+    "STRATA_INKLING_Q4_0_DENSE": "1"
+  },
+  "standalone": {
+    "engine_argv_before_workload": ["--model", "{model}", "--kv", "q8_0", "--max-context", "200000", "--prompt-batch", "2048", "--vram-reserve-mib", "2048", "--threads", "8", "--expert-swaps", "64", "--conversation-cache-mib", "0", "--expert-profile", "{per_run_profile}", "--lookup", "0", "--no-draft"],
+    "sampling_argv": ["--temperature", "0", "--seed", "42"],
+    "quality_chat_reasoning_effort": "high",
+    "sessions": "standalone; no snapshots, no disk sessions, private working directory per run",
+    "profile_seed_path": "/home/stfu/.cache/opencode-tmp/opencode/inkling-weights/expert-profile.seed.txt",
+    "profile_seed_sha256": "56b0ddc22fb62ce6afb5903fff467b11f47754133dd324ef00639abc1876a43b",
+    "q4_0_dispatch": "both flags active and eligible on gfx1031; individual dispatch and effective cache capacity not yet measured"
+  },
+  "benchmark": {
+    "active_vocab": 200058,
+    "prefix_lengths": [2048, 16384],
+    "forced_suffix_tokens": 512,
+    "performance_order_each_length": "ABBABAAB",
+    "quality_documents_each_length": 4,
+    "quality_targets_each_document": 256,
+    "quality_task_count": 32,
+    "orca_reasoning_effort": "low",
+    "max_extra_paired_blocks_per_comparison": 1,
+    "per_standalone_run_timeout_seconds": 300,
+    "max_decode_loss_for_default_percent": 5,
+    "recommendation_rule": "No new H0-passing critical smoke failures, measurable benefit; if no clear benefit prefer the simpler passing model; timing within same-day H0↔H0 noise is inconclusive."
+  },
+  "gpu_guard": {
+    "path": "rdna2-rnd/scripts/run_guarded.py",
+    "boot_gate": "blocked",
+    "evidence": "Guard.boot_clean() rejected [gfxhub] page fault on 2026-11-23T19:15:23+03:00 in the current boot",
+    "fault_override_used": false
+  }
+}
