@@ -2147,6 +2147,17 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
   if(STRATA_ENABLE_HIP)
     target_sources(strata-poly PRIVATE src/poly/inkling2.cu src/poly/inkling_attend.cu src/poly/inkling_attend_lean.cu src/poly/inkling_attend_h2.cu src/poly/inkling_dspark.cu)
     target_sources(poly_draft_race_test PRIVATE src/poly/inkling2.cu src/poly/inkling_attend.cu src/poly/inkling_attend_lean.cu src/poly/inkling_attend_h2.cu src/poly/inkling_dspark.cu)
+    if("gfx1031" IN_LIST STRATA_HIP_ARCH_LIST)
+      # Experiment only: explicitly build this separate CLI, never part of a timing/release build.
+      get_target_property(_inkling_nll_sources strata-poly SOURCES)
+      get_target_property(_inkling_nll_includes strata-poly INCLUDE_DIRECTORIES)
+      get_target_property(_inkling_nll_libraries strata-poly LINK_LIBRARIES)
+      list(REMOVE_ITEM _inkling_nll_sources src/poly/main.cpp)
+      add_executable(inkling-nll-observer EXCLUDE_FROM_ALL tools/inkling_weights/nll_observer.cpp ${_inkling_nll_sources})
+      set_property(SOURCE tools/inkling_weights/nll_observer.cpp APPEND PROPERTY INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src")
+      target_include_directories(inkling-nll-observer PRIVATE ${_inkling_nll_includes})
+      target_link_libraries(inkling-nll-observer PRIVATE ${_inkling_nll_libraries})
+    endif()
     # STRATA_INKLING_FLASH: the fused prompt attention against the plain kernels, and both timed; needs a card
     # (77 = skipped)
     add_executable(poly_inkling_attend_test src/poly/inkling_attend_test.cu src/poly/inkling_attend.cu
