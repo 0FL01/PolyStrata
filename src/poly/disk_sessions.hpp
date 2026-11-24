@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace strata::poly {
@@ -21,6 +22,7 @@ private:
     Engine& engine_;
     uint64_t ram_floor_;
     bool supported_;
+    std::optional<uint64_t> dspark_identity_;   // The drafter mapped by this engine, computed on first use.
 };
 
 }  // namespace strata::poly

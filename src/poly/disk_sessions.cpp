@@ -23,21 +23,24 @@ namespace {
 
 using namespace strata::core;
 
-// Inkling layout v1 within the STRSESS v1 container, with its own configuration identity. The position is
+// Inkling layouts within the STRSESS v1 container, with their own configuration identities. The position is
 // exactly live.ids.size() (only tokens actually fed, not the last token emitted). live.gdn is the opaque
 // save_state() image: convolution state followed by the chronological SWA tails. Each K/V record's k part
 // is a save_rows() block (all full-attention planes of those rows, in checkpoint order). A block fits one host
-// segment, so restore does not need to reassemble it before calling load_rows(). Other fields are empty/zero.
+// segment, so restore does not need to reassemble it before calling load_rows(). DSpark adds the last mixed
+// context and its SWA tails to save_state(), and its full-attention plane to save_rows(). No guesses are stored.
 constexpr int64_t kInklingTag = 0x494e4b4c494e4732;   // INKLING2
 constexpr int64_t kLayoutVersion = 1;
+constexpr int64_t kDsparkLayoutVersion = 2;
 constexpr uint64_t kDiskFloor = uint64_t(4096) << 20;
 
 struct Layout {
     int64_t context, vocab, width, layers, kv_format;
     size_t state_bytes, row_bytes;
+    bool dspark;
 
     std::array<int64_t, 18> geometry() const {
-        return {kInklingTag, kLayoutVersion, context, vocab, width, layers, kv_format,
+        return {kInklingTag, dspark ? kDsparkLayoutVersion : kLayoutVersion, context, vocab, width, layers, kv_format,
                 (int64_t) state_bytes, (int64_t) row_bytes, block_rows()};
     }
     int64_t block_rows() const { return (int64_t) (ConversationBuffer::segment_bytes / row_bytes); }
@@ -83,11 +86,12 @@ DiskSessions::DiskSessions(Engine& e, bool enabled, uint64_t ram_floor)
     : engine_(e), ram_floor_(ram_floor), supported_(false) {
     if (!enabled) return;
     const auto* arch = e.gg_->get("general.architecture");
-    supported_ = arch && is_inkling2_architecture(arch->s) && !e.draft_ && !e.split_ && !e.next_ &&
+    const bool known_draft = !e.draft_ || (e.dg_ && !e.block_layer_);
+    supported_ = arch && is_inkling2_architecture(arch->s) && known_draft && !e.split_ && !e.next_ &&
                  e.sequences() == 1 && e.lo_ == 0 && e.hi_ == e.n_layer_ && e.row_bytes() > 0 &&
                  e.row_bytes() <= ConversationBuffer::segment_bytes;
     if (!supported_)
-        std::fputs("strata-poly: --disk-sessions requires single-sequence Inkling-2-Mini without DSpark\n", stderr);
+        std::fputs("strata-poly: --disk-sessions requires single-sequence Inkling-2-Mini on one card\n", stderr);
 }
 
 bool DiskSessions::run(bool save, const std::string& path, Conversations<Engine>& kept) {
@@ -127,7 +131,7 @@ bool DiskSessions::run(bool save, const std::string& path, Conversations<Engine>
 
     Engine& e = engine_;
     const Layout layout{e.max_context(), e.n_vocab(), e.n_embd(), e.n_layer_, (int) e.opt_.kv_format,
-                        e.state_bytes(), e.row_bytes()};
+                         e.state_bytes(), e.row_bytes(), e.draft_};
     const auto& ids = kept.seq();
     int64_t pos = e.pos();
     if (save && (pos != (int64_t) ids.size() || !layout.valid_tokens(ids)))
@@ -151,6 +155,20 @@ bool DiskSessions::run(bool save, const std::string& path, Conversations<Engine>
             model.u64("size", size);
             model.bytes("head", data, head);
             if (tail) model.bytes("tail", data + size - tail, tail);
+        }
+        if (layout.dspark) {
+            if (!dspark_identity_) {
+                SessionIdentityBuilder draft(0);
+                const auto files = e.dg_->views();
+                draft.u64("DSpark shards", files.size());
+                for (const auto& [data, size] : files) {
+                    if (!data || !size) return say_error("cannot fingerprint an unmapped DSpark shard", SessionError::io);
+                    phase("fingerprint", size);
+                    draft.bytes("shard", data, size);
+                }
+                dspark_identity_ = draft.digest();
+            }
+            model.u64("DSpark", *dspark_identity_);
         }
         id.model = model.digest();
         SessionIdentityBuilder config(0);

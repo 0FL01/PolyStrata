@@ -1301,7 +1301,8 @@ curl -X POST "http://127.0.0.1:8080/slots/0?action=restore" -H "Content-Type: ap
 ```
 
 For `strata-poly` on RDNA2, add `--disk-sessions` to the engine's `args` to enable this API for text-only sessions
-in Inkling-2-Mini without DSpark, for both `inkling2` and fixed-loop `inkling2_loop` GGUFs. Other `strata-poly`
+in single-sequence Inkling-2-Mini on one card, for both `inkling2` and fixed-loop `inkling2_loop` GGUFs, with or without
+the native DSpark drafter. Other `strata-poly`
 models and older binaries still return HTTP 501. The
 snapshot holds the live token IDs, the short-convolution state, the sliding-window K/V tails and all the
 full-attention K/V rows through that position. A prompt that extends those IDs reads just its new suffix.
@@ -1309,6 +1310,10 @@ The file does not store older checkpoints or logits. A prompt that differs insid
 exactly there, is read again unless a separate in-memory checkpoint can be used. The files use the STRSESS
 container below, with an Inkling-only layout and identity (samples of the opened GGUF shards, engine version,
 context, prompt batch, KV format and state sizes); they are not interchangeable with the Qwen engine's.
+With DSpark, the file also holds the drafter's committed attention cache and its last context vector, and identifies
+the exact loaded draft GGUF. It does not hold pending guesses or the window selection policy. A changed draft budget
+can restore the same file. Plain and DSpark files cannot be restored in each other's mode: read the conversation
+again with the desired mode, then save it to a new file.
 Inkling uses `--conversation-cache-min-free-mib` and a fixed 4096 MiB disk reserve, and does not use
 `--session-save-reclaim`. On RX 6700 XT / Ryzen 7 5700X, with Inkling-2-Mini UD-IQ4_XS and Q8_0 KV, a 32,768-token
 snapshot (663,435,880 bytes) saved in 602 ms and restored in 980 ms. A fresh process read only the 30-token
