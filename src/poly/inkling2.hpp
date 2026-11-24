@@ -57,7 +57,7 @@ private:
     struct Block {
         Dev q, k, v, o, gate, sink, rel, table, qclip, rclip;
         Dev knorm, vnorm, kproj, vproj, kconv, vconv, aconv, fconv;
-        Dev aquery, fquery;
+        Dev aquery, fquery, message_query;
         std::vector<float> bias;
         std::array<Control, 4> control;
     };
@@ -69,6 +69,7 @@ private:
     Dev token_norm_, output_query_, loop_query_, loop_kv_query_;
     float qk_clip_ = 0, r_clip_ = 0, alpha_ = 0, cap_ = 0, expert_scale_ = 0;
     int floor_ = 0, ring_ = 0, visit_ = 0, depth_n_ = 0, attend_tiles_ = 0;
+    bool loop_layout_ = false;  // inkling2_loop stores physical-layer geometry and per-layer control queries
     bool flash_ = false;    // STRATA_INKLING_FLASH=1 (load_geometry())
     bool decode_ = false;   // STRATA_INKLING_DECODE=1 (load_geometry())
     bool norm_q8_ = false;  // STRATA_INKLING_NORM_Q8=1 (load_geometry()): a visit's stream norms and Q8_1 together
@@ -103,6 +104,7 @@ private:
     void store(const float* x, Cache& c, int side, int n);
     void attention(const Block& b, int n);
     void depth_mix(const float* query, float* dst, int first, int n);
+    const float* message_query(const Block& b, int il, int stream) const;
     void control(const Block& b, int il, int stream, float* in, int n);
     void ring_state(int visit, int64_t pos, const uint8_t* src, uint8_t* dst);
     bool try_pack_state(uint8_t* dst);

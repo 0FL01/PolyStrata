@@ -1673,8 +1673,9 @@ std::unique_ptr<Engine> Engine::open(const Options& o) {
     const std::string name = arch ? arch->s : std::string();
     // Clover is a qwen35moe model trained to also guess a block of tokens at once (Qwen35)
     const bool qwen35 = name == "qwen35moe" || name == "clover_moe";
+    const bool inkling2 = is_inkling2_architecture(name);
     if (o.kv_format == KvFmt::kQ8_0 && !qwen35 && name != "kolibri1" && name != "flint" && name != "lfm2moe" &&
-        name != "inkling2")
+        !inkling2)
         throw std::runtime_error("--kv q8_0 is supported for qwen35moe, kolibri1, flint, lfm2moe and Inkling-2-Mini; "
                                  "this is a '" + name + "' model");
     // int8 and int8k are Gemma 4's: their readers are not the arithmetic q8_0's are, so a model takes one
@@ -1685,7 +1686,7 @@ std::unique_ptr<Engine> Engine::open(const Options& o) {
     // moe() weighs the picks as a softmax of their scores, which is how only this architecture's router does
     if (o.cache_bias > 0.f && !qwen35)
         throw std::runtime_error("--cache-bias is supported for qwen35moe models; this is a '" + name + "' model");
-    if (name == "inkling2") {
+    if (inkling2) {
 #if defined(STRATA_USE_HIP)
         auto engine = std::make_unique<Inkling2>();
         engine->load(o);
@@ -2705,7 +2706,7 @@ void Engine::load(const Options& o) {
 #elif defined(STRATA_USE_HIP)
     if (opt_.kv_format == KvFmt::kAuto) {
         const MetaValue* arch = gg_->get("general.architecture");
-        opt_.kv_format = arch && arch->s == "inkling2" ? KvFmt::kQ8_0 : KvFmt::kFp16;
+        opt_.kv_format = arch && is_inkling2_architecture(arch->s) ? KvFmt::kQ8_0 : KvFmt::kFp16;
     }
 #endif
     load_geometry();

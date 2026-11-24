@@ -83,8 +83,8 @@ DiskSessions::DiskSessions(Engine& e, bool enabled, uint64_t ram_floor)
     : engine_(e), ram_floor_(ram_floor), supported_(false) {
     if (!enabled) return;
     const auto* arch = e.gg_->get("general.architecture");
-    supported_ = arch && arch->s == "inkling2" && !e.draft_ && !e.split_ && !e.next_ && e.sequences() == 1 &&
-                 e.lo_ == 0 && e.hi_ == e.n_layer_ && e.row_bytes() > 0 &&
+    supported_ = arch && is_inkling2_architecture(arch->s) && !e.draft_ && !e.split_ && !e.next_ &&
+                 e.sequences() == 1 && e.lo_ == 0 && e.hi_ == e.n_layer_ && e.row_bytes() > 0 &&
                  e.row_bytes() <= ConversationBuffer::segment_bytes;
     if (!supported_)
         std::fputs("strata-poly: --disk-sessions requires single-sequence Inkling-2-Mini without DSpark\n", stderr);

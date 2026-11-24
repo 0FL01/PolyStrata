@@ -28,6 +28,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -41,6 +42,10 @@ namespace strata::poly {
 
 class Shards;
 struct Likeliest;
+
+inline constexpr bool is_inkling2_architecture(std::string_view name) {
+    return name == "inkling2" || name == "inkling2_loop";
+}
 
 /// The attention caches' storing format, opt-in via --kv.  q8_0 is ggml's blocks (one fp16 scale a 32-value
 /// block of int8 codes) and reads them back element by element; int8 is the same rule with the codes and the

@@ -30,6 +30,7 @@ BACKENDS = {
     "flint": "flint",
     "kolibri1": "kolibri1",
     "inkling2": "inkling2",
+    "inkling2_loop": "inkling2",
 }
 # a routed expert's tensors: they stay in the file and are held in VRAM as far as it has room
 EXPERT = re.compile(r"\.ffn_(gate|up|down|gate_up)_exps\.weight$")

@@ -554,11 +554,17 @@ void Inkling2::load_geometry() {
         if (!ok) throw std::runtime_error(std::string("not an Inkling-2-Mini layout: ") + key);
     };
     const auto integer = [&](const char* key, int expected) { need(shape_i(key) == expected, key); };
-    need(n_layer_ == kVisits && n_embd_ == kWidth && n_expert_ == 128 && n_used_ == 8 && n_ff_exp_ == 1152,
+    loop_layout_ = gg_->get("general.architecture")->s == "inkling2_loop";
+    const int declared_layers = loop_layout_ ? kPhysical : kVisits;
+    need(n_layer_ == declared_layers && n_embd_ == kWidth && n_expert_ == 128 && n_used_ == 8 && n_ff_exp_ == 1152,
          "layers, width or experts");
-    integer("num_loops", 3);
-    integer("loop.core_start", kStart);
-    integer("loop.core_end", kStart + kCore);
+    integer(loop_layout_ ? "loop.count" : "num_loops", 3);
+    integer(loop_layout_ ? "loop.start" : "loop.core_start", kStart);
+    integer(loop_layout_ ? "loop.end" : "loop.core_end", kStart + kCore);
+    if (loop_layout_) {
+        const auto* varying = meta_in(*gg_, "loop.varying");
+        need(!varying || (varying->is_num() && varying->u == 0), "variable loop");
+    }
     integer("loop.gate_rank", kRank);
     integer("attn_res.block_size", kBlock);
     integer("attention.sliding_window", kWindow);
@@ -570,8 +576,8 @@ void Inkling2::load_geometry() {
                             "attention.value_length_swa"}) integer(key, kHead);
     const auto array = [&](const char* key, auto expected) {
         const auto* value = meta_in(*gg_, key);
-        need(value && value->count == kVisits && value->items.size() == kVisits, key);
-        for (int i = 0; i < kVisits; ++i) need(value->items[i].u == (uint64_t) expected(i), key);
+        need(value && value->count == (uint64_t) declared_layers && value->items.size() == (size_t) declared_layers, key);
+        for (int i = 0; i < declared_layers; ++i) need(value->items[i].u == (uint64_t) expected(i), key);
     };
     array("attention.head_count", [](int) { return kHeads; });
     array("attention.head_count_kv", [](int) { return kKv; });
@@ -675,8 +681,10 @@ void Inkling2::begin_pass() {
     const auto part = [&](const char* name, int rows) { return upload(gg_->find(name), name, kWidth, rows, kF32); };
     token_norm_ = part("token_embd_norm.weight", 1);
     output_query_ = part("output_res_query.weight", 1);
-    loop_query_ = part("loop_res_query.weight", 2 * kCore);
-    loop_kv_query_ = part("loop_kv_res_query.weight", 2 * kCore);
+    if (!loop_layout_) {
+        loop_query_ = part("loop_res_query.weight", 2 * kCore);
+        loop_kv_query_ = part("loop_kv_res_query.weight", 2 * kCore);
+    }
 }
 
 void Inkling2::load_layer(int il) {
@@ -724,9 +732,11 @@ void Inkling2::load_layer(int il) {
     std::memcpy(b.bias.data(), home(*bias).data(*bias), b.bias.size() * sizeof(float));
 
     if (il >= kStart && il < kStart + kCore) {
-        const char* stream[4] = {"attn", "k", "v", "mlp"};
+        const char* streams[4] = {"attn", "k", "v", "mlp"};
+        const char* loop_streams[4] = {"q_ctrl", "k_ctrl", "v_ctrl", "ffn_ctrl"};
+        if (loop_layout_) b.message_query = part("loop_msg_query.weight", kWidth, 4);
         for (int i = 0; i < 4; ++i) {
-            const std::string pre = std::string("loop_") + stream[i];
+            const std::string pre = std::string("loop_") + (loop_layout_ ? loop_streams[i] : streams[i]);
             b.control[i] = {part((pre + "_down.weight").c_str(), 2 * kWidth, kRank),
                             part((pre + "_gain.weight").c_str(), kRank, kWidth),
                             part((pre + "_forget.weight").c_str(), kRank, kWidth)};
@@ -1158,9 +1168,15 @@ void Inkling2::depth_mix(const float* query, float* dst, int first, int n) {
     mix_kernel<<<n, kThreads, 0, cs(st_)>>>(m, depth_n_ + 1, query, dst);
 }
 
-void Inkling2::control(const Block& b, int il, int stream, float* in, int n) {
+// Both formats use the same previous-pass bank; they store its Q, K, V and FFN query rows differently.
+const float* Inkling2::message_query(const Block& b, int il, int stream) const {
+    if (loop_layout_) return fp(b.message_query) + stream * kWidth;
     const size_t row = 2 * (size_t) (il - kStart) + (stream >= 2 ? 1 : 0);
-    const float* query = fp(stream == 0 || stream == 3 ? loop_query_ : loop_kv_query_) + row * kWidth;
+    return fp(stream == 0 || stream == 3 ? loop_query_ : loop_kv_query_) + row * kWidth;
+}
+
+void Inkling2::control(const Block& b, int il, int stream, float* in, int n) {
+    const float* query = message_query(b, il, stream);
     if (fused(n)) control_in_kernel<<<n, kThreads, 0, cs(st_)>>>(bank0_, bank1_, query, in, msg_, pair_);
     else {
         mix_kernel<<<n, kThreads, 0, cs(st_)>>>(MixInputs{{bank0_, bank1_}}, 2, query, msg_);
@@ -1207,8 +1223,7 @@ bool Inkling2::heads(const Block& b, int il, bool swa, bool loop, int n, const D
         Control3 c{};
         F32Segments down;
         for (int i = 0; i < 3; ++i) {
-            const size_t row = 2 * (size_t) (il - kStart) + (i >= 2 ? 1 : 0);
-            c.query[i] = fp(i == 0 ? loop_query_ : loop_kv_query_) + row * kWidth;
+            c.query[i] = message_query(b, il, i);
             c.cur[i] = s3cur_ + i * w;
             c.msg[i] = s3msg_ + i * w;
             c.pair[i] = s3pair_ + 2 * i * w;

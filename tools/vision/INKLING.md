@@ -1,13 +1,14 @@
 # Inkling-2-Mini CPU image encoder
 
-Build the resident `strata-vision` helper with the `inkling2v` implementation from
-[llama.cpp #32695](https://github.com/ggml-org/llama.cpp/pull/32695). Use a separate checkout and build
-directory. The helper opens the text GGUF for its vocabulary only; `strata-poly` still runs the text model.
+Build the resident `strata-vision` helper with llama.cpp's `inkling2v` projector and `inkling2_loop` text
+loader. Use a separate checkout and build directory. The helper opens the text GGUF for its vocabulary only;
+`strata-poly` still runs the text model. Older helper builds may know `inkling2` but reject `inkling2_loop`
+before they even open the projector.
 
 From the PolyStrata root on Linux, with `work` set to a new directory outside this repo:
 
 ```sh
-pin=6196d9802e0757a5218f16f91d9a6830793ba800
+pin=690b87d88151dbd775bb6eff5581663688785928
 git init "$work/llama.cpp"
 git -C "$work/llama.cpp" fetch --depth=1 https://github.com/ggml-org/llama.cpp "$pin"
 git -C "$work/llama.cpp" checkout --detach "$pin"
@@ -27,7 +28,7 @@ To serve images, add a `vision` section to the Inkling `strata-poly` run config 
 ```json
 "vision": {
   "exe": "/path/to/the/inkling-build/bin/strata-vision",
-  "model": "/path/to/Inkling-2-Mini-UD-IQ4_XS.gguf",
+  "model": "/path/to/Inkling-2-Mini-Q4_1.gguf",
   "mmproj": "/path/to/Inkling-2-Mini/mmproj-F16.gguf",
   "gpu": false,
   "elastic": false,
