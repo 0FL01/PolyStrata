@@ -31,7 +31,13 @@ The checker returns JSON with `pass` and exits 0 on pass or 1 on failure. Python
 
 `orca.cases` freezes 12 benign diagnostic candidates and 12 paired ordinary controls. At `low` effort, use the same template/system/sampler for H0/H3 and any permitted later comparison. First check whether H0 or H3 actually shows a refusal on a benign request. Record the reason with the raw final answer, separating a refusal from a wrong answer, format failure, or truncation. The automated checker measures correct completion; its failure alone is **not** a refusal label. If no such symptom is observed, do not claim there is a baseline problem or that a donor might have fixed it. This pilot does not estimate a general refusal rate.
 
-## Build the A1 weight copy
+## Reflink weight builds
+
+`transplant build` uses Linux reflinks by default. Put the output on the same Btrfs filesystem as `--base`; a failed clone stops rather than materializing a full copy. The clone keeps the parent's blocks and offsets for every unchanged tensor, appends just the replacement payloads, and updates their descriptors. `du` and file size can count shared data more than once; use `btrfs filesystem du -s` to check actual sharing. Every clone is still reread and fully hashed before publication. Reuse the resulting file path for all GPU runs; only the small expert profile and logs are per-run copies.
+
+`--reuse-verified OLD_MANIFEST` reuses the old artifact's exact replacement tensors without reading the donor from the network. It verifies their hashes and checks all non-selected hashes against the new parent. The reflink layout can have a different whole-file SHA and a larger logical size than the old packed layout despite identical tensor payloads and typed metadata. Use `--compact` only to reproduce the historical packed builds, not for normal staging.
+
+### Fetch the A1 replacement tensors
 
 After H3 is verified, pipe the active authorized Hugging Face token to the A1 writer. The HF CLI's Python can be separate from the repository's Python. Use new private output paths:
 

@@ -9,7 +9,7 @@
 
 ```sh
 WORK="$HOME/.cache/opencode-tmp/opencode/inkling-weights"
-python -B -m tools.inkling_weights.transplant build --variant H1 \
+python -B -m tools.inkling_weights.transplant build --variant H1 --compact \
   --base "$WORK/p3/H0-noop-Inkling-2-Mini-Q4_0.gguf" --parent-manifest "$WORK/p3/noop-manifest.json" \
   --output "$WORK/h1/H1-Inkling-2-Mini-Q4_0-BF16.gguf" --manifest "$WORK/h1/h1-manifest.json"
 ```

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field, replace
+import fcntl
 from hashlib import sha256
 import io
 import json
@@ -22,6 +23,7 @@ from tools.gguf_reader import BLOCK_GEOMETRY, GGML_TYPES, GGUF_META, GGUFFile
 RECORDS = Path(__file__).resolve().parents[2] / 'docs/goals/inkling2-weights'
 HEADER_BYTES = 12 << 20
 COPY_CHUNK = 8 << 20
+FICLONE = 0x40049409  # Linux _IOW(0x94, 9, int)
 ARCH = b'inkling2_loop'
 META_PREFIXES = ('tokenizer.', 'inkling2_loop.')
 GROUPS = {
@@ -222,13 +224,19 @@ def donor_range(pin: dict) -> PublicRange:
     return PublicRange(pin['repo'], pin['revision'], pin['filename'], pin['size_bytes'])
 
 
-def layout(header: Header, edits: dict[str, Tensor]) -> tuple[dict[str, Tensor], int]:
+def layout(header: Header, edits: dict[str, Tensor], *, reflink: bool = False) -> tuple[dict[str, Tensor], int]:
     missing = edits.keys() - header.tensors.keys()
     if missing:
         raise ValueError(f'cannot replace missing tensors: {sorted(missing)}')
-    placed = {}
-    offset = 0
-    for base in sorted(header.tensors.values(), key=lambda t: t.offset):
+    if reflink and not edits:
+        return header.tensors.copy(), header.file_size
+    # Keep all existing offsets in a clone. Only the replacement payloads need new extents.
+    placed = header.tensors.copy() if reflink else {}
+    offset = align(header.file_size - header.data_start, header.alignment) if reflink else 0
+    order = sorted(header.tensors.values(), key=lambda t: t.offset)
+    for base in order:
+        if reflink and base.name not in edits:
+            continue
         tensor = edits.get(base.name, base)
         if (tensor.name, tensor.shape) != (base.name, base.shape):
             raise ValueError(f'{base.name}: replacement name or shape mismatch')
@@ -358,9 +366,7 @@ def pad(file, stop: int) -> None:
         count -= part
 
 
-def write_copy(base_file, base: Header, edits: dict[str, Tensor], donor_start: int, donor_read,
-               expected_base: dict[str, str], expected_donor: dict[str, str], out) -> dict:
-    placed, end = layout(base, edits)
+def write_header(out, base: Header, placed: dict[str, Tensor]) -> None:
     out.write(struct.pack('<4sIQQ', b'GGUF', 3, len(placed), len(base.metadata)))
     out.write(base.metadata_block)
     for name in base.tensors:  # preserve descriptor order; payload order follows offsets
@@ -370,6 +376,14 @@ def write_copy(base_file, base: Header, edits: dict[str, Tensor], donor_start: i
         out.write(raw_name)
         out.write(struct.pack(f'<I{len(tensor.shape)}QIQ', len(tensor.shape), *tensor.shape,
                               tensor.type_id, tensor.offset))
+    if out.tell() > base.data_start:
+        raise ValueError('serialized GGUF header overlaps tensor data')
+
+
+def write_copy(base_file, base: Header, edits: dict[str, Tensor], donor_start: int, donor_read,
+               expected_base: dict[str, str], expected_donor: dict[str, str], out) -> dict:
+    placed, end = layout(base, edits)
+    write_header(out, base, placed)
     digests = {}
 
     def base_read(offset, count):
@@ -392,6 +406,26 @@ def write_copy(base_file, base: Header, edits: dict[str, Tensor], donor_start: i
     return digests
 
 
+def write_reflink(base_file, base: Header, edits: dict[str, Tensor], donor_start: int, donor_read,
+                  expected_base: dict[str, str], expected_donor: dict[str, str], out) -> dict:
+    placed, end = layout(base, edits, reflink=True)
+    try:
+        fcntl.ioctl(out.fileno(), FICLONE, base_file.fileno())
+    except OSError as exc:
+        raise OSError(f'reflink failed (parent and output must share a reflink-capable filesystem): {exc}') from exc
+    digests = expected_base.copy()
+    if edits:
+        write_header(out, base, placed)
+        for name, source in edits.items():
+            out.seek(base.data_start + placed[name].offset)
+            got = transfer(donor_read, donor_start + source.offset, source.nbytes, out.write)
+            if name in expected_donor and got != expected_donor[name]:
+                raise ValueError(f'{name}: copied payload hash mismatch')
+            digests[name] = got
+        out.truncate(end)
+    return digests
+
+
 class IndependentHeader(GGUFFile):
     """Use the project's independent decoder without letting it read beyond checked header bytes."""
 
@@ -404,8 +438,8 @@ class IndependentHeader(GGUFFile):
         self.data_start = self._data_start
 
 
-def verify_copy(path: Path, base: Header, edits: dict[str, Tensor], digests: dict[str, str]) -> str:
-    placed, end = layout(base, edits)
+def verify_copy(path: Path, base: Header, edits: dict[str, Tensor], digests: dict[str, str], *, reflink: bool = False) -> str:
+    placed, end = layout(base, edits, reflink=reflink)
     with path.open('rb') as file:
         size = os.fstat(file.fileno()).st_size
         raw = file.read(HEADER_BYTES)
@@ -432,17 +466,21 @@ def check_destinations(output: Path, manifest: Path) -> None:
 
 def write_verified(base_file, base: Header, edits: dict[str, Tensor], donor_start: int, donor_read,
                    expected_base: dict[str, str], expected_donor: dict[str, str], output: Path,
-                   manifest: Path, provenance: dict) -> dict:
+                   manifest: Path, provenance: dict, *, reflink: bool = False) -> dict:
     # An atomic hard-link publication provides rename without clobbering an existing destination.
     # Temporary files are created beside their destination; neither input is ever opened writable.
     check_destinations(output, manifest)
-    with tempfile.NamedTemporaryFile(mode='wb', dir=output.parent, prefix='.inkling-copy-') as staged:
-        digests = write_copy(base_file, base, edits, donor_start, donor_read, expected_base, expected_donor, staged)
+    with tempfile.NamedTemporaryFile(mode='w+b', dir=output.parent, prefix='.inkling-copy-') as staged:
+        writer = write_reflink if reflink else write_copy
+        digests = writer(base_file, base, edits, donor_start, donor_read, expected_base, expected_donor, staged)
         staged.flush()
         os.fsync(staged.fileno())
-        full_hash = verify_copy(Path(staged.name), base, edits, digests)
+        full_hash = verify_copy(Path(staged.name), base, edits, digests, reflink=reflink)
+        if provenance.get('variant') == 'H0-noop' and full_hash != provenance['parent_sha256']:
+            raise ValueError('no-op output differs from the pinned parent')
         result = {**provenance, 'file': str(output.resolve()), 'size_bytes': os.fstat(staged.fileno()).st_size,
-                  'sha256': full_hash, 'unchanged_payload_count': len(base.tensors) - len(edits),
+                   'sha256': full_hash, 'unchanged_payload_count': len(base.tensors) - len(edits),
+                   'storage_layout': 'reflink' if reflink else 'compact',
                   'typed_metadata_sha256': sha256(base.metadata_block).hexdigest(),
                   'replacements': list(edits), 'payload_sha256': digests}
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=manifest.parent,
@@ -494,17 +532,52 @@ def prepare_a1(base: Header, pin: dict, token: bytes):
     return edits, donor.data_start, remote.read, {A1_NAMES[0]: payload_probe['sha256']}, observation
 
 
+def reuse_verified_child(args, base_file, base, expected_base, provenance, pin):
+    """Reuse only the previously verified replacement payloads, not the old layout."""
+    raw_manifest = args.reuse_verified.read_bytes()
+    child = json.loads(raw_manifest)
+    names = A1_NAMES if args.variant == 'A1' else GROUPS[args.variant]
+    donor = {k: pin[k] for k in DONOR_KEYS}
+    if (child['variant'], child['replacements'], child['donor']) != (args.variant, list(names), donor):
+        raise ValueError('reuse manifest does not match the variant, whitelist and donor pin')
+    hashes = child['payload_sha256']
+    if hashes.keys() != expected_base.keys() or any(hashes[n] != expected_base[n] for n in hashes.keys() - set(names)):
+        raise ValueError('reuse manifest differs from the verified parent outside the whitelist')
+    if any(not re.fullmatch(r'[0-9a-f]{64}', hashes[n]) for n in names):
+        raise ValueError('missing replacement payload digest in reuse manifest')
+    provenance.update(donor=donor, reused_manifest_sha256=sha256(raw_manifest).hexdigest())
+    if 'donor_verification' in child:
+        provenance['donor_verification'] = child['donor_verification']
+    with Path(child['file']).open('rb') as source:
+        size = os.fstat(source.fileno()).st_size
+        header = parse_header(source.read(HEADER_BYTES), size)
+        if size != child['size_bytes'] or header.metadata_block != base.metadata_block:
+            raise ValueError('reuse source size or metadata differs from the verified records')
+        kind = 30 if args.variant == 'H1' else 8
+        edits = {n: header.tensors[n] for n in names}
+        if any(t.type_id != kind or t.shape != base.tensors[n].shape for n, t in edits.items()):
+            raise ValueError('reuse source has a different replacement shape or type')
+        return write_verified(base_file, base, edits, header.data_start,
+                              lambda offset, count: os.pread(source.fileno(), count, offset),
+                              expected_base, {n: hashes[n] for n in names}, args.output, args.manifest,
+                              provenance, reflink=True)
+
+
 def build(args: argparse.Namespace) -> dict:
     check_destinations(args.output, args.manifest)
     pins = read_json(args.lock)['sources']
     edits, expected_donor = {}, {}
     donor_start, donor_read = 0, None
     provenance = {'schema_version': 1, 'variant': args.variant}
+    reflink = not args.compact
+    if args.reuse_verified and (args.variant == 'H0-noop' or not reflink):
+        raise ValueError('--reuse-verified applies only to reflink transplants')
     with args.base.open('rb') as file:
         size = os.fstat(file.fileno()).st_size
         raw = file.read(HEADER_BYTES)
         base = parse_header(raw, size)
         full_hash, expected_base = scan(file, base, memoryview(raw)[:base.data_start])
+        provenance['parent_sha256'] = full_hash
         if args.variant == 'H0-noop':
             if args.parent_manifest:
                 raise ValueError('no-op takes only the pinned H0 as parent')
@@ -519,13 +592,15 @@ def build(args: argparse.Namespace) -> dict:
                 raise ValueError(f'parent GGUF does not match the required {required} manifest')
             if expected_base != parent['payload_sha256']:
                 raise ValueError('parent payload hashes differ from its manifest')
+            if args.reuse_verified:
+                return reuse_verified_child(args, file, base, expected_base, provenance,
+                                            pins['A' if args.variant == 'A1' else 'U'])
             if args.variant == 'A1':
                 token = sys.stdin.buffer.readline(512).removesuffix(b'\n')
                 edits, donor_start, donor_read, expected_donor, observation = prepare_a1(base, pins['A'], token)
-                provenance.update(parent_sha256=full_hash, donor={k: pins['A'][k] for k in DONOR_KEYS},
-                                  donor_verification=observation)
+                provenance.update(donor={k: pins['A'][k] for k in DONOR_KEYS}, donor_verification=observation)
                 return write_verified(file, base, edits, donor_start, donor_read, expected_base, expected_donor,
-                                      args.output, args.manifest, provenance)
+                                      args.output, args.manifest, provenance, reflink=reflink)
             plan = read_json(args.plan)
             names = GROUPS[args.variant]
             entries = plan['incremental_groups'][args.variant]['tensors']
@@ -557,9 +632,8 @@ def build(args: argparse.Namespace) -> dict:
             if layout(base, edits)[1] != planned:
                 raise ValueError('candidate size differs from the validated plan')
             provenance['donor'] = {k: pins['U'][k] for k in DONOR_KEYS}
-        provenance['parent_sha256'] = full_hash
         return write_verified(file, base, edits, donor_start, donor_read, expected_base, expected_donor,
-                              args.output, args.manifest, provenance)
+                              args.output, args.manifest, provenance, reflink=reflink)
 
 
 def main() -> None:
@@ -571,8 +645,11 @@ def main() -> None:
     inv.add_argument('--recon', type=Path, default=RECORDS / 'recon-pins.json')
     copy = sub.add_parser('build', help='write and independently verify a separate GGUF')
     copy.add_argument('--variant', choices=['H0-noop', *GROUPS, 'A1'], required=True,
-                      help='A1 requires an authorized Hugging Face token via stdin')
+                      help='network A1 builds require an authorized Hugging Face token via stdin')
     copy.add_argument('--base', type=Path, required=True)
+    copy.add_argument('--compact', action='store_true', help='materialize the old compact format instead of reflinking')
+    copy.add_argument('--reuse-verified', type=Path, metavar='MANIFEST',
+                      help='reuse replacement tensors from a previously verified build, without network access')
     copy.add_argument('--output', type=Path, required=True)
     copy.add_argument('--manifest', type=Path, required=True)
     copy.add_argument('--parent-manifest', type=Path)

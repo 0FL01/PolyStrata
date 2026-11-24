@@ -1,4 +1,5 @@
 """Small file and HTTP-response fixtures for the Inkling raw writer (no GPU or network)."""
+import errno
 import hashlib
 import io
 import os
@@ -58,6 +59,38 @@ class TransplantTest(unittest.TestCase):
             self.assertEqual(tx.read_json(manifest), record)
             self.assertEqual(source.read_bytes(), raw)
             self.assertEqual({p.name for p in Path(root).iterdir()}, {'input', 'output', 'manifest'})
+
+    def test_reflink_appends_only_replacements_and_never_falls_back_to_copy(self):
+        raw = fixture([('grow', (32, 2), 2, 0), ('keep', (3,), 0, 64)],
+                      b'B' * 36 + bytes(28) + b'C' * 12)
+        donor = b'D' * 68  # Q8_0, two rows
+        with tempfile.TemporaryDirectory() as root:
+            source, output, manifest = (Path(root) / name for name in ('input', 'output', 'manifest'))
+            source.write_bytes(raw)
+            original = tx.parse_header(raw, len(raw))
+            edits = {'grow': tx.Tensor('grow', (32, 2), 8, 0)}
+            with source.open('rb') as file:
+                _, hashes = tx.scan(file, original, memoryview(raw)[:original.data_start])
+                args = (file, original, edits, 0, lambda o, n: donor[o:o + n], hashes,
+                        {'grow': hashlib.sha256(donor).hexdigest()}, output, manifest, {})
+                with patch.object(tx.fcntl, 'ioctl', side_effect=OSError(errno.EXDEV, 'cross filesystem')):
+                    with self.assertRaisesRegex(OSError, 'reflink failed'):
+                        tx.write_verified(*args, reflink=True)
+                self.assertFalse(output.exists() or manifest.exists())
+
+                def clone(dst, op, src):
+                    self.assertEqual(op, tx.FICLONE)
+                    os.pwrite(dst, os.pread(src, len(raw), 0), 0)
+
+                with patch.object(tx.fcntl, 'ioctl', side_effect=clone):
+                    result = tx.write_verified(*args, reflink=True)
+            data = output.read_bytes()
+            actual = tx.parse_header(data, len(data))
+            self.assertEqual(result['storage_layout'], 'reflink')
+            self.assertEqual(actual.tensors['keep'], original.tensors['keep'])
+            self.assertGreaterEqual(actual.data_start + actual.tensors['grow'].offset, len(raw))
+            self.assertEqual(data[actual.data_start:len(raw)], raw[original.data_start:])
+            self.assertEqual(source.read_bytes(), raw)
 
     def test_rejects_bad_descriptors_and_spans(self):
         cases = [
