@@ -3,6 +3,7 @@
 
 import argparse
 from contextlib import suppress
+from functools import partial
 import hashlib
 import json
 import math
@@ -195,8 +196,8 @@ def execute(args, out):
             sampling == ["--temperature", "0", "--seed", "42"] and
             all(env[flag] == "1" for flag in Q4_FLAGS), "lock does not describe isolated, non-speculative gfx1031 runs")
     require(type(limit) is int and 0 < limit <= 300, "invalid run timeout")
-    require(lock["gpu_guard"]["path"] == str(GUARD.relative_to(REPO)) and not lock["gpu_guard"]["fault_override_used"],
-            "unexpected GPU guard contract")
+    require(lock["gpu_guard"]["path"] == str(GUARD.relative_to(REPO)) and
+            lock["gpu_guard"]["inkling_memory_fault_policy"] == "warn", "unexpected GPU guard contract")
     require((os.uname().nodename, os.uname().release) == (hw["host"], hw["kernel"]), "host/kernel does not match lock")
     pci = ":".join((CARD / name).read_text().strip().removeprefix("0x") for name in ("vendor", "device"))
     vram = int((CARD / "mem_info_vram_total").read_text())
@@ -243,10 +244,12 @@ def execute(args, out):
                hardware=hw, boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
                release=lock["release_binary"], profile_seed_sha256=standalone["profile_seed_sha256"], models=models,
                 warmup_order="AB", measured_order=orders if args.quick else ORDER,
-                quick_screen=args.quick, timeout_s=limit, sensor_paths={k: str(v) for k, v in sensors.items()}))
+                quick_screen=args.quick, amdgpu_fault_policy="warn", timeout_s=limit,
+                sensor_paths={k: str(v) for k, v in sensors.items()}))
     sys.path.insert(0, str(GUARD.parent))
     sys.dont_write_bytecode = True
     from run_guarded import Guard
+    guard_type = partial(Guard, warn_amdgpu_faults=True)
 
     # Guard uses journalctl by name. The child engine gets only the run's explicitly recorded environment.
     os.environ["PATH"] = "/usr/bin:/bin"
@@ -256,7 +259,7 @@ def execute(args, out):
         for i, arm in enumerate("AB" + orders[split]):
             run = out / (f"{split}-warmup-{i + 1}-{arm}" if i < 2 else f"{split}-{i - 1:02d}-{arm}")
             print(run.name, flush=True)
-            metrics = run_one(Guard, run, release, flags, sampling, Path(models[arm]["path"]), seed, env,
+            metrics = run_one(guard_type, run, release, flags, sampling, Path(models[arm]["path"]), seed, env,
                               prefix, suffix, LENGTHS[split], limit, vram / 2**20, sensors)
             if i >= 2:
                 runs.append((arm, metrics))

@@ -14,4 +14,4 @@ The independent reread and manifest check matched all **704 payload hashes per v
 
 `btrfs filesystem du -s --raw` reported zero exclusive data bytes for H0-noop and 192,471,040 exclusive bytes for A1 in the retained family. The family adds 868,193,280 bytes of replacement payloads to the original, plus rewritten headers and filesystem metadata. The five old copies had 76,281,475,072 exclusive bytes. After verifying all replacements, removed only those five task-created GGUFs; their manifests and logs remain. `df -B1` showed a net gain of 59,902,259,200 bytes on the NVMe and 15,456,882,688 bytes on the SATA disk (75.36 GB combined). Device error counters did not increase during the migration. The usage samples and removal log are in the workcopy directory.
 
-All 15 CPU tests passed. The new files are not deployed. The current boot still has the H0 AMDGPU page fault, so the next step is guarded finite-logit and critical smoke on a clean boot.
+All 15 CPU tests passed. The new files are not deployed. See the [subsequent same-boot GPU screening](same-boot-gpu-report.md) for runtime evidence and warning policy.

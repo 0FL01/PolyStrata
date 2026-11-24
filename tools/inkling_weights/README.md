@@ -52,7 +52,9 @@ This fetches only the pinned header and 24 selected projections. The sidecar rec
 
 ## Guarded runtime pilots
 
-Use these from the checkout with production inactive, after the boot guard passes. Run them serially on the one GPU. Each engine process gets its own scratch directory and writable seed profile; none reads production sessions. The binaries, corpus, template and runtime flags come from the [experiment lock](../../docs/goals/inkling2-weights/experiment-lock.json).
+Use these from the checkout with production inactive. Run them serially on the one GPU. Each engine process gets its own scratch directory and writable seed profile; none reads production sessions. The binaries, corpus, template and runtime flags come from the [experiment lock](../../docs/goals/inkling2-weights/experiment-lock.json).
+
+For these pilots only, AMDGPU memory/page-fault journal entries are warnings, whether historical or live. They are preserved in `guard/warnings.json` and do not require a reboot or by themselves fail a run. This does not mask GPU resets, hangs, OOM, low VRAM, invalid outputs, nonzero exits or timeouts. `run_guarded.py` remains strict by default for other callers.
 
 ```sh
 WORK="$HOME/.cache/opencode-tmp/opencode/inkling-weights"

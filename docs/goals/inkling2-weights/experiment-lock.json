@@ -131,9 +131,10 @@
   },
   "gpu_guard": {
     "path": "rdna2-rnd/scripts/run_guarded.py",
-    "boot_gate": "blocked after H1-E fault on the 2026-11-24T20:01:11+03:00 boot",
-    "evidence": "initial guard probe passed; Guard.boot_clean() now rejects the 2026-11-24T20:37:31.257+03:00 [gfxhub] page fault during 16k-06-A (original H0); see h1-e-report.md",
+    "inkling_memory_fault_policy": "warn",
+    "boot_gate": "Inkling pilots log historical and live AMDGPU memory-fault diagnostics as warnings; no reboot required for those logs alone",
+    "evidence": "H1-E's historical strict guard stopped original H0 at the 2026-11-24T20:37:31.257+03:00 [gfxhub] page fault; see h1-e-report.md. The user subsequently requested warning-only handling of AMDGPU memory faults without rebooting.",
     "previous_boot_evidence": "Guard.boot_clean() rejected [gfxhub] page fault on 2026-11-23T19:15:23+03:00",
-    "fault_override_used": false
+    "h1_e_fault_override_used": false
   }
 }

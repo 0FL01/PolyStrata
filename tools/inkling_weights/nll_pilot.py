@@ -77,7 +77,8 @@ def main():
         profile = d / 'profile.txt'
         profile.write_bytes(seed)
         subprocess.run([
-            sys.executable, '-B', str(ROOT / 'rdna2-rnd/scripts/run_guarded.py'), '--output', 'guard', '--',
+            sys.executable, '-B', str(ROOT / 'rdna2-rnd/scripts/run_guarded.py'), '--output', 'guard',
+            '--warn-amdgpu-faults', '--',
             'timeout', '--foreground', '--kill-after=10s', f'{lock["benchmark"]["per_standalone_run_timeout_seconds"]}s',
             'sh', '-c', 'exec "$@" > nll.tsv 2> stderr.log', 'sh', str(observer), str(model), str(profile),
             str(prefix), str(target),

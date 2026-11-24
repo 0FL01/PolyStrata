@@ -61,7 +61,8 @@ def run_case(case, model, directory, cli, fixed_env, seed_bytes, lock, tok, temp
     flags = {'{model}': str(model), '{per_run_profile}': str(profile)}
     budget = case['max_new_tokens']
     command = [
-        sys.executable, '-B', str(ROOT / 'rdna2-rnd/scripts/run_guarded.py'), '--output', 'guard', '--',
+        sys.executable, '-B', str(ROOT / 'rdna2-rnd/scripts/run_guarded.py'), '--output', 'guard',
+        '--warn-amdgpu-faults', '--',
         'timeout', '--foreground', '--kill-after=10s', f'{lock["benchmark"]["per_standalone_run_timeout_seconds"]}s',
         'sh', '-c', 'exec "$@" > output.ids.csv 2> stderr.log', 'sh', str(cli),
         *(flags.get(arg, arg) for arg in lock['standalone']['engine_argv_before_workload']),
