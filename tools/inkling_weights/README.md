@@ -30,3 +30,17 @@ printf '%s' 'abs(x-y)' | python tools/inkling_weights/validate_tasks.py 2k-py-01
 The checker returns JSON with `pass` and exits 0 on pass or 1 on failure. Python checks use a bounded integer/boolean AST interpreter and fixed vectors. Rust checks match explicit token skeletons, not compiler results. Neither checker executes or compiles the generated answer. JSON checks require exact values and types, reject extra or duplicate keys, and do not dispatch tools. Literal answers are exact apart from surrounding whitespace. The unit tests use hand-written/reference answers, not model outputs. `smoke_candidate` marks cases eligible for the later H0-passing critical smoke; no task is yet known to pass on H0.
 
 `orca.cases` freezes 12 benign diagnostic candidates and 12 paired ordinary controls. At `low` effort, use the same template/system/sampler for H0/H3 and any permitted later comparison. First check whether H0 or H3 actually shows a refusal on a benign request. Record the reason with the raw final answer, separating a refusal from a wrong answer, format failure, or truncation. The automated checker measures correct completion; its failure alone is **not** a refusal label. If no such symptom is observed, do not claim there is a baseline problem or that a donor might have fixed it. This pilot does not estimate a general refusal rate.
+
+## Guarded runtime pilots
+
+Use these from the checkout with production inactive, after the boot guard passes. Run them serially on the one GPU. Each engine process gets its own scratch directory and writable seed profile; none reads production sessions. The binaries, corpus, template and runtime flags come from the [experiment lock](../../docs/goals/inkling2-weights/experiment-lock.json).
+
+```sh
+WORK="$HOME/.cache/opencode-tmp/opencode/inkling-weights"
+.venv/bin/python -B -m tools.inkling_weights.chat_pilot --model "$MODEL" --output "$WORK/candidate-chat"
+.venv/bin/python -B -m tools.inkling_weights.nll_pilot --model "$MODEL" --output "$WORK/candidate-nll" \
+  --observer "$OBSERVER" --reference "$PREVIOUS_NLL_RESULT"
+python3 -B -m tools.inkling_weights.timing --model-b "$MODEL" --sha256-b "$MODEL_SHA256"
+```
+
+Chat uses the shipped Inkling output parser and passes only final content to the frozen validators. `--suite orca` selects the separate low-effort diagnostic; its validator cannot classify refusals. For NLL, omit `--reference` for a new baseline, or pass equal-document results for per-document paired deltas. Both pilots accept repeated `--case` for narrowly scoped smoke checks. Timing defaults both arms to H0; set `--model-a` and `--sha256-a` for a different parent. The runner prints its private evidence directory, runs two unmeasured warm-ups and then `ABBABAAB` at each length, checks all 512 output IDs, and keeps observer/logit printing off. Report the 511 timed decode steps and label VRAM as sampled and durations as estimates from rounded CLI rates.

@@ -11,8 +11,8 @@ Last updated: 2026-11-24
 | ID | Source and acceptance | Primary evidence | Status |
 | --- | --- | --- | --- |
 | R1 | P0–P2: pin the experiment; reproduce the 32/1/36 precision transplant plan; verify a bounded streaming writer on small fixtures. | [Experiment lock](inkling2-weights/experiment-lock.json), [corpus](inkling2-weights/corpus-manifest.json), [inventory](inkling2-weights/transplant-plan.json), [fixture results](inkling2-weights/p2-report.md). | verified |
-| R2 | P3–P5: prove no-op parity against H0 and establish a fresh RDNA2 baseline with an exact active-vocabulary NLL observer and timing noise. | [No-op load and greedy parity](inkling2-weights/p3-report.md) and [observer alignment](inkling2-weights/p4-report.md) passed on RX 6700 XT; fresh baseline pending. | P5 in progress |
-| R3 | H1-B through H3-E: build the fixed variants on the copy, verify every untouched payload and evaluate the incremental changes on one release binary/configuration. | Build manifests and paired 2K/16K quality, timing and resource reports. | blocked on R2 |
+| R2 | P3–P5: prove no-op parity against H0 and establish a fresh RDNA2 baseline with an exact active-vocabulary NLL observer and timing noise. | [No-op parity](inkling2-weights/p3-report.md), [observer alignment](inkling2-weights/p4-report.md), [fresh H0 result](inkling2-weights/h0-result.json) on RX 6700 XT. | verified |
+| R3 | H1-B through H3-E: build the fixed variants on the copy, verify every untouched payload and evaluate the incremental changes on one release binary/configuration. | Build manifests and paired 2K/16K quality, timing and resource reports. | H1-B in progress |
 | R4 | A0 through F0: use authorized pinned Mix-16G data, compare D0 and the fixed A1 transfer; open A2 only on the plan's evidence. Recommend the smallest demonstrated combination. | [Authorized A0 inventory](inkling2-weights/orca-inventory.json) and [compatibility report](inkling2-weights/a0-report.md); D0/A1 results and final model SHA pending. | A0 verified; runtime work blocked on R2/R3 |
 | R5 | User: deploy the qualified modified weights next to the original, with an identifying prefix including `OrcaRouter` for an actual Orca transfer; preserve the original and clean up only this task's disposable files. | Final path and SHA, original SHA, production API smoke and cleanup record. | blocked (no qualified candidate) |
 
@@ -26,7 +26,7 @@ Last updated: 2026-11-24
 
 ## Current checkpoint
 
-- **P5 (R2)**: collect frozen H0 exact NLL and task results, pick H0-passing smoke cases, and measure H0↔H0 noise at 2K and 16K before building H1. The user rebooted and the unchanged guard passed. All standalone work still uses the guard; do not advance after a refused or incomplete run.
+- **H1-B (R3)**: build H1 on the verified P3 no-op copy, not the original. Check 32 BF16 replacements, 672 immutable payloads, typed metadata, separate full-file SHA and guarded load/finite smoke. Then H1-E compares quality and timing against H0. All standalone work still uses the unchanged guard; do not advance after a refused or incomplete run.
 - **A0 (R4)**: authorized Mix-16G access is confirmed. The exact pinned header and one selected payload passed bounded range checks. D0 is eligible for a guarded load attempt; A1's 24 Q8_0 projections need no external scales. The full donor has not been acquired or hashed, and neither D0 nor A1 has run.
 
 ## Checkpoints recorded
@@ -36,3 +36,4 @@ Last updated: 2026-11-24
 - Closure of the available offline work: 13 CPU checks passed and the verified no-op is under `~/.cache/opencode-tmp/opencode/inkling-weights/p3/`. Removed the superseded 15 GB no-op duplicate, corpus rebuild scratch, writer staging files and temporary P4 binaries. Kept the working copy, isolated seed, corpus, manifests, observer and logs for resumption. The running `strata.service` stayed active with its original process and byte-identical configuration. No H1–H3 or Orca weights were built or deployed.
 - [A0 RECON](inkling2-weights/a0-report.md): resolved the earlier `403 GatedRepo` through the active Hugging Face login. Both decoders agreed on the 724 tensor descriptors, and the pinned build's CPU expert type check passed for every actual D0 pair. No inference, service stop, or guard override.
 - Post-reboot: P3 matched all 32 greedy IDs on original versus no-op; P4 matched CLI top-probability NLL within `1.237e-6` nat and repeated byte-identically. Production was inactive after reboot and its configuration hash was unchanged.
+- [P5](inkling2-weights/p5-report.md): 2,048 finite NLL rows, 32/32 tasks, four critical tasks frozen; 16 measured runs and four warm-ups matched all forced IDs and cleared the guard. Recorded the larger 2K decode noise before candidate runs.
