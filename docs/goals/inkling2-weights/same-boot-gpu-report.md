@@ -15,4 +15,4 @@ Used the [verified reflink files](cow-report.md), pinned Release HIP `gfx1031` b
 
 All 15 inference runs had boot warnings only, no fresh warnings and no stop reasons. The NLL numbers are from one document: they establish finite inference, not a broad quality advantage. Raw artifacts are in `~/.cache/opencode-tmp/opencode/inkling-weights/same-boot.qayuV0/`. Five guard tests and 15 weight-tool CPU tests passed. The exact H1-E kernel tail, including the GCVM protection status line, was replayed through the final warning classifier as both historical and live events; strict boot behavior was unchanged. A real no-GPU warning-mode probe propagated child exit 13 unchanged.
 
-Low-effort baseline H0/H3 evaluation is in progress. No production promotion or timing conclusion is implied by the smoke results.
+The follow-up [low-effort baseline](orca-low-baseline-report.md) did not reproduce a false refusal. No production promotion or timing conclusion is implied by the smoke results.

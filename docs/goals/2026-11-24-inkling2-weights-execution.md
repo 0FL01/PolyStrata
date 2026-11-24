@@ -13,7 +13,7 @@ Last updated: 2026-11-24
 | R1 | P0–P2: pin the experiment; reproduce the 32/1/36 precision transplant plan; verify a bounded streaming writer on small fixtures. | [Experiment lock](inkling2-weights/experiment-lock.json), [corpus](inkling2-weights/corpus-manifest.json), [inventory](inkling2-weights/transplant-plan.json), [fixture results](inkling2-weights/p2-report.md). | verified |
 | R2 | P3–P5: prove no-op parity against H0 and establish a fresh RDNA2 baseline with an exact active-vocabulary NLL observer and timing noise. | [No-op parity](inkling2-weights/p3-report.md), [observer alignment](inkling2-weights/p4-report.md), [fresh H0 result](inkling2-weights/h0-result.json) on RX 6700 XT. | verified |
 | R3 | H1-B through H3-E: build the fixed variants on the copy, verify every untouched payload and screen the incremental changes on one release binary/configuration. | [H1](inkling2-weights/h1-e-report.md), [build chain](inkling2-weights/cow-report.md) and [same-boot GPU screening](inkling2-weights/same-boot-gpu-report.md). H2/H3 each have finite logits and 4/4 critical tasks under the shortened protocol. | verified |
-| R4 | A0 through F0: use authorized pinned Mix-16G data, compare D0 and the fixed A1 transfer; open A2 only on the plan's evidence. Recommend the smallest demonstrated combination. | [Authorized A0 inventory](inkling2-weights/orca-inventory.json) and [CPU-verified CoW files](inkling2-weights/cow-report.md); D0/A1 behavioral results pending. | A1 finite-logit GPU smoke passed |
+| R4 | A0 through F0: use authorized pinned Mix-16G data, compare D0 and the fixed A1 transfer; open A2 only on the plan's evidence. Recommend the smallest demonstrated combination. | [Authorized A0 inventory](inkling2-weights/orca-inventory.json), [CPU-verified CoW files](inkling2-weights/cow-report.md), and [low-effort baseline](inkling2-weights/orca-low-baseline-report.md). | A1 GPU smoke passed; Orca benefit inconclusive (no baseline refusal) |
 | R5 | User: deploy the qualified modified weights next to the original, with an identifying prefix including `OrcaRouter` for an actual Orca transfer; preserve the original and clean up only this task's disposable files. | Final path and SHA, original SHA, production API smoke and cleanup record. | blocked (no qualified candidate) |
 
 ## Constraints and change envelope
@@ -28,7 +28,8 @@ Last updated: 2026-11-24
 
 ## Current checkpoint
 
-- **Low-effort evaluation (R4)**: check whether the frozen H0/H3 pilot exhibits any benign false refusals before paying for the full D0 download. D0 is structurally eligible, not loaded or hashed; A1 passed its finite-logit/critical smoke. A2 remains conditional. Keep production on its original configuration until a qualifier passes fresh matched timing and a full read of the copy at the final destination beside H0.
+- **F0 precision selection (R3/R4)**: compare H2/H3 on the remaining frozen NLL windows, reusing `2k-en` and the same-boot H0 baseline, and only then time the smallest candidate with a measurable benefit. Keep production on its original configuration until a qualifier passes fresh matched timing and a full read of the copy at the final destination beside H0.
+- **Orca verdict (R4)**: both H0 and H3 completed all 12 diagnostic requests in the low-effort pilot. H3 had one truncated ordinary control, not a refusal. A1 is not qualified for adoption on this evidence; D0 and A2 are not opened without a reproduced baseline target.
 
 ## Checkpoints recorded
 
@@ -45,3 +46,4 @@ Last updated: 2026-11-24
 - [A1-B](inkling2-weights/a1-build-report.md): root Btrfs returned a checksum error on the first attempt; the separate SATA retry passed independent verification and left its error counters unchanged. Published privately with exactly 24 changed and 680 unchanged H3 payloads. No deploy; original config unchanged.
 - [Btrfs CoW](inkling2-weights/cow-report.md): replaced all five compact workcopies with verified reflinks; same per-tensor bytes and metadata. Removed the five old GGUFs after verification and kept their manifests and logs. Measured 75.36 GB net free space recovered across the two disks.
 - [Same-boot GPU screening](inkling2-weights/same-boot-gpu-report.md): H2, H3 and A1 each scored 256 finite targets and passed 4/4 critical chat cases. Historical AMDGPU faults are recorded as warnings for these pilots. No new fault or hard stop in the 15 runs. H1 timing remains incomplete, not needed unless H1 becomes a finalist.
+- [Orca low-effort baseline](inkling2-weights/orca-low-baseline-report.md): 48 bounded launches completed. No false refusals on the 12 target prompts; one H3 ordinary control ran out of tokens. No full donor download or claim of refusal reduction.
