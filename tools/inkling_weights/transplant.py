@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Inventory and copy only the fixed Inkling-2-Mini GGUF precision transplants."""
+"""Inventory and copy only the fixed Inkling-2-Mini GGUF transplants."""
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 import io
 import json
@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import struct
 import subprocess
+import sys
 import tempfile
 
 from tools.gguf_reader import BLOCK_GEOMETRY, GGML_TYPES, GGUF_META, GGUFFile
@@ -30,6 +31,8 @@ GROUPS = {
     'H3': tuple(f'blk.{i}.attn_{p}.weight' for i in range(6, 18) for p in ('q', 'gate', 'rel')),
 }
 DELTAS = {'H1': 2755584, 'H2': 231579648, 'H3': 82944000}
+A1_NAMES = tuple(f'blk.{i}.attn_output.weight' for i in range(24))
+DONOR_KEYS = ('repo', 'revision', 'filename', 'size_bytes', 'advertised_sha256')
 
 
 def align(n: int, alignment: int) -> int:
@@ -160,6 +163,8 @@ class PublicRange:
     revision: str
     filename: str
     size: int
+    advertised_sha256: str | None = None
+    token: bytes | None = field(default=None, repr=False)
 
     def read(self, start: int, length: int) -> bytes:
         if not (0 < length <= HEADER_BYTES and 0 <= start <= self.size - length):
@@ -171,10 +176,18 @@ class PublicRange:
         stop = start + length - 1
         url = f'https://huggingface.co/{self.repo}/resolve/{self.revision}/{self.filename}'
         # curl also supports the host's standard SOCKS proxy configuration without Python dependencies.
-        got = subprocess.run(['curl', '--disable', '--silent', '--show-error', '--fail', '--location',
-                              '--proto', '=https', '--proto-redir', '=https', '--max-time', '120',
-                              '--range', f'{start}-{stop}', '--max-filesize', str(length), '--suppress-connect-headers',
-                              '--dump-header', '/dev/stderr', url], capture_output=True, timeout=125)
+        command = ['curl', '--disable', '--silent', '--show-error', '--fail', '--location',
+                   '--proto', '=https', '--proto-redir', '=https', '--max-time', '120',
+                   '--range', f'{start}-{stop}', '--max-filesize', str(length), '--suppress-connect-headers',
+                   '--dump-header', '/dev/stderr']
+        options = {}
+        if self.token is not None:
+            if not re.fullmatch(rb'hf_[a-zA-Z0-9]+', self.token):
+                raise ValueError('expected a Hugging Face token on stdin (A1 only)')
+            # curl --location withholds Authorization on redirects to another origin.
+            command += ['--header', '@-']
+            options['input'] = b'Authorization: Bearer ' + self.token + b'\n'
+        got = subprocess.run([*command, url], capture_output=True, timeout=125, **options)
         if got.returncode:
             raise ValueError(f'bounded HF Range {start}-{stop} failed (curl exit {got.returncode})')
         # Never print raw response headers: redirect URLs may include signed parameters.
@@ -194,6 +207,11 @@ class PublicRange:
             raise ValueError(f'expected HTTP 206 for Range {start}-{stop}')
         if responses[0][1].get(b'x-repo-commit') != [self.revision.encode()]:
             raise ValueError('HF Range response did not confirm the pinned commit')
+        if self.advertised_sha256 is not None:
+            origin = responses[0][1]
+            if (origin.get(b'x-linked-size') != [str(self.size).encode()] or
+                    origin.get(b'x-linked-etag') != [f'"{self.advertised_sha256}"'.encode()]):
+                raise ValueError('HF Range origin did not confirm the advertised size and LFS digest')
         expected = f'bytes {start}-{stop}/{self.size}'.encode()
         if responses[-1][1].get(b'content-range') != [expected] or len(got.stdout) != length:
             raise ValueError(f'wrong Content-Range or response length for Range {start}-{stop}')
@@ -442,6 +460,40 @@ def write_verified(base_file, base: Header, edits: dict[str, Tensor], donor_star
     return result
 
 
+def prepare_a1(base: Header, pin: dict, token: bytes):
+    inventory = read_json(RECORDS / 'orca-inventory.json')
+    if any(pin[k] != inventory['source'][k] for k in DONOR_KEYS):
+        raise ValueError('Orca donor pin differs from the A0 inventory')
+    plan = inventory['A1']
+    if set(plan['tensors']) != set(A1_NAMES) or plan['required_scales'] != []:
+        raise ValueError('A1 requires exactly 24 attention output tensors and no scales')
+    remote = PublicRange(pin['repo'], pin['revision'], pin['filename'], pin['size_bytes'],
+                         advertised_sha256=pin['advertised_sha256'], token=token)
+    raw = remote.read(0, HEADER_BYTES)
+    probes = inventory['access']
+    header_sha = sha256(raw).hexdigest()
+    if header_sha != probes['header_range']['sha256']:
+        raise ValueError('Orca header differs from the A0 pin')
+    donor = parse_header(raw, remote.size)
+    if donor.data_start != inventory['header']['data_start']:
+        raise ValueError('Orca data offset differs from A0')
+    edits = {}
+    for name in A1_NAMES:
+        old, new = base.tensors[name], donor.tensors[name]
+        if (old.type_id, new.type_id, old.shape, new.shape, new.nbytes) != (2, 8, (3072, 2304), (3072, 2304), 7520256):
+            raise ValueError(f'{name}: expected Q4_0 → Q8_0 with exact A1 dimensions')
+        if new.span(donor.data_start) | {'shape': list(new.shape)} != plan['tensors'][name]:
+            raise ValueError(f'{name}: donor span differs from A0')
+        edits[name] = new
+    if len(base.tensors) != 704 or layout(base, edits)[1] != 15467190976:
+        raise ValueError('A1 candidate size or tensor count differs from A0')
+    payload_probe = probes['one_payload_range']
+    if payload_probe['name'] != A1_NAMES[0]:
+        raise ValueError('missing A0 payload hash for the first A1 tensor')
+    observation = {'method': 'authorized bounded ranges', 'header_sha256': header_sha, 'verified_file_sha256': None}
+    return edits, donor.data_start, remote.read, {A1_NAMES[0]: payload_probe['sha256']}, observation
+
+
 def build(args: argparse.Namespace) -> dict:
     check_destinations(args.output, args.manifest)
     pins = read_json(args.lock)['sources']
@@ -462,11 +514,18 @@ def build(args: argparse.Namespace) -> dict:
             if not args.parent_manifest:
                 raise ValueError(f'{args.variant} needs --parent-manifest')
             parent = read_json(args.parent_manifest)
-            required = {'H1': 'H0-noop', 'H2': 'H1', 'H3': 'H2'}[args.variant]
+            required = {'H1': 'H0-noop', 'H2': 'H1', 'H3': 'H2', 'A1': 'H3'}[args.variant]
             if (parent['variant'], parent['sha256'], parent['size_bytes']) != (required, full_hash, size):
                 raise ValueError(f'parent GGUF does not match the required {required} manifest')
             if expected_base != parent['payload_sha256']:
                 raise ValueError('parent payload hashes differ from its manifest')
+            if args.variant == 'A1':
+                token = sys.stdin.buffer.readline(512).removesuffix(b'\n')
+                edits, donor_start, donor_read, expected_donor, observation = prepare_a1(base, pins['A'], token)
+                provenance.update(parent_sha256=full_hash, donor={k: pins['A'][k] for k in DONOR_KEYS},
+                                  donor_verification=observation)
+                return write_verified(file, base, edits, donor_start, donor_read, expected_base, expected_donor,
+                                      args.output, args.manifest, provenance)
             plan = read_json(args.plan)
             names = GROUPS[args.variant]
             entries = plan['incremental_groups'][args.variant]['tensors']
@@ -497,8 +556,7 @@ def build(args: argparse.Namespace) -> dict:
             planned = plan['incremental_groups'][args.variant]['output_file_size']
             if layout(base, edits)[1] != planned:
                 raise ValueError('candidate size differs from the validated plan')
-            provenance['donor'] = {k: pins['U'][k] for k in ('repo', 'revision', 'filename',
-                                                            'size_bytes', 'advertised_sha256')}
+            provenance['donor'] = {k: pins['U'][k] for k in DONOR_KEYS}
         provenance['parent_sha256'] = full_hash
         return write_verified(file, base, edits, donor_start, donor_read, expected_base, expected_donor,
                               args.output, args.manifest, provenance)
@@ -512,7 +570,8 @@ def main() -> None:
     inv.add_argument('--lock', type=Path, default=RECORDS / 'experiment-lock.json')
     inv.add_argument('--recon', type=Path, default=RECORDS / 'recon-pins.json')
     copy = sub.add_parser('build', help='write and independently verify a separate GGUF')
-    copy.add_argument('--variant', choices=['H0-noop', *GROUPS], required=True)
+    copy.add_argument('--variant', choices=['H0-noop', *GROUPS, 'A1'], required=True,
+                      help='A1 requires an authorized Hugging Face token via stdin')
     copy.add_argument('--base', type=Path, required=True)
     copy.add_argument('--output', type=Path, required=True)
     copy.add_argument('--manifest', type=Path, required=True)

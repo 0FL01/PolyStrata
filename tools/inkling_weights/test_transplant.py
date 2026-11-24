@@ -149,6 +149,25 @@ class TransplantTest(unittest.TestCase):
                 run.return_value = subprocess.CompletedProcess([], 0, data, headers)
                 source.read(1, 3)
 
+    @patch.object(tx.subprocess, 'run')
+    def test_authorized_range_checks_origin_digest_and_keeps_token_off_argv(self, run):
+        rev, digest, token = 'a' * 40, 'b' * 64, b'hf_example'
+        source = tx.PublicRange('example/model', rev, 'model.gguf', 100, digest, token)
+        commit = f'HTTP/2 302\r\nx-repo-commit: {rev}\r\n'.encode()
+        lfs = f'x-linked-size: 100\r\nx-linked-etag: "{digest}"\r\n'.encode()
+        reply = b'HTTP/2 206\r\nContent-Range: bytes 1-3/100\r\n'
+        run.return_value = subprocess.CompletedProcess([], 0, b'abc', commit + lfs + b'\r\n' + reply + b'\r\n')
+        self.assertEqual(source.read(1, 3), b'abc')
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index('--header') + 1], '@-')
+        self.assertNotIn(token.decode(), ' '.join(command))
+        self.assertNotIn('--location-trusted', command)
+        self.assertNotIn(token.decode(), repr(source))
+        self.assertEqual(run.call_args.kwargs['input'], b'Authorization: Bearer ' + token + b'\n')
+        run.return_value = subprocess.CompletedProcess([], 0, b'abc', commit + b'\r\n' + reply + lfs + b'\r\n')
+        with self.assertRaisesRegex(ValueError, 'origin did not confirm'):
+            source.read(1, 3)
+
 
 if __name__ == '__main__':
     unittest.main()

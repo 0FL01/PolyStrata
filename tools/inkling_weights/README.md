@@ -31,6 +31,19 @@ The checker returns JSON with `pass` and exits 0 on pass or 1 on failure. Python
 
 `orca.cases` freezes 12 benign diagnostic candidates and 12 paired ordinary controls. At `low` effort, use the same template/system/sampler for H0/H3 and any permitted later comparison. First check whether H0 or H3 actually shows a refusal on a benign request. Record the reason with the raw final answer, separating a refusal from a wrong answer, format failure, or truncation. The automated checker measures correct completion; its failure alone is **not** a refusal label. If no such symptom is observed, do not claim there is a baseline problem or that a donor might have fixed it. This pilot does not estimate a general refusal rate.
 
+## Build the A1 weight copy
+
+After H3 is verified, pipe the active authorized Hugging Face token to the A1 writer. The HF CLI's Python can be separate from the repository's Python. Use new private output paths:
+
+```sh
+"$HOME/.hf-cli/venv/bin/python" -I -B -c \
+  'from huggingface_hub import get_token; print(get_token() or "")' |
+  python3 -B -m tools.inkling_weights.transplant build --variant A1 \
+    --base "$H3" --parent-manifest "$H3_MANIFEST" --output "$A1" --manifest "$A1_MANIFEST"
+```
+
+This fetches only the pinned header and 24 selected projections. The sidecar records the exact copied payload hashes and distinguishes the advertised donor digest from a whole-file verification. It inherits H3's architecture/tokenizer metadata and every other payload. Successful build alone does not establish a reduction in false refusals, qualify the model, or run the full donor control.
+
 ## Guarded runtime pilots
 
 Use these from the checkout with production inactive, after the boot guard passes. Run them serially on the one GPU. Each engine process gets its own scratch directory and writable seed profile; none reads production sessions. The binaries, corpus, template and runtime flags come from the [experiment lock](../../docs/goals/inkling2-weights/experiment-lock.json).

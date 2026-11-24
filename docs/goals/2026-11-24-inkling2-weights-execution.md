@@ -27,7 +27,7 @@ Last updated: 2026-11-24
 
 ## Current checkpoint
 
-- **A1-B (R4, offline)**: copy the 24 fixed Mix-16G attention output tensors onto the verified H3 workcopy. Use authorized bounded ranges and mark D0 control as pending, not skipped or failed. Neither a full donor download nor a behavioral experiment is part of this offline build.
+- **A1-B (R4, offline)**: copy the 24 fixed Mix-16G attention output tensors onto the verified H3 workcopy. The [first attempt](inkling2-weights/a1-build-report.md) hit a Btrfs checksum error without publishing a file; retry in private scratch on the separate SATA filesystem. Use authorized bounded ranges and mark D0 control as pending, not skipped or failed.
 - **GPU screening (R3/R4)**: H2/H3 load/finite and critical smoke are pending; H1 timing is incomplete. The `[gfxhub] page fault` in original H0 blocks new GPU work on this boot. D0 is structurally eligible for a guarded load attempt; its full donor file has not been obtained or hashed.
 
 ## Checkpoints recorded
