@@ -1,11 +1,15 @@
 """CPU-only tests for config isolation and exact router-weight handoff."""
 
+import contextlib
+import io
 import json
 from pathlib import Path
 import stat
 import struct
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import capture_run as cp
 from test_collect import fixture
@@ -68,6 +72,21 @@ class CaptureTest(unittest.TestCase):
         self.assertEqual(argv[2:5], ['6', '65', '0'])
         self.assertEqual(struct.pack('<f', float.fromhex(argv[5])), struct.pack('<I', 0x3de12345))
         self.assertEqual(Path(argv[6]), self.run / 'input.bin')
+
+    def test_ref_suite_dry_run_is_guarded_and_never_executes(self):
+        self.run_fixture()
+        argv = ['capture_run.py', 'cpu-ref', str(self.dir)]
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(sys, 'argv', argv), patch.object(cp.os, 'umask'), patch.object(cp.subprocess, 'run') as run:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                self.assertEqual(cp.main(), 0)
+            run.assert_not_called()
+        cmd = cp.shlex.split(stdout.getvalue())
+        self.assertIn('--warn-amdgpu-faults', cmd)
+        self.assertIn(str(self.dir / 'cpu-ref-guard'), cmd)
+        self.assertEqual(Path(cmd[-8]).name, 'parity-hip-ref')
+        self.assertEqual(cmd[-1], '--suite')
+        self.assertEqual(json.loads(stderr.getvalue())['weight_bits'], '0x3de12345')
 
     def test_incomplete_trace_rejected(self):
         self.run_fixture()

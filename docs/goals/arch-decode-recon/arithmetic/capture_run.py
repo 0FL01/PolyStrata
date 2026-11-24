@@ -107,6 +107,12 @@ def replay(directory, backend):
     return evidence, [str(probe), str(model), str(LAYER), str(expert), '0', weight, str(raw)]
 
 
+def cpu_ref_suite(directory, backend):
+    evidence, cmd = replay(directory, backend)
+    cmd[0] = str(HERE / 'out' / ('parity-hip-ref' if backend == 'hip' else 'parity-cpu-ref-model'))
+    return evidence, [*cmd, '--suite']
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(required=True, dest='action')
@@ -114,10 +120,12 @@ def main():
     setup.add_argument('directory', type=Path)
     setup.add_argument('--config', type=Path, default=PRODUCTION)
     go = sub.add_parser('replay', help='print rank-0 evidence and a replay command; do not run it by default')
-    go.add_argument('directory', type=Path)
-    go.add_argument('--backend', choices=['cpu', 'hip'], default='hip')
-    go.add_argument('--guard-output', type=Path, help='HIP guard folder (default: DIRECTORY/replay-guard)')
-    go.add_argument('--execute', action='store_true', help='execute the printed command; HIP always uses the guard')
+    ref = sub.add_parser('cpu-ref', help='verify the CPU-reference prototype on both fixtures, then time HIP leaves')
+    for cmd in (go, ref):
+        cmd.add_argument('directory', type=Path)
+        cmd.add_argument('--backend', choices=['cpu', 'hip'], default='hip')
+        cmd.add_argument('--guard-output', type=Path, help='fresh HIP guard folder (default under DIRECTORY)')
+        cmd.add_argument('--execute', action='store_true', help='execute the printed command; HIP always uses the guard')
     a = p.parse_args()
     os.umask(0o077)
     try:
@@ -125,11 +133,12 @@ def main():
         if a.action == 'prepare':
             print(prepare(directory, a.config))
             return 0
-        evidence, command = replay(directory, a.backend)
+        is_ref = a.action == 'cpu-ref'
+        evidence, command = (cpu_ref_suite if is_ref else replay)(directory, a.backend)
         if a.backend == 'hip':
-            out = a.guard_output.resolve() if a.guard_output else directory / 'replay-guard'
+            out = a.guard_output.resolve() if a.guard_output else directory / ('cpu-ref-guard' if is_ref else 'replay-guard')
             command = [sys.executable, str(ROOT / 'rdna2-rnd/scripts/run_guarded.py'), '--warn-amdgpu-faults',
-                       '--output', str(out), '--', 'timeout', '60', *command]
+                       '--output', str(out), '--', 'timeout', '120' if is_ref else '60', *command]
         elif a.guard_output:
             p.error('--guard-output is only valid for --backend hip')
         print(json.dumps(evidence), file=sys.stderr)

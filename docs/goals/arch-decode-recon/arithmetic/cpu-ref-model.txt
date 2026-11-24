@@ -1,0 +1,21 @@
+{"position": 2048, "visit": 6, "layer": 6, "rank": 0, "serial": 1, "expert": 116, "placement": "cpu", "weight_bits": "0x3f94809c", "weight_hex": "0x1.2901380000000p+0", "input_sha256": "586b088a7e4cdcba8cb5a2e1bbed419f60de61cd7f0e9466606bcd7876a2466c"}
+/home/stfu/ai/agent-frameworks/PolyStrata/docs/goals/arch-decode-recon/arithmetic/out/parity-cpu-ref-model /home/stfu/.lmstudio/models/unsloth/Inkling-2-Mini/Tideglass-Inkling-2-Mini-Unbound-v2.1.gguf 6 116 0 0x1.2901380000000p+0 /home/stfu/.cache/opencode-tmp/opencode/arch-cp04-capture.tBbJzJ/run/input.bin --suite
+model=/home/stfu/.lmstudio/models/unsloth/Inkling-2-Mini/Tideglass-Inkling-2-Mini-Unbound-v2.1.gguf bytes=15537527488
+fixture=model-derived proxy layer=3 expert=0 route_weight_bits=0x3e000000 (not applied)
+activation=GGUF Q8_0 embedding through selected layer's FFN RMSNorm (proxy, not a decoded FFN row)
+production AVX2 vs scalar CPU model of candidate (not a GPU result)
+activation Q8_0                 scales 0/72 differ; codes 0/2304 differ
+scalar candidate gate/up
+gate FP32                       0/1152 differ
+up FP32                         0/1152 differ
+CPU SiTU -> Q8_0                scales 0/36 differ; codes 0/1152 differ
+CPU SiTU -> down FP32           0/2304 differ
+fixture=captured serial decode layer=6 expert=116 route_weight_bits=0x3f94809c (not applied)
+activation=captured input (raw xn followed by xq; provenance supplied by caller): /home/stfu/.cache/opencode-tmp/opencode/arch-cp04-capture.tBbJzJ/run/input.bin
+production AVX2 vs scalar CPU model of candidate (not a GPU result)
+activation Q8_0                 scales 0/72 differ; codes 0/2304 differ
+scalar candidate gate/up
+gate FP32                       0/1152 differ
+up FP32                         0/1152 differ
+CPU SiTU -> Q8_0                scales 0/36 differ; codes 0/1152 differ
+CPU SiTU -> down FP32           0/2304 differ

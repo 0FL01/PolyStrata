@@ -1,6 +1,6 @@
-# Fresh 2K decode profile — CP-01 / CP-P3-02
+# Fresh 2K and 64K decode profiles — CP-01 / CP-P3-02
 
-**Deprioritize P3 as a standalone throughput change.** On the RX 6700 XT, the entire fused controller-input stage took **0.312 ms/token**, including live normalization that bank hoisting cannot remove. If this stage vanished at zero cost and every removed nanosecond shortened the traced decode window, throughput would improve by only **0.86%**. This is a ceiling for removing the measured dispatch work, **not** a measured improvement or an untraced E2E bound.
+**Deprioritize P3 as a standalone throughput change.** On the RX 6700 XT, the entire fused controller-input stage took **0.312 ms/token at 2K** and **0.323 ms/token at 64K**, including live normalization that bank hoisting cannot remove. If this stage vanished at zero cost and every removed nanosecond shortened the traced decode window, throughput would improve by only **0.86% at 2K** or **0.80% at 64K**. These are ceilings for removing the measured dispatch work, **not** measured improvements or untraced E2E bounds.
 
 ## What was measured
 
@@ -48,3 +48,34 @@ D="$HOME/.cache/opencode-tmp/opencode/arch-campaign.XWM1yK"
 python -B docs/goals/arch-decode-recon/profiler/analyze.py \
   --run "$D/roc2k" --untraced "$D/mixed-2048" | diff -u "$D/roc2k/controller-cost-breakdown.json" -
 ```
+
+## 64K follow-up
+
+Same hardware, build, config, profile seed, and profiler settings. This was a fresh 65,536-token `mixed` prompt and **16 serial decode intervals**, versus 32 at 2K. The guard had **no stop reasons**, 22 boot-time memory-fault warning records and no AMDGPU warnings during the run; its sampled free-VRAM minimum was **2,040.4 MiB** (1,536 MiB floor). The engine again loaded 1,176 of 3,072 routed experts into VRAM.
+
+The 17 logits-copy markers were each paired with their softcap on the same stream and `hipGraphLaunch` correlation. The decode window was **654.239 ms**, versus **654.150 ms** from the first to last pipe ID and **654.3 ms** in `DONE`. It contained 15,285 compute dispatches on stream/queue 1 and 491 H2D copy records (no byte field). Every step had 24 grouped Q/K/V and 24 single FFN controller sequences with matching rank and output dispatches: **96 logical rows/token**, **1,536 total**, no unmatched sequences. The analyzer reproduced the saved 64K JSON byte-for-byte.
+
+| Traced attribution (mean ms/token) | 2K · 32 steps | 64K · 16 steps |
+|---|---:|---:|
+| Elapsed | 36.614 | 40.890 |
+| Kernel dispatch union | 19.065 | 17.638 |
+| H2D copy union | 4.348 | 5.523 |
+| Kernel/copy overlap | 2.077 | 2.910 |
+| Kernel-or-copy union | 21.335 | 20.251 |
+| Neither traced kernel nor copy active | 15.279 | 20.639 |
+| Attention decode + combine | 1.036 | **4.630** |
+| Other projections (excludes LM head and controller rank) | 4.558 | **4.592** |
+| Specialized Q4_0 expert slots | 8.643 | 3.345 |
+| Q6_K LM-head projection | 1.213 | 1.392 |
+| Fused controller input | 0.312 | 0.323 |
+| Rank-64 projection | 0.429 | 0.428 |
+| Fused gain/forget and controlled output | 0.428 | 0.426 |
+| All controller stages, union | 1.169 | 1.176 |
+
+At 64K, attention and other projections were the largest kernel groups. Attention split into **4.313 ms/token** in `decode_q8_kernel<8>` and **0.317 ms/token** in `decode_combine_kernel`. The apparent drop in expert time is not a context speedup: 2K includes a 154.671 ms expert dispatch, and the two windows have different lengths, prompts and live placement. The uncovered time and traced HIP API durations do not establish CPU join or launch cost and must not be added to the busy unions.
+
+**P3 boundary at 64K:** Entire fused input **0.323 ms/token**, or **0.310 ms/token** after excluding overlap with other traced device work. The same zero-cost removal calculation gives **+0.80%** (exclusive-only: **+0.76%**); deleting the entire controller, including rank and output that are not bank-only, would give **+2.96%**. These are traced dispatch-only ceilings. The fused trace cannot price the bank-only subset separately, and real hoisting still pays compute, scratch traffic and live RMS. The 64K trace does not change the decision to park standalone P3.
+
+**Free-running greedy comparison:** **17/17 IDs matched** the untraced `mixed-65536` prefix; no first divergence. The prompt CSV and the config, binary and profile-seed hashes match; the pipe verified no reuse or drafts. The same 16 arrival intervals averaged **40.884 ms traced vs 36.437 ms untraced** (medians **37.145 vs 34.384 ms**). One short matched prefix does not measure profiler overhead, bound untraced E2E performance, or establish candidate parity. The full untraced 256-step rate was **32.34 t/s**, not the denominator of the traced ceiling.
+
+Private evidence: `roc64k/{trace/,config.json,metrics.json,engine.log,controller-cost-breakdown.json}`, `guard-roc64k/{stop-reasons.json,warnings.json,vram.jsonl}`, and `mixed-65536/`. To reproduce the CPU check, substitute `roc64k` and `mixed-65536` in the command above.

@@ -42,6 +42,7 @@ def main():
     mode = p.add_mutually_exclusive_group()
     mode.add_argument('--hip', action='store_true', help='compile and link HIP probe; do not run it')
     mode.add_argument('--isa', action='store_true', help='emit production device assembly only')
+    p.add_argument('--cpu-ref', action='store_true', help='build the separate CPU-reference prototype or its ISA')
     a = p.parse_args()
     build = a.build.resolve()
     base = commands(build, 'poly_expert_parity')
@@ -52,8 +53,12 @@ def main():
          'CMakeLists.txt', 'third_party/llama.cpp'])
     OUT.mkdir(exist_ok=True)
     if a.isa:
-        for f in (poly, mmvq):
-            compile_from(base, f, ROOT / f, OUT / (Path(f).stem + '.s'), build, ['-w'], isa=True)
+        if a.cpu_ref:
+            compile_from(base, poly, HERE / 'cpu_ref.cu', OUT / 'cpu_ref.s', build,
+                         ['-DCP_HIP=1', '-ffp-contract=off'], isa=True)
+        else:
+            for f in (poly, mmvq):
+                compile_from(base, f, ROOT / f, OUT / (Path(f).stem + '.s'), build, ['-w'], isa=True)
         return
 
     cpu = OUT / 'cpu_experts.o'
@@ -61,23 +66,30 @@ def main():
     ggml = ROOT / 'third_party/llama.cpp/ggml/include'
     libs = [str(build / 'ggml/src' / f) for f in ('libggml-cpu.a', 'libggml-base.a')]
     source = HERE / 'parity.cpp'
+    extra = ['-DCP_CPU_REF=1'] if a.cpu_ref else []
     if not a.hip:
         run(['c++', '-O3', '-DNDEBUG', '-std=c++20', '-ffp-contract=off', '-Wall', '-Wextra', '-pthread',
-             f'-I{ROOT / "src/poly"}', f'-I{ROOT / "include"}', f'-I{ggml}', str(source), str(cpu),
-             *libs, '-ldl', '-o', str(OUT / 'parity-cpu')])
+             f'-I{ROOT / "src/poly"}', f'-I{ROOT / "include"}', f'-I{ggml}', *extra, str(source), str(cpu),
+             *libs, '-ldl', '-o', str(OUT / ('parity-cpu-ref-model' if a.cpu_ref else 'parity-cpu'))])
         return
 
-    h = OUT / 'parity-hip.o'
+    name = 'parity-hip-ref' if a.cpu_ref else 'parity-hip'
+    h = OUT / (name + '.o')
     # Recompile both relevant device sources at the pinned source contents; use the
     # configured build's support archives and exact link flags for the rest.
     dk, mk = OUT / 'kernels.o', OUT / 'native_mmvq.o'
-    compile_from(base, probe, source, h, build, ['-DCP_HIP=1', '-ffp-contract=off', f'-I{ROOT / "src/poly"}'])
+    compile_from(base, probe, source, h, build, ['-DCP_HIP=1', '-ffp-contract=off', f'-I{ROOT / "src/poly"}', *extra])
+    variant = []
+    if a.cpu_ref:
+        ref = OUT / 'cpu_ref.o'
+        compile_from(base, poly, HERE / 'cpu_ref.cu', ref, build, ['-DCP_HIP=1', '-ffp-contract=off'])
+        variant = [str(ref)]
     compile_from(base, poly, ROOT / poly, dk, build, ['-w'])
     compile_from(base, mmvq, ROOT / mmvq, mk, build, ['-w'])
     cmd = shlex.split(next(l for l in base if ' -o poly_expert_parity ' in l))[2:-2]
     where = next(i for i, x in enumerate(cmd) if x.endswith('/src/poly/expert_parity.cpp.o'))
-    cmd[where:where + 3] = [str(h), str(cpu), str(dk), str(mk)]
-    cmd[cmd.index('-o') + 1] = str(OUT / 'parity-hip')
+    cmd[where:where + 3] = [str(h), str(cpu), str(dk), str(mk), *variant]
+    cmd[cmd.index('-o') + 1] = str(OUT / name)
     runtime = next(Path(x).parent for x in cmd if 'libamdhip64.so.' in x)
     run(cmd + [f'-Wl,-rpath,{runtime}'], build)
 

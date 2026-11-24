@@ -15,6 +15,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('out', type=Path)
     p.add_argument('--tokenizer', type=Path, default=Path.home()/'.config/strata/inkling2-mini/tokenizer')
+    p.add_argument('--long-code', action='store_true', help='also generate an independent 65536-ID source-review request')
     a = p.parse_args()
     a.out.mkdir(mode=0o700, exist_ok=False)
     corpus = json.loads((ROOT/'docs/goals/inkling2-weights/corpus-manifest.json').read_text())
@@ -34,6 +35,22 @@ def main():
         csv = ','.join(map(str,ids)).encode()
         (a.out/f'{key}.csv').write_bytes(csv)
         summary.append(dict(id=key,length=len(ids),sha256=hashlib.sha256(csv).hexdigest()))
+    if a.long_code:
+        # Keep the real chat envelope and request tail intact. Unlike the length sweep, no repeated filler.
+        stub = 'REPLACE_SOURCE_HERE'
+        text = template.render([dict(role='user',content='Review this inference engine source:\n'+stub+
+            '\nExplain when expert slots change and how an asynchronous upload becomes usable. Cite the functions involved.')],
+            reasoning_effort='high')
+        left,right = text.split(stub)
+        prefix,tail = tok.encode(left,parse_special=True),tok.encode(right,parse_special=True)
+        code = tok.encode((ROOT/'src/poly/engine.cpp').read_text()+'\n'+(ROOT/'src/poly/inkling2.cu').read_text())
+        needed = 65536-len(prefix)-len(tail)
+        if len(code)<needed:
+            raise ValueError('not enough independent source tokens')
+        ids = prefix+code[:needed]+tail
+        csv = ','.join(map(str,ids)).encode()
+        (a.out/'long-code-review.csv').write_bytes(csv)
+        summary.append(dict(id='long-code-review',length=len(ids),sha256=hashlib.sha256(csv).hexdigest()))
     (a.out/'index.json').write_text(json.dumps(summary,indent=2)+'\n')
 
 

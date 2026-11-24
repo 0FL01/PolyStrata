@@ -22,6 +22,8 @@
 #include <string>
 #include <vector>
 
+#include "cpu_ref.hpp"
+
 namespace {
 namespace poly = strata::poly;
 #if defined(CP_HIP)
@@ -29,7 +31,7 @@ namespace nk = strata::kernels;
 #endif
 using strata::GgufFile;
 constexpr int width = 2304, ff = 1152, qk = 32;
-struct Q80 { uint16_t d; int8_t q[qk]; };
+using Q80 = cp04::Q80;
 struct Q81 { uint16_t d, s; int8_t q[qk]; };
 static_assert(sizeof(Q80) == 34 && sizeof(Q81) == 36);
 static_assert(std::endian::native == std::endian::little);
@@ -400,12 +402,24 @@ template<class A, class B> void compare(const Stages<A>& a, const Stages<B>& b) 
 }
 } // namespace
 
+#if defined(CP_CPU_REF)
+#include "cpu_ref_probe.inc"
+#endif
+
 int main(int argc, char** argv) try {
+#if defined(CP_CPU_REF)
+    const bool suite = argc > 1 && std::strcmp(argv[argc - 1], "--suite") == 0;
+    if (suite) --argc;
+#endif
     require(argc == 2 || argc == 6 || argc == 7,
             "usage: parity MODEL [LAYER EXPERT PROXY_TOKEN WEIGHT [XN_XQ_CAPTURE]]");
     ggml_cpu_init();
     Model m(argv[1], argc >= 6 ? std::stoi(argv[2]) : 3, argc >= 6 ? std::stoi(argv[3]) : 0,
             argc >= 6 ? std::stoi(argv[4]) : 64, argc >= 6 ? std::stof(argv[5]) : 0.125f, argc == 7 ? argv[6] : nullptr);
+#if defined(CP_CPU_REF)
+    run_cpu_ref(m, suite);
+    return 0;
+#endif
     std::printf("model=%s bytes=%llu layer=%d expert=%d token_for_proxy=%d weight=%.9g (0x%08x) beta=%.9g linear=%.9g\n",
                 m.file.path().c_str(), static_cast<unsigned long long>(m.file.file_size()), m.layer, m.expert, m.token,
                 m.weight, bits(m.weight), m.act.beta, m.act.linear_beta);

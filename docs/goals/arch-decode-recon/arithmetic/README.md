@@ -1,6 +1,6 @@
 # CP-P0-04: expert arithmetic across placement
 
-**The unmodified CPU and HIP paths are not bit-identical on the model-derived proxy.** On the first full-Q4_0 Tideglass layer, the earliest difference was an activation code, not a gate or down accumulator. CPU emulation found it and a guarded RX 6700 XT run confirmed it. Neither result used a captured decode input. A separate capture engine has been linked for that check.
+**Verdict: the CPU-reference HIP leaves passed on both fixtures; exact expert placement is not qualified.** On RX 6700 XT, the prototype matched Ryzen AVX2 Q8_0, gate/up and isolated down bit for bit. Existing HIP SiTU still differed in 58/1,152 FP32 words on the captured row, even with exact gate/up. The differences did not survive Q8_0 on these fixtures; no weighted aggregation or end-to-end parity was tested. The captured-row pack + gate/up also cost **22.878 µs/expert** versus **14.190 µs** for native single-expert HIP (p50). No further prototypes or integration unless the causal placement screen passes.
 
 ## Input and checks
 
@@ -96,8 +96,48 @@ python -B "$A/test_capture_run.py" -v                              # CPU-only sy
 
 This run is for numerical evidence only. The capture adds a blocking copy; do not treat its timing as a performance measurement.
 
+### Guarded replay of the captured decode row
+
+The orchestrator completed both the capture and the replay on RX 6700 XT (`gfx1031`). At position 2048, visit 6, physical layer 6, router rank 0 was **CPU expert 116**, with weight `0x3f94809c` (`0x1.290138p+0`). The 11,808-byte `run/input.bin` has SHA-256 `586b088a7e4cdcba8cb5a2e1bbed419f60de61cd7f0e9466606bcd7876a2466c`. The CPU and actual HIP agreed on all **72 shared scales and 2,304 codes**. The first mismatch was gate row 0:
+
+| Boundary | Different | First CPU vs actual HIP bits |
+| --- | ---: | --- |
+| Gate FP32 | 1,152/1,152 | row 0 `0x3e49071c` vs `0x3e4aa5cc` (max abs `0.011149466`) |
+| Up FP32 | 1,152/1,152 | row 0 `0xbb5ff2e0` vs `0xbbd6be80` (max abs `0.0130605102`) |
+| SiTU FP32 | 1,152/1,152 | row 0 `0xb9c0e934` vs `0xba3a9a6f` |
+| Intermediate scales/codes | 33/36, 411/1,152 | block 0 scale `0x13c2` vs `0x13bb`; lane 0 `0x00` vs `0xff` |
+| Down FP32 | 2,304/2,304 | row 0 `0x3cf7dc54` vs `0x3cfe4e78` |
+| One weighted contribution | 2,304/2,304 | row 0 `0x3d0fc7e6` vs `0x3d138520` |
+
+The generic and two-slot HIP paths matched throughout. Even with centered nibbles, keeping the emulated GPU reduction order changed 904/1,152 gate words (max abs `2.38418579e-7`). Comparing emulation of the unmodified HIP path to actual HIP, SiTU first differed at row 1 (`0xbdbc1a56` vs `0xbdbc1a58`); 74/1,152 SiTU words differed, but the intermediate pack, down and one weighted contribution matched on this fixture. Local `replay-guard/command.log` SHA-256 `645aad5a432a8b964932ea093e807d08f5cdb29a7e5a2387fde58754e6a6d3ae`; both guard stop lists were empty, with only 22 earlier-boot memory-fault warnings each. Minimum sampled free VRAM was 2,002.6 MiB for capture and 10,429.8 MiB for replay.
+
+## Bounded CPU-reference HIP leaf prototype
+
+[`cpu_ref.cu`](cpu_ref.cu) is standalone. It packs GGML Q8_0 using FP32 `amax/127` for the half scale and `127/amax` multiplied by the input before ties-to-even rounding. Each group of eight GPU lanes reproduces the eight AVX2 dot lanes: center the Q4_0 nibbles as integers, signed dot of four bytes per lane, FP32 combined scale, one FMA per lane per block in order, then the AVX2 `4,2,1` horizontal tree. Offline gfx1031 ISA confirms correctly rounded division code, `v_rndne_f32`, signed `v_dot4c_i32_i8`, separate scale product and accumulation, and three FP32 horizontal adds. This targets finite model inputs and the measured Ryzen AVX2 / Q4_0 path only; not Q4_1 down or other input domains.
+
+On **each** fixture the [scalar CPU model](cpu-ref-model.txt) and the [guarded HIP prototype](cpu-ref-rx6700xt.md) matched every packed AVX2 scale/code and every FP32 gate/up word: 72 scales, 2,304 codes, 1,152 gate and 1,152 up. The isolated down leaf fed exact CPU SiTU also matched all 36 scales, 1,152 codes and 2,304 down words. In the separate SiTU chain test, existing HIP SiTU differed in 115/1,152 words on the proxy and 58/1,152 on the real row. On the real row the first difference was index 51, AVX2 `0xbe122059` vs HIP `0xbe12205a`; the peak absolute difference was `2.98023224e-8`. The next Q8_0 pack and down output matched on both fixtures despite these SiTU differences.
+
+```sh
+A=docs/goals/arch-decode-recon/arithmetic
+D="$HOME/.cache/opencode-tmp/opencode/arch-cp04-capture.tBbJzJ"
+python -B "$A/build.py" --cpu-ref
+python -B "$A/build.py" --cpu-ref --isa
+python -B "$A/build.py" --cpu-ref --hip
+python -B "$A/capture_run.py" cpu-ref "$D" --backend cpu --execute
+```
+
+**Reproduction only in an orchestrator-granted GPU slot:** the linked `out/parity-hip-ref` (SHA-256 `8a6222229f7cf3f1edf8b5710eccfda7a8c250a0bde6e1eca31c7b517572ee29`) checks both inputs in one guard, then times the leaves only if both pass. The original `cpu-ref-guard/` under `D` holds the completed run. Use a fresh `--guard-output` for a repro; omit `--execute` to print the command only.
+
+```sh
+python -B "$A/capture_run.py" cpu-ref "$D" --guard-output "$D/cpu-ref-guard-$(date +%s)" --execute
+```
+
+- **Leaf correctness:** compare candidate Q8_0 and gate/up to AVX2, then replay the dot with exact AVX2 bytes supplied separately. Also test the down leaf with exact **CPU** SiTU supplied separately. Any mismatch fails the probe before timing.
+- **SiTU chain:** test the existing HIP SiTU with now-identical gate/up, then the candidate Q8_0/down. These diagnostics are independent of the leaf pass. No attempt to port host libm here, and no claim of FP32 SiTU parity if quantization happens to hide a mismatch.
+- **Latency scope:** HIP event time per expert for prepacked gate/up and standalone pack + gate/up, candidate versus single-expert `native_mmvq`, same device-resident inputs and weights. Seven batches of 48 repetitions; all sample values and p50/min/max logged. Hot repeated weights, not a multi-slot or engine estimate. No transfers, SiTU, down, weighted sums or tail aggregation included in timing.
+
 ## Placement decision
 
-- **Do not assume a move preserves arithmetic.** Even on inputs with equal activation codes, the raw-sum correction and different accumulation trees can change results. Q0 and Q1 were checked on the proxy only; released placement changes are not qualified. No engine, sampling, state or token-ID parity was attempted here.
+- **Do not assume a move preserves arithmetic.** Even on inputs with equal activation codes, the raw-sum correction and different accumulation trees can change results. Q0/Q1 replay pins down these differences on the proxy and one real row, not arbitrary inputs. No candidate engine, state or token-ID parity was attempted here.
 - A backend-neutral optimization preserving today's semantics needs a *shadow* reference assignment and the reference CPU and GPU arithmetic variants, including their individual ordered sums and original merge of CPU/GPU buckets. Preserving top-8 order but summing in new device buckets is insufficient. For GPU-reference work moved to CPU, consume the original fused `xq_` and validate both projection leaves before attempting an OCML-exact SiTU and its quantizer. For CPU-reference work moved to HIP, target the existing AVX2 integer-centering, eight FP32 accumulator lanes/FMA and horizontal reduction, plus CPU quantization and SiTU semantics. Neither is a one-line rounding fix.
-- **Timing / placement upper bound: not measured.** No runnable cross-backend exactness variant or hardware timing has been qualified. The next atomic experiment is the guarded capture and Q0/Q1 replay on its first real selected expert. After localizing the first difference on that fixture, test a minimal CPU-reference HIP leaf: generate Q8_0 bytes with the AVX2 reciprocal-multiply and ties-to-even convention, then feed those bytes into integer-centering, eight independent FP32 FMA accumulators in block order and the AVX2 horizontal tree. Check input bytes and gate/up FP32 separately before accepting any leaf timing for CP-P0-05. Matching this leaf would not by itself qualify SiTU, down, ordered aggregation or end-to-end placement.
+- **Measured leaf cost, not a placement speedup bound.** On the captured row, the CPU-reference gate/up dot costs **+7.729 µs/expert** prepacked and **+8.688 µs/expert** with standalone packing versus native single-expert HIP, at p50. The proxy shows similar overhead. This is one hot resident expert at a time, not a cold transfer, multi-slot, or full-engine timing. Use the [measured ranges](cpu-ref-rx6700xt.md) in the CPU-only causal placement screen; full-expert cost and end-to-end gain remain unmeasured. Stop here unless the screen passes.

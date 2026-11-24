@@ -1,5 +1,7 @@
 # Fresh P0/P1 RECON — §5 output
 
+Follow-up: [P1 short external task prefixes](task-prefixes.md) (English reasoning, Python, tool call and tool-result replay).
+
 **STATUS:** P0 **INCONCLUSIVE** as an optimization; trace supports screening cache allocation by exposed cost, not by
 hit count alone. P1 **INCONCLUSIVE** generally; **do not advance the tested full-weight previous-pass prefetch** on
 these traces. There is no candidate or measured E2E speedup.
