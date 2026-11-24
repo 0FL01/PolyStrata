@@ -131,8 +131,8 @@
   },
   "gpu_guard": {
     "path": "rdna2-rnd/scripts/run_guarded.py",
-    "boot_gate": "passed on the 2026-11-24T20:01:11+03:00 boot",
-    "evidence": "unchanged guard -- /usr/bin/true passed with 10,927.6 MiB sampled free VRAM and no stop reasons; each runtime still uses the guard",
+    "boot_gate": "blocked after H1-E fault on the 2026-11-24T20:01:11+03:00 boot",
+    "evidence": "initial guard probe passed; Guard.boot_clean() now rejects the 2026-11-24T20:37:31.257+03:00 [gfxhub] page fault during 16k-06-A (original H0); see h1-e-report.md",
     "previous_boot_evidence": "Guard.boot_clean() rejected [gfxhub] page fault on 2026-11-23T19:15:23+03:00",
     "fault_override_used": false
   }
