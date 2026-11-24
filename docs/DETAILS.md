@@ -1302,10 +1302,10 @@ curl -X POST "http://127.0.0.1:8080/slots/0?action=restore" -H "Content-Type: ap
 
 For `strata-poly` on RDNA2, add `--disk-sessions` to the engine's `args` to enable this API for text-only sessions
 in single-sequence Inkling-2-Mini on one card, for both `inkling2` and fixed-loop `inkling2_loop` GGUFs, with or without
-the native DSpark drafter. Other `strata-poly`
-models and older binaries still return HTTP 501. The
-snapshot holds the live token IDs, the short-convolution state, the sliding-window K/V tails and all the
-full-attention K/V rows through that position. A prompt that extends those IDs reads just its new suffix.
+the native DSpark drafter. Other `strata-poly` models and older binaries still return HTTP 501.
+The snapshot holds the live token IDs, the short-convolution state, the sliding-window K/V tails and all the
+full-attention K/V rows through that position. A prompt that extends those IDs reads just its new suffix. An agent
+resuming after an assistant reply should resend that reply, including any reasoning the template retained.
 The file does not store older checkpoints or logits. A prompt that differs inside the saved prefix, or ends
 exactly there, is read again unless a separate in-memory checkpoint can be used. The files use the STRSESS
 container below, with an Inkling-only layout and identity (samples of the opened GGUF shards, engine version,

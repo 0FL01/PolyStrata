@@ -59,8 +59,9 @@ capacity setting; prefill throughput was measured up to 65,536 tokens.
 `ab8507f1`, not the later prefill changes. The short agent requests were measured on the live server; the 16K
 result comes from a separate paired engine benchmark.
 [Decode measurements](docs/goals/2026-11-21-inkling2-decode-stalls.md#checkpoint-history).
-[DSpark is optional](docs/goals/2026-11-21-inkling2-dspark.md#completion); it did not meet the speed target and
-was left off.
+[DSpark supports disk sessions and an adaptive proposal budget](docs/DETAILS.md#using-it).
+It is off in the measured production configuration: the speculative verifier has not matched ordinary decode
+with the live expert cache. [Measurements and limits](docs/goals/2026-11-24-inkling2-dspark-disk.md).
 
 ## Run Inkling-2-Mini
 
