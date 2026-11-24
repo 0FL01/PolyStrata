@@ -32,7 +32,8 @@
       "size_bytes": 15721831424,
       "advertised_sha256": "0a8784aa059d6dba83ff99780371180b5376f2056af893c521b37792c64ffa02",
       "verified_sha256": null,
-      "access": "blocked; authenticated HEAD returned 403 GatedRepo; no authorized local file found"
+      "access": "authorized at A0: repository auth-check 200; pinned header and one A1 payload returned exact 206 ranges",
+      "inventory": "orca-inventory.json"
     }
   },
   "variants": {
