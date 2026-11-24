@@ -1,29 +1,23 @@
 # Goal: Raise Inkling-2-Mini Q4_0 decode throughput on RDNA2
 
-Status: active
+Status: complete
 Source: 2026-11-24 user request to implement the Q4_0 RECON, iterate on evidence, and ship verified wins.
 
 ## Objective and gates
 
 - **R1: Ship repeatable end-to-end decode wins.** Compare untraced, interleaved runs on the same card, Q4_0 GGUF,
   token sequence, and comparable placement. For each verified win, push the opt-in change to `main`, deploy its
-  Release HIP binary, and use it as the next baseline. Status: in progress.
+  Release HIP binary, and use it as the next baseline. Status: verified (`a3fe529b`, `7ce0ea6a`, direct A/B below).
 - **R2: Preserve answer quality.** Keep quantization, formulas and accumulation order. Compare affected boundary
   bytes, raw greedy IDs and routes on the same device and matched CPU/GPU placement. Report the first difference
-  if one occurs; do not ship a divergent candidate. Status: in progress.
+  if one occurs; do not ship a divergent candidate. Status: verified (real boundary dumps, route records and greedy IDs).
 - **R3: Reprofile verified wins and follow measured bottlenecks.** Continue while there is a concrete, falsifiable
-  experiment; close with the measured wins, rejected hypotheses, remaining limits and final binary. Status: pending.
+  experiment; close with the measured wins, rejected hypotheses, remaining limits and final binary. Status: verified
+  (post-deploy profiles and follow-up trials below).
 
 Scope: Inkling-2-Mini Q4_0, HIP gfx1031, Q8_0 KV, existing CPU fallback and 2 GiB VRAM reserve. Defaults,
 model file, sampling, KV/session format, and no-DSpark deployment remain unchanged. Guard standalone GPU runs;
 keep logs and experimental tooling outside Git. The order below is a map of hypotheses, not a fixed sequence.
-
-## Current checkpoint
-
-The dense candidate passed the Release and exact-output gates on top of `a3fe529b`.
-Promote that binary with `STRATA_INKLING_Q4_0_DENSE=1`, then trace the new baseline at 2K, 16K and 64K.
-Test paired CPU dots in the 16K/64K engine, mixed-format projection launches, and whether wider expert
-tiles improve enough over the shipped four rows to justify another in-engine trial.
 
 ## Checkpoint evidence
 
@@ -71,11 +65,74 @@ attention consumed 3.72 ms/token of kernel time.
   320 forced tokens per run. Prefill did not slow outside its spread. At restored 64K, 31.964 → 32.779 tok/s
   (+2.55%, two pairs +1.60% and +3.55%, 72.62% hits in every run), same 96 greedy IDs. Earlier timings from the
   series stopped at 1,092 MiB free VRAM were excluded; no GPU fault and no guard threshold was changed.
+- `7ce0ea6a` was pushed to `origin/main` and installed as `~/.config/strata/inkling2-mini/strata-poly-7ce0ea6a`
+  with both Q4_0 flags set. HTTP health, models, text chat and a 79-token disk save/restore passed. The binary
+  is byte-identical to `dense-release`; private rollback is `before-q4-0-7ce0ea6a.json.bak`.
+- Final Release traces (`final-trace-*`, before any scratch-only trials): 1,013 launches per full decode token
+  versus 1,089 before grouping, about 1.24 ms/token in grouped dense Q4_0 at 2K and 16K. The Q4_0 expert
+  gate/up+down still took 4.65 and 4.58 ms/token respectively. Restored 64K spent 3.70 ms/token in full
+  attention, 3.84 in the Q4_0 expert products, and 1.03 in the Q6_K head. These are GPU times, not wall times.
 - On real rotated CPU Q4_0 experts at eight workers, paired AVX2 gate/up yielded 225.39 → 219.40 µs
   for two experts (overlapping interquartile ranges); fusing with intermediate quantization did not help.
   Hoisting the activation work mattered at one worker (756.87 → 675.05 µs) but much less at eight
   (225.39 → 219.45 µs). No CPU changes are shipped on this evidence.
-- Fixed chunk bounds attention: nine variants matched partial, FP32 and Q8_1 bytes at 1K SWA and 2K, 16K,
-  64K, 190K full. At 64K, eight waves 450.28 µs vs four waves 722.45 and two 1,096.09; DPP8 and one key
-  prefetched per lane saved ~4 µs per full visit. The extra workgroups spread K/V reads across fewer groups
-  at once; the small gains from the instruction/prefetch changes do not justify a decode switch.
+- Real paired CPU gate/up (`cpu-ab16k-*`, `cpu-restore64-*`): four 256-token pairs each, 16K medians
+  47.475 → 47.735 and restored 64K 37.481 → 37.613 tok/s; two pairs lost at each length. At 64K the 256
+  greedy IDs matched. In a separate 96-token 64K trace at 73.60% hits, 60 matched decode windows, exposed
+  host join 7.941 → 7.581 ms/token median; gate/up 8.625 → 8.499. With eight workers the real two-expert
+  work achieved 44.7 GB/s effective payload in a follow-up, close to 46.0 GB/s for just reading the same
+  bytes with a checksum. Expert-major down loops did not give a reliable gain either. No CPU patch.
+- Wider raw Q4_0 tiles (`wider-slots`): cold seven-expert gate/up 70.88 µs with four rows vs 71.44 / 72.16 /
+  98.08 for 6/8/12; down 41.72 vs 42.16 / 42.72 / 43.72. Swapping the launch axes did not help. DPP cut
+  at most ~0.5 µs in these cold calls and cost ~4.8 µs on hot seven-expert gate/up. All were bitwise.
+  Seven cached experts in the real short decode take about 61/34 µs (gate/up/down), between the flushed
+  and fully hot microbench. The marginal projected payload rate across 3–8 experts is 372–385 GB/s vs
+  355 GB/s for the separate cold 256 MiB read, consistent with some cache reuse, not an estimate of DRAM traffic.
+- Mixed Q4_0/Q8_0 grouping saved 48 launches a token (1,013 → 965) in four 2K traces. GPU time for the
+  grouped projections barely changed (2.63–2.70 → 2.62–2.63 ms/token including the untouched K-quants).
+  Untraced A/B (320 tokens, four pairs): 2K 51.045 → 51.860 tok/s, all pairs won; 4K 48.990 → 49.355,
+  two pairs lost and hit rate also varied. In a fresh six-leg 2K trace (`mix-rows-*`, all 86.1% hits),
+  four rows for Q8_0 K/V alone took 1.036 ms/token vs 0.938–1.004 without it. Mixed with four-row Q8_0
+  took ~2.13 ms/token versus 2.05 for mixed with one row (same number of launches). Retain neither.
+- Raw weight load/store (`weight-loads`): aligned dwords with `alignbyte` worsened cold seven-expert gate/up
+  70.84 → 72.40 µs; only using dwords on naturally aligned blocks had no effect. One coalesced store for all
+  four outputs saved <1 µs gate/up and <0.6 µs down, not enough to move decode. All boundary bytes matched.
+- Attention with fixed chunk bounds: nine variants matched partial, FP32 and Q8_1 bytes at 1K SWA and 2K,
+  16K, 64K and 190K full. At 64K, eight waves took 450.28 µs vs four waves at 722.45 and two at 1,096.09;
+  DPP8 and prefetching one key per lane each saved about 4 µs per full visit, too little for a decode switch.
+
+## Direct end-to-end comparison
+
+Original deployed `6d7e00d3` vs final deployed `7ce0ea6a`, RX 6700 XT (`gfx1031`), Ryzen 7 5700X, Bartowski
+Q4_0, Q8_0 KV, eight CPU workers, 2 GiB VRAM reserve and no lookup/DSpark. Fresh processes, same profile copied
+for every run, untraced and interleaved. Decode-only, medians of measured tok/s; percentages are ratios of
+medians, not sums of patch gains. The first three prompts use 320 fixed continuation IDs. The long run
+restores the same 65,536-token prefix, reads one new prompt token and generates 256 greedy IDs.
+
+| Prompt | Original | Final | Change | Adjacent pairs won |
+| --- | ---: | ---: | ---: | ---: |
+| 2,048 | 47.930 | 51.325 | +7.08% | 4/4 |
+| 4,113 | 46.785 | 49.325 | +5.43% | 2/2 |
+| 16,384 | 44.275 | 47.990 | +8.39% | 2/2 |
+| 65,536 restored | 37.206 | 38.140 | +2.51% | 4/4 |
+
+All 24 legs passed the guard (at least 1,900.9 MiB free). On the short runs, equal or comparable expert hit
+rates (89.6%, 86.8%, 87.0–87.5%); long runs 81.11–81.57%. Raw IDs match in every run in their respective
+fixtures; the forced runs verify equal decode work, while the independent exact quality checks above use
+greedy outputs. Prefill medians at 2K/4K/16K were 920.3 → 888.8, 958.9 → 954.1, and 1,057.4 → 1,061.2
+tok/s. The two slow 2K prefills did not reproduce in an independent prefill-only A/B with four pairs:
+912.9 → 917.6 tok/s, paired changes −0.40% to +1.84%, same first output ID.
+
+## Completion
+
+- Final Release HIP binary: `build-poly-hip/strata-poly`, byte-identical to the running `strata-poly-7ce0ea6a`
+  above, with `STRATA_INKLING_Q4_0_SLOTS=1` and `STRATA_INKLING_Q4_0_DENSE=1` in the service only. Both
+  flags default off in the engine. Model, formulas, accumulation order, KV and session format did not change.
+- `cmake --build build-poly-hip --target strata-poly poly_mmvq_segments_test poly_inkling_attend_test -j4`;
+  both targeted tests passed on `gfx1031`. `/health` returned 200 with the model loaded after restoring the service.
+  Comparing both flags on versus both off at matched placement also gave all 96 greedy IDs and all 4,608
+  ordered route/placement records at each of 2K, 4K and 16K; 256 restored-64K greedy IDs matched the original binary.
+- Remaining limits: expert weight reads dominate short decode. At 64K, exposed CPU misses depend on expert
+  placement and leave several ms/token on the critical path; the full Q8_0 KV scan adds 3.70 ms/token of GPU
+  work. The measured low-risk changes left no candidate with a repeatable further gain. No result is claimed for
+  another GPU, model quantization, or the whole context range (190K was an attention microbenchmark only).
