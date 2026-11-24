@@ -1,0 +1,24 @@
+{
+  "committed_rows": [2304, 16640, 65792],
+  "statistic": "Unweighted mean over six same-physical-layer cross-pass pairs or six token-adjacent core visits; adjacent omits the seed rows",
+  "K": {
+    "cross_code_equal": [0.038610, 0.032748, 0.025954],
+    "adjacent_code_equal": [0.026412, 0.023899, 0.020237],
+    "cross_abs_signed_delta_le_3": [0.162211, 0.137049, 0.108970],
+    "adjacent_abs_signed_delta_le_3": [0.110487, 0.100743, 0.088358],
+    "cross_conditional_code_bits": [6.309286, 6.580824, 6.872116],
+    "adjacent_conditional_code_bits": [6.857401, 6.979313, 7.106600],
+    "cross_scale_bits_equal": [0.001980, 0.001736, 0.001465],
+    "adjacent_scale_bits_equal": [0.001526, 0.001624, 0.001568]
+  },
+  "V": {
+    "cross_code_equal": [0.026082, 0.021819, 0.018112],
+    "adjacent_code_equal": [0.016468, 0.015392, 0.014449],
+    "cross_abs_signed_delta_le_3": [0.108734, 0.092386, 0.078703],
+    "adjacent_abs_signed_delta_le_3": [0.072763, 0.068451, 0.064905],
+    "cross_conditional_code_bits": [6.866937, 7.050177, 7.197646],
+    "adjacent_conditional_code_bits": [7.268420, 7.307363, 7.331023],
+    "cross_scale_bits_equal": [0.001180, 0.001275, 0.001058],
+    "adjacent_scale_bits_equal": [0.001204, 0.001218, 0.001302]
+  }
+}

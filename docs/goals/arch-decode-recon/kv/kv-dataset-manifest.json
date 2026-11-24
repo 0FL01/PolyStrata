@@ -1,0 +1,49 @@
+{
+  "source_commit": "c0dd0e52f3975dbed3972deda2c2c75010b330c2",
+  "snapshot_root": "~/.cache/opencode-tmp/opencode/arch-campaign.XWM1yK",
+  "engine_binary_sha256": "877fbdfed4120abe7ee9f5e093a3af17f9c8220ebb28a8388a650cf338a775ef",
+  "capture_config_sha256": "d20fdccb4380c6311091fe0bb839420458a6635beed87b274c42a296856073ab",
+  "strsess_model_fingerprint": "f828e39ca9fc3656",
+  "strsess_config_fingerprint": "0c892003eadae05b",
+  "inkling_layout": 1,
+  "context_capacity": 200000,
+  "kv_format": "q8_0",
+  "kv_record_rows": 963,
+  "logical_visit_to_physical_layer": {"5": 5, "11": 11, "17": 17, "23": 11, "29": 17, "35": 11, "41": 17, "47": 23},
+  "workload": "mixed",
+  "sample_rows_per_snapshot": 384,
+  "sample_bytes_per_snapshot": 6684672,
+  "sample_head_tile_roundtrips_per_snapshot": 4224,
+  "snapshots": [
+    {
+      "path": "mixed-2048/session.bin",
+      "committed": 2304,
+      "bytes": 132993640,
+      "records": 3,
+      "header_xxh_style": "51cc18ba4d5ece55",
+      "payload_xxh_style": "dd8e71df669d41f0",
+      "sample_tile_starts": [0, 192, 384, 608, 800, 1024, 1216, 1440, 1632, 1856, 2048, 2272],
+      "checksums_reread_and_roundtrip": true
+    },
+    {
+      "path": "mixed-16384/session.bin",
+      "committed": 16640,
+      "bytes": 382613512,
+      "records": 18,
+      "header_xxh_style": "1c9f478485e5f9f5",
+      "payload_xxh_style": "5b305db9e2da9730",
+      "sample_tile_starts": [0, 1504, 3008, 4512, 6016, 7520, 9056, 10560, 12064, 13568, 15072, 16608],
+      "checksums_reread_and_roundtrip": true
+    },
+    {
+      "path": "mixed-65536/session.bin",
+      "committed": 65792,
+      "bytes": 1238453032,
+      "records": 69,
+      "header_xxh_style": "5ef1ebcb86554dff",
+      "payload_xxh_style": "e13c8b8e35ecfa77",
+      "sample_tile_starts": [0, 5952, 11936, 17920, 23904, 29888, 35840, 41824, 47808, 53792, 59776, 65760],
+      "checksums_reread_and_roundtrip": true
+    }
+  ]
+}

@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "source_commit": "c0dd0e52f3975dbed3972deda2c2c75010b330c2",
+  "status": "INCONCLUSIVE for fresh per-phase timings; historical envelope measured",
+  "hardware_historical": "Radeon RX 6700 XT, gfx1031",
+  "method": "Median of ms per complete same-stream interval between successive Q6_K LM-head ends. Require 48 one-row Q8 KV visits and 24 alternating QKV+FFN chains with exact control-input and rank grid shapes. Input-local span is the sum of all 48 input durations and both neighboring same-stream kernel gaps. Gaps are traced, not adjusted for any intervening DMA, and are not launch overhead. Rank/GPU output times are matched to the control chain by adjacency, not global GEMV statistics.",
+  "historical_traces": [
+    {
+      "path": "~/.cache/claude-dec3/tr-r4/TG_kernel_trace.csv",
+      "sha256": "1eccf11f9dbd1a87127464a16dfb5ed4c9bf0d0e4cb83abc1508d47e52165a16",
+      "context": "94-token prompt; historical sp-r4, UD-IQ4_XS, Q8_0 KV",
+      "complete_windows": 95,
+      "median_ms_per_token": {
+        "qkv_depth_mix_live": 0.164563,
+        "ffn_depth_mix_live": 0.185161,
+        "qkv_input_fused": 0.142921,
+        "ffn_input_fused": 0.158602,
+        "input_fused_total": 0.301605,
+        "qkv_rank": 0.289404,
+        "ffn_rank": 0.122960,
+        "qkv_gain_forget_output_fused": 0.289323,
+        "ffn_gain_forget_output_fused": 0.129883,
+        "controller_total_excluding_live_depth_mix": 1.132732,
+        "input_preceding_gaps_sum": 0.194642,
+        "input_following_gaps_sum": 0.194801,
+        "input_local_span": 0.691287,
+        "main_stream_kernel_busy": 15.682432,
+        "traced_head_to_head": 23.204667
+      },
+      "input_busy_token_p10_p90_ms": [0.298635, 0.305868]
+    },
+    {
+      "path": "~/.cache/claude-fv/trd2k/T_kernel_trace.csv",
+      "sha256": "aecd3b7b4a33b7eec8c29117e8fec18a94fc5d033747f448eb7bc8d8b89590da",
+      "context": "Historical short-context trace; scratch trace label trd2k, exact prompt/run provenance not independently recovered",
+      "complete_windows": 95,
+      "median_ms_per_token": {
+        "qkv_depth_mix_live": 0.173280,
+        "ffn_depth_mix_live": 0.193761,
+        "qkv_input_fused": 0.148721,
+        "ffn_input_fused": 0.159362,
+        "input_fused_total": 0.308363,
+        "qkv_rank": 0.291443,
+        "ffn_rank": 0.123920,
+        "qkv_gain_forget_output_fused": 0.292361,
+        "ffn_gain_forget_output_fused": 0.130601,
+        "controller_total_excluding_live_depth_mix": 1.145687,
+        "input_preceding_gaps_sum": 0.197361,
+        "input_following_gaps_sum": 0.197041,
+        "input_local_span": 0.702403,
+        "main_stream_kernel_busy": 15.653877,
+        "traced_head_to_head": 24.032658
+      },
+      "input_busy_token_p10_p90_ms": [0.304017, 0.315378]
+    },
+    {
+      "path": "~/.cache/claude-fv/final-tr32k-strata-poly-cedd3bf3/T_kernel_trace.csv",
+      "sha256": "09567016ad1458b7f02a7d7e39eba81d0eeb5817195cf9dce27aff92a8711b50",
+      "context": "32768-token prompt, cedd3bf3 historical production release, UD-IQ4_XS, Q8_0 KV; four generated tokens, only three complete intervals",
+      "complete_windows": 3,
+      "median_ms_per_token": {
+        "qkv_depth_mix_live": 0.185161,
+        "ffn_depth_mix_live": 0.206561,
+        "qkv_input_fused": 0.153921,
+        "ffn_input_fused": 0.170680,
+        "input_fused_total": 0.325002,
+        "qkv_rank": 0.294683,
+        "ffn_rank": 0.125601,
+        "qkv_gain_forget_output_fused": 0.294602,
+        "ffn_gain_forget_output_fused": 0.133401,
+        "controller_total_excluding_live_depth_mix": 1.173050,
+        "input_preceding_gaps_sum": 0.205000,
+        "input_following_gaps_sum": 0.206641,
+        "input_local_span": 0.737524,
+        "main_stream_kernel_busy": 15.558896,
+        "traced_head_to_head": 41.393814
+      },
+      "input_busy_token_p10_p90_ms": [0.324201, 0.328872]
+    }
+  ],
+  "phase_identifiability": {
+    "bank_loading": "inside input_fused; no separate measurement",
+    "bank_rms_reduction": "inside input_fused; no separate measurement",
+    "query_dots": "inside input_fused; no separate measurement",
+    "message_softmax_and_mixing": "inside input_fused; no separate measurement",
+    "message_normalization": "inside input_fused; no separate measurement",
+    "current_normalization": "inside input_fused; no separate measurement",
+    "rank64": "separate dispatches per visit; identified above",
+    "gain_forget_projection": "inside output_fused; no separate measurement",
+    "apply_controller_output": "inside output_fused; no separate measurement",
+    "launch_overhead": "not identified from these CSVs; historical separate empty dependent-dispatch chain 2.70 us/dispatch (includes dispatch/kernel floor; not additive to same observed busy time)",
+    "occupancy": "not measured. Input launch metadata: 128 threads per workgroup, 120 allocated VGPR, 512-byte LDS, 0 private scratch; only 3 workgroups (12 wave32) QKV and 1 (4 wave32) FFN across the 40-CU GPU. This is grid-level underfill, not an achieved occupancy value. Do not use rocprofv3 --pmc on gfx1031."
+  },
+  "upper_bound": {
+    "strict_scope": "Conditional attribution for the message/input path with neighbors otherwise unchanged, not a proven ceiling on secondary system effects or fresh Tideglass performance. Existing kernels also do non-hoistable current RMS; realistic savings must subtract grouped preparation, current RMS scheduling and consumption overhead. Rank/output are excluded.",
+    "observed_median_input_kernel_busy_range_ms_per_token": [0.301605, 0.325002],
+    "observed_median_input_plus_both_neighbor_gaps_range_ms_per_token": [0.691287, 0.737524],
+    "isolated_stage_candidate_net_launch_savings_per_token": -2,
+    "ideal_fused_current_norm_candidate_net_launch_savings_per_token": 46,
+    "conversions": {
+      "formula": "If saving d ms out of baseline T=1000/r, new rate=1000/(T-d). Rounded examples use the upper end 0.325002 ms. Separate Bartowski Q4_0 untraced historical baselines; no candidate was run.",
+      "rates_by_context": [
+        {"context": 2048, "baseline_t_s": 51.325, "ideal_t_s": 52.196, "ideal_gain_pct": 1.696},
+        {"context": 4113, "baseline_t_s": 49.325, "ideal_t_s": 50.129, "ideal_gain_pct": 1.629},
+        {"context": 16384, "baseline_t_s": 47.990, "ideal_t_s": 48.750, "ideal_gain_pct": 1.584},
+        {"context": 65536, "baseline_t_s": 38.140, "ideal_t_s": 38.619, "ideal_gain_pct": 1.255}
+      ],
+      "unrealistic_traced_gap_credit_example": "0.737524 ms mapped to historical 51.325 t/s gives 53.344 t/s (+3.934%); includes all trace-inflated gaps on both sides, no replacement cost; not an untraced estimate."
+    }
+  },
+  "limitations": [
+    "Historical Bartowski Q4_0 final-trace directories referenced by docs do not exist on this host; these three raw traces are not same-model Tideglass evidence.",
+    "Historical 16K claude-dec3/tr-c16 predates this controller launch shape: analyzer rejects 47/47 candidate intervals instead of mixing non-comparable dispatches.",
+    "GPU not assigned to this Context Pack, so no new timings, occupancy or accuracy results were collected."
+  ]
+}

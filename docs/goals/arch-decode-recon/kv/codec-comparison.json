@@ -1,0 +1,23 @@
+{
+  "status": "FAIL",
+  "aggregate_saving_gate": 0.2,
+  "committed_rows": [2304, 16640, 65792],
+  "raw_full_context_payload_bytes": [40108032, 289669120, 1145307136],
+  "practical_projected_savings": {
+    "independent": [-0.018402, -0.006478, -0.005060],
+    "token_adjacent": [-0.006812, 0.002404, 0.001218],
+    "cross_from_pass1": [0.015070, 0.011341, 0.004491],
+    "cross_from_previous_pass": [0.026272, 0.021009, 0.009929],
+    "cross_adaptive": [0.026272, 0.021009, 0.009936],
+    "hybrid": [0.023213, 0.022900, 0.011879]
+  },
+  "best_practical_matched_mapped_savings_assuming_2MiB_grain": [0.0, 0.021583, 0.012797],
+  "optimistic_zstd9_sample_savings_excluding_index_and_append_costs": {
+    "independent": [0.064279, 0.062766, 0.062659],
+    "token_adjacent": [0.083216, 0.076889, 0.070882],
+    "cross_adaptive_anchors_raw": [0.076292, 0.061917, 0.046469],
+    "cross_adaptive_anchors_zstd": [0.108783, 0.093582, 0.078199],
+    "hybrid": [0.118134, 0.101757, 0.085007]
+  },
+  "byte_exact_head_tile_roundtrips": [4224, 4224, 4224]
+}

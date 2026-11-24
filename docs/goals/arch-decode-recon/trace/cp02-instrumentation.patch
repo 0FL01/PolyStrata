@@ -1,0 +1,633 @@
+diff --git a/src/poly/cpu_experts.cpp b/src/poly/cpu_experts.cpp
+index 9c4398fa..fab5ac63 100644
+--- a/src/poly/cpu_experts.cpp
++++ b/src/poly/cpu_experts.cpp
+@@ -5,6 +5,7 @@
+ #include "ggml-cpu.h"
+ 
+ #include <algorithm>
++#include <chrono>
+ #include <cmath>
+ #include <cstring>
+ #include <immintrin.h>
+@@ -139,10 +140,15 @@ bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::str
+     return true;
+ }
+ 
++uint64_t CpuExpertTiming::now_ns() {
++    return (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
++        std::chrono::steady_clock::now().time_since_epoch()).count();
++}
++
+ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, int gu_type, int u_type, int d_type,
+                   int n_embd, int n_ff, const float* x, float limit, bool gelu, float* out,
+                   const std::function<void()>* meanwhile, const uint8_t* late, const std::function<void(int)>* wait,
+-                  SiTU situ) {
++                  SiTU situ, CpuExpertTiming* timing) {
+     init_once();
+     const ggml_type_traits_cpu* tg = traits(gu_type);
+     const ggml_type_traits_cpu* tu = traits(u_type);
+@@ -198,6 +204,7 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
+     const int* orderp = order.data();
+     const int gu_tasks = (n_ff + kRowsPerTask - 1) / kRowsPerTask;
+     const int first = meanwhile ? 1 : 0;   // task 0, so it is taken at once
++    if (timing) timing->gate_begin = CpuExpertTiming::now_ns();
+     workers.run(first + n_run * gu_tasks, [&](int t) {
+         if (t < first) return (*meanwhile)();
+         t -= first;
+@@ -233,11 +240,13 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
+             }
+         }
+     });
++    if (timing) timing->gate_end = CpuExpertTiming::now_ns();
+     uint8_t* hqp = hq.data();
+     const auto hq_from = traits(td->vec_dot_type)->from_float;
+     workers.run(n, [&](int j) { hq_from(hp + (size_t) j * n_ff, hqp + (size_t) j * h_bytes, n_ff); });
+ 
+     const int d_tasks = (n_embd + kRowsPerDownTask - 1) / kRowsPerDownTask;
++    if (timing) timing->down_begin = CpuExpertTiming::now_ns();
+     workers.run(d_tasks, [&](int t) {
+         static thread_local std::vector<float> one;   // an output value of every use
+         one.resize((size_t) n);
+@@ -258,6 +267,7 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
+             }
+         }
+     });
++    if (timing) timing->down_end = CpuExpertTiming::now_ns();
+ }
+ 
+ }  // namespace strata::poly
+diff --git a/src/poly/cpu_experts.hpp b/src/poly/cpu_experts.hpp
+index 5372275d..83033463 100644
+--- a/src/poly/cpu_experts.hpp
++++ b/src/poly/cpu_experts.hpp
+@@ -61,6 +61,11 @@ struct SiTU {
+     float beta = 0.f, linear_beta = 0.f;  ///< zero beta selects the existing SwiGLU/GEGLU path
+ };
+ 
++struct CpuExpertTiming {
++    uint64_t gate_begin = 0, gate_end = 0, down_begin = 0, down_end = 0;
++    static uint64_t now_ns();
++};
++
+ /// Checks that ggml-cpu has a dot product for both types.  Call once per layer format at load.
+ bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::string& err);
+ 
+@@ -77,6 +82,6 @@ bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::str
+ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, int gu_type, int u_type, int d_type,
+                  int n_embd, int n_ff, const float* x, float limit, bool gelu, float* out,
+                  const std::function<void()>* meanwhile = nullptr, const uint8_t* late = nullptr,
+-                 const std::function<void(int)>* wait = nullptr, SiTU situ = {});
++                 const std::function<void(int)>* wait = nullptr, SiTU situ = {}, CpuExpertTiming* timing = nullptr);
+ 
+ }  // namespace strata::poly
+diff --git a/src/poly/engine.cpp b/src/poly/engine.cpp
+index 0b0a33ff..382797e1 100644
+--- a/src/poly/engine.cpp
++++ b/src/poly/engine.cpp
+@@ -31,6 +31,8 @@
+ #include <algorithm>
+ #include <atomic>
+ #include <bit>
++#include <cerrno>
++#include <charconv>
+ #include <chrono>
+ #include <cmath>
+ #include <cstdio>
+@@ -634,6 +636,160 @@ struct Engine::Swap {
+     int64_t gets = -1;             // the expert given `from` once it has arrived, or -1
+ };
+ 
++#if defined(STRATA_USE_HIP)
++// Research-only trace, single-row Inkling visits. SDK events are reused after a synchronization the engine already
++// makes. Only the inference thread writes to the trace; workers only enqueue the markers around cached experts.
++struct Engine::VisitTrace {
++    static constexpr int kVisits = 48, kLayers = 24, kExperts = 128, kTop = 8;
++    enum Kind : uint16_t { kVisit = 1, kCover, kShrink, kFollow, kAsk, kUploadComplete, kSlot, kShrinkSlot, kPending };
++    enum Probe { kBegin, kSharedDone, kGpuBegin, kGpuEnd, kCpuReady, kEnd, kProbes };
++    struct Header {
++        char magic[8] = {'P','S','V','S','T','1','\r','\n'};
++        uint64_t first = 0, end = INT64_MAX, epoch_ns = 0;
++        uint32_t layers = kLayers, visits = kVisits, experts = kExperts, top = kTop;
++    };
++    struct Prefix { uint16_t kind, size; uint32_t reserved = 0; };
++    struct Visit {
++        Prefix prefix{kVisit, 288};
++        uint64_t pos = 0, serial = 0, host_begin = 0, host_end = 0;
++        uint64_t router_wait = 0, route_ready = 0, cpu_begin = 0, cpu_ready = 0;
++        CpuExpertTiming cpu;
++        uint64_t resident[2] = {}, asked[2] = {}, sent[2] = {};
++        int64_t slot[kTop] = {};
++        uint32_t weight[kTop] = {};
++        float gpu_visit_ms = 0, gpu_experts_ms = 0, gpu_join_ms = 0, gpu_dispatch_ms = 0;
++        uint16_t total_asked = 0, total_sent = 0;
++        uint8_t ids[kTop] = {}, placement[kTop] = {};  // 0 = CPU, 1 = GPU, 2 = skipped
++        uint8_t visit = 0, layer = 0;
++        int8_t pass = -1;
++        uint8_t flags = 0;   // bit 0: a window(), not eval(); bit 1: placement frozen
++    };
++    struct Event {
++        Prefix prefix;
++        uint64_t host_ns, pos;
++        int64_t a, b, c, d, e;
++    };
++    static_assert(std::endian::native == std::endian::little);
++    static_assert(sizeof(Header) == 48 && sizeof(Visit) == 288 && sizeof(Event) == 64);
++
++    Header header;
++    std::FILE* file = nullptr;
++    Visit rows[kVisits];
++    cudaEvent_t timing[kVisits][kProbes] = {};
++    int index = -1;
++    uint64_t serial = 0;
++    bool ready = false;
++
++    ~VisitTrace() {
++        for (auto& visit : timing) for (cudaEvent_t event : visit) if (event) (void) cudaEventDestroy(event);
++        if (file && std::fclose(file) != 0) std::fputs("strata-poly: visit trace close failed\n", stderr);
++    }
++
++    static uint64_t bound(const char* name, uint64_t fallback) {
++        const char* s = std::getenv(name);
++        if (!s) return fallback;
++        uint64_t v = 0;
++        const char* end = s + std::strlen(s);
++        const auto r = std::from_chars(s, end, v);
++        if (r.ec != std::errc{} || r.ptr != end || v > INT64_MAX)
++            throw std::runtime_error(std::string(name) + ": expected a nonnegative token position");
++        return v;
++    }
++
++    bool includes(int64_t pos) const { return (uint64_t) pos >= header.first && (uint64_t) pos < header.end; }
++    Visit* active() { return index >= 0 ? &rows[index] : nullptr; }
++    void write(const void* data, size_t bytes) {
++        if (std::fwrite(data, 1, bytes, file) != bytes) throw std::runtime_error("writing Inkling visit trace");
++    }
++    void event(Kind kind, int64_t pos, int64_t a, int64_t b, int64_t c, int64_t d, int64_t e) {
++        if (!includes(pos)) return;
++        const Event v{{kind, sizeof(Event)}, CpuExpertTiming::now_ns(), (uint64_t) pos, a, b, c, d, e};
++        write(&v, sizeof(v));
++    }
++    void mark(Probe probe, void* stream) {
++        // kGpuBegin/kGpuEnd can run in Workers::run's non-throwing meanwhile task. Propagate a failure on the
++        // inference thread after that task joins, not from inside a worker.
++        const cudaError_t err = cudaEventRecord(timing[index][probe], cs(stream));
++        if (probe == kGpuBegin || probe == kGpuEnd) {
++            if (err != cudaSuccess) marker_error = err;
++        } else {
++            ck(err, "Inkling visit trace marker");
++        }
++    }
++    cudaError_t marker_error = cudaSuccess;
++
++    float elapsed(int v, Probe begin, Probe end) const {
++        float ms = 0;
++        ck(cudaEventElapsedTime(&ms, timing[v][begin], timing[v][end]), "Inkling visit trace timing");
++        return ms;
++    }
++};
++
++bool Engine::trace_token_begin(int n) {
++    VisitTrace& t = *visit_trace_;
++    if (n != 1 || block_pass_ || !t.includes(pos_)) return false;
++    if (!t.timing[0][0]) {
++        for (auto& visit : t.timing) for (auto& event : visit)
++            ck(cudaEventCreateWithFlags(&event, hipEventDefault), "Inkling visit trace events");
++        for (int il = 0; il < n_layer_; ++il) {
++            const Layer& L = layers_[(size_t) il];
++            for (int e = 0; e < n_expert_; ++e)
++                if (const uint8_t* slot = L.slot[(size_t) e])
++                    t.event(VisitTrace::kSlot, pos_, il, e, slot - exp_, L.slot_bytes, L.trade);
++        }
++        for (int j = 0; j < n_swap_; ++j) {
++            Swap& s = swap_[(size_t) j];
++            const int status = s.at.load();
++            if (status != Swap::kFree) t.event(VisitTrace::kPending, pos_, s.il, s.e, j, status, s.slot - exp_);
++        }
++    }
++    ++t.serial;
++    return true;
++}
++
++void Engine::trace_visit_begin(int visit, int il, int pass) {
++    auto& t = *visit_trace_;
++    t.index = visit;
++    t.marker_error = cudaSuccess;
++    auto& v = t.rows[visit];
++    v = {};
++    v.pos = (uint64_t) pos_;
++    v.serial = t.serial;
++    v.visit = (uint8_t) visit;
++    v.layer = (uint8_t) il;
++    v.pass = (int8_t) pass;
++    v.flags = (windowed_ ? 1 : 0) | (freeze_experts_ ? 2 : 0);
++    v.host_begin = CpuExpertTiming::now_ns();
++    t.mark(VisitTrace::kBegin, st_);
++}
++
++void Engine::trace_visit_end() {
++    auto& t = *visit_trace_;
++    t.mark(VisitTrace::kEnd, st_);
++    t.active()->host_end = CpuExpertTiming::now_ns();
++    t.ready = t.index == VisitTrace::kVisits - 1;
++    t.index = -1;
++}
++
++void Engine::trace_visits_flush() {
++    auto& t = *visit_trace_;
++    t.index = -1;
++    if (!std::exchange(t.ready, false)) return;
++    for (int i = 0; i < VisitTrace::kVisits; ++i) {
++        auto& v = t.rows[i];
++        v.gpu_visit_ms = t.elapsed(i, VisitTrace::kBegin, VisitTrace::kEnd);
++        const bool gpu = std::find(std::begin(v.placement), std::end(v.placement), 1) != std::end(v.placement);
++        const auto done = gpu ? VisitTrace::kGpuEnd : VisitTrace::kSharedDone;
++        if (gpu) {
++            v.gpu_experts_ms = t.elapsed(i, VisitTrace::kGpuBegin, done);
++            v.gpu_dispatch_ms = t.elapsed(i, VisitTrace::kSharedDone, VisitTrace::kGpuBegin);
++        }
++        if (v.cpu_ready) v.gpu_join_ms = t.elapsed(i, done, VisitTrace::kCpuReady);
++    }
++    t.write(t.rows, sizeof(t.rows));
++}
++#endif
++
+ Engine::Engine() = default;
+ 
+ Engine::~Engine() {
+@@ -659,6 +815,13 @@ Engine::~Engine() {
+     if (up_) cudaStreamSynchronize(cs(up_));
+     if (rs_) cudaStreamSynchronize(cs(rs_));
+     if (st_) cudaStreamSynchronize(cs(st_));
++#if defined(STRATA_USE_HIP)
++    if (visit_trace_) {
++        try { trace_visits_flush(); }
++        catch (const std::exception& e) { std::fprintf(stderr, "strata-poly: %s\n", e.what()); }
++        visit_trace_.reset();
++    }
++#endif
+     for (const auto& span : registered_) cudaHostUnregister((void*) span.first);   // no copy reads them now
+     workers_.reset();
+     mmq_.reset();
+@@ -1316,7 +1479,12 @@ void Engine::cover(int64_t end) {
+     }
+ #endif
+     kv_reach_ = std::max(kv_reach_, end);
+-    if (kv_.empty() || end <= kv_rows_) return;
++    if (kv_.empty() || end <= kv_rows_) {
++#if defined(STRATA_USE_HIP)
++        if (visit_trace_) visit_trace_->event(VisitTrace::kCover, pos_, end, kv_rows_, kv_rows_, 0, 0);
++#endif
++        return;
++    }
+     const int64_t rows = kv_rows_for(end);
+     const auto size = [rows](const Kv& k) { return (size_t) ((rows + k.per - 1) / k.per) * k.bytes; };
+     size_t more = 0, held = arena_.mapped + other_rows();
+@@ -1341,6 +1509,9 @@ void Engine::cover(int64_t end) {
+     // in pieces of kKvGrow rows, so that trim_card_kv() can give back what a long read mapped in one go
+     for (Kv& k : kv_)
+         vmm_map(k, size(k), (size_t) ((kKvGrow + k.per - 1) / k.per) * k.bytes, "the attention cache");
++#if defined(STRATA_USE_HIP)
++    if (visit_trace_) visit_trace_->event(VisitTrace::kCover, pos_, end, kv_rows_, rows, more, 1);
++#endif
+     kv_rows_ = rows;
+ }
+ 
+@@ -1425,6 +1596,9 @@ void Engine::shrink_cache(size_t bytes) {
+     // another program takes VRAM), which is exactly the change the freeze is there to keep out.  A frozen
+     // answer's cache is the one its first token saw; the request after it may size it again.
+     if (freeze_experts_) return;
++#if defined(STRATA_USE_HIP)
++    const size_t mapped_before = arena_.mapped;
++#endif
+     size_t cut = arena_.mapped;
+     for (size_t i = arena_.pieces.size(); i > 0 && arena_.mapped - cut < bytes; --i) cut -= arena_.pieces[i - 1].second;
+     settle_swaps();
+@@ -1444,6 +1618,9 @@ void Engine::shrink_cache(size_t bytes) {
+         return a.recent != b.recent ? a.recent > b.recent : a.prior > b.prior;
+     };
+     std::vector<Held> past;
++#if defined(STRATA_USE_HIP)
++    const int cached_before = cached_;
++#endif
+     std::vector<std::vector<Held>> low((size_t) n_trade_);   // the cached ones before the cut, by slot size
+     for (int il = 0; il < (int) layers_.size(); ++il) {
+         const Layer& L = layers_[(size_t) il];
+@@ -1468,9 +1645,16 @@ void Engine::shrink_cache(size_t bytes) {
+             ck(cudaMemcpyAsync(to, from, L.slot_bytes, cudaMemcpyDeviceToDevice, cs(st_)), "the expert cache");
+             from = to;
+             to = nullptr;
++#if defined(STRATA_USE_HIP)
++            if (visit_trace_)
++                visit_trace_->event(VisitTrace::kShrinkSlot, pos_, x.il, x.e, l[k].il, l[k].e, from - exp_);
++#endif
+             ++k;
+         } else {
+             from = nullptr;
++#if defined(STRATA_USE_HIP)
++            if (visit_trace_) visit_trace_->event(VisitTrace::kShrinkSlot, pos_, x.il, x.e, -1, -1, -1);
++#endif
+         }
+         --cached_;
+     }
+@@ -1479,6 +1663,10 @@ void Engine::shrink_cache(size_t bytes) {
+     if (cut > kTail) zero_vram(exp_ + end, kTail);
+     exp_at_ = std::min(exp_at_, end);
+     staged_il_ = -1;
++#if defined(STRATA_USE_HIP)
++    if (visit_trace_)
++        visit_trace_->event(VisitTrace::kShrink, pos_, bytes, cached_before, cached_, mapped_before, arena_.mapped);
++#endif
+ }
+ 
+ float* Engine::fbuf(size_t n) {
+@@ -2490,6 +2678,9 @@ void Engine::follow(int written) {
+     // frozen answer sees a cache that never changes, which makes it a function of the request alone.  The
+     // uploads themselves go on: the followers fill their slots, and unfreeze_experts() lets the next request's
+     // first token claim them.
++#if defined(STRATA_USE_HIP)
++    if (visit_trace_) visit_trace_->event(VisitTrace::kFollow, pos_, written, n_swap_, cached_, freeze_experts_, exp_at_);
++#endif
+     if (freeze_experts_) return;
+     const size_t ne = (size_t) n_expert_;
+     int n_free = 0;
+@@ -2500,6 +2691,10 @@ void Engine::follow(int written) {
+             if (arrived == cudaErrorNotReady) continue;
+             ck(arrived, "expert upload");
+             layers_[(size_t) s.il].slot[(size_t) s.e] = s.slot;
++#if defined(STRATA_USE_HIP)
++            if (visit_trace_)
++                visit_trace_->event(VisitTrace::kUploadComplete, pos_, s.il, s.e, s.adds, j, s.slot - exp_);
++#endif
+             coming_[(size_t) s.il * ne + (size_t) s.e] = 0;
+             if (s.from >= 0) {   // the card has it now: its pool_ slot is free for another
+                 const size_t v = (size_t) s.from;
+@@ -2554,6 +2749,9 @@ void Engine::follow(int written) {
+         from_pool(s);
+         s.mapped = !pool_ || kept_[(size_t) s.il * ne + (size_t) s.e];
+         s.takes = -1;
++#if defined(STRATA_USE_HIP)
++        if (visit_trace_) visit_trace_->event(VisitTrace::kAsk, pos_, s.il, s.e, -1, -1, s.slot - exp_);
++#endif
+         s.at.store(Swap::kAsked);
+         asked = true;
+         --n_free;
+@@ -2648,6 +2846,9 @@ void Engine::follow(int written) {
+             kept_[xo] = 1;
+             s->takes = (int64_t) xo;
+         }
++#if defined(STRATA_USE_HIP)
++        if (visit_trace_) visit_trace_->event(VisitTrace::kAsk, pos_, in.il, in.e, out.il, out.e, s->slot - exp_);
++#endif
+         s->at.store(Swap::kAsked);
+         asked = true;
+     }
+@@ -3067,6 +3268,25 @@ void Engine::load(const Options& o) {
+             if (!direct.empty()) register_outside(direct);
+         });
+     }
++#if defined(STRATA_USE_HIP)
++    const char* path = looped_ ? std::getenv("STRATA_INKLING_VISIT_TRACE") : nullptr;
++    if (looped_ && !path) path = std::getenv("STRATA_VISIT_TRACE");   // CP-01 private runner
++    if (path && *path) {
++        auto t = std::make_unique<VisitTrace>();
++        if (split_ || opt_.batch || n_layer_ != VisitTrace::kLayers || n_expert_ != VisitTrace::kExperts ||
++            n_used_ != VisitTrace::kTop || n_moe_ != n_layer_ || n_swap_ > UINT16_MAX)
++            throw std::runtime_error("Inkling visit trace requires single-sequence, 24-layer, 128-expert, top-8 Inkling");
++        t->header.first = VisitTrace::bound("STRATA_INKLING_VISIT_TRACE_FIRST", 0);
++        t->header.end = VisitTrace::bound("STRATA_INKLING_VISIT_TRACE_END", INT64_MAX);
++        if (t->header.first >= t->header.end) throw std::runtime_error("Inkling visit trace FIRST must be below END");
++        t->header.epoch_ns = CpuExpertTiming::now_ns();
++        t->file = std::fopen(path, "wbx");
++        if (!t->file)
++            throw std::runtime_error(std::string("cannot create Inkling visit trace: ") + path + ": " + std::strerror(errno));
++        t->write(&t->header, sizeof(t->header));
++        visit_trace_ = std::move(t);
++    }
++#endif
+ }
+ 
+ void Engine::load_drafter() {
+@@ -4182,6 +4402,13 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
+     Clock::time_point t0 = Clock::now();
+     ck(cudaEventSynchronize((cudaEvent_t) ev_), "router");
+     stats_.route_wait_ms += ms_since(t0);
++#if defined(STRATA_USE_HIP)
++    auto* trace = visit_trace_ ? visit_trace_->active() : nullptr;
++    if (trace) {
++        trace->router_wait = CpuExpertTiming::now_ns() -
++            (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(t0.time_since_epoch()).count();
++    }
++#endif
+     if (block_pass_) route_block(il, h_rl_, n);
+     if (pool_ && prompt_rows_ >= 4096 && !block_pass_) {
+         rekeep();
+@@ -4227,6 +4454,31 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
+                 for (int k = 0; k < n_used_; ++k) sum += w[k] = std::exp(scores[ids[k]] - mx);
+                 for (int k = 0; k < n_used_; ++k) w[k] /= sum;
+             }
++#if defined(STRATA_USE_HIP)
++            if (trace) {
++                trace->route_ready = CpuExpertTiming::now_ns();
++                for (int e = 0; e < n_expert_; ++e)
++                    if (L.slot[(size_t) e]) trace->resident[e / 64] |= uint64_t{1} << (e % 64);
++                for (int j = 0; j < n_swap_; ++j) {
++                    const Swap& s = swap_[(size_t) j];
++                    const int status = s.at.load();   // the follower can advance asked -> sent, never claim residency
++                    if (status == Swap::kAsked) {
++                        ++trace->total_asked;
++                        if (s.il == il) trace->asked[s.e / 64] |= uint64_t{1} << (s.e % 64);
++                    } else if (status == Swap::kSent) {
++                        ++trace->total_sent;
++                        if (s.il == il) trace->sent[s.e / 64] |= uint64_t{1} << (s.e % 64);
++                    }
++                }
++                for (int k = 0; k < n_used_; ++k) {
++                    const uint8_t* slot = L.slot[(size_t) ids[k]];
++                    trace->ids[k] = (uint8_t) ids[k];
++                    trace->weight[k] = std::bit_cast<uint32_t>(w[k]);
++                    trace->slot[k] = slot ? slot - exp_ : -1;
++                    trace->placement[k] = slot ? 1 : 0;
++                }
++            }
++#endif
+             float w_all = 0.f;
+             for (int k = 0; k < n_used_; ++k) w_all += w[k];
+             for (int k = 0; k < n_used_; ++k) {
+@@ -4261,8 +4513,12 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
+             for (int i = 0; i < n_host; ++i) {
+                 bool low = true;
+                 for (int j = 0; j < n_host && low; ++j) low = host_e[j] != host_e[i] || host_rel[j] < opt_.skip_weight;
+-                if (low) ++stats_.tail_experts;
+-                else host[kept++] = host[i];
++                if (low) {
++                    ++stats_.tail_experts;
++#if defined(STRATA_USE_HIP)
++                    if (trace) trace->placement[host_k[i]] = 2;
++#endif
++                } else host[kept++] = host[i];
+             }
+             n_host = kept;
+         } else if (opt_.tail_skip > 0) {
+@@ -4270,8 +4526,12 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
+             for (int i = 0; i < n_host; ++i) {
+                 bool low = true;
+                 for (int j = 0; j < n_host && low; ++j) low = host_e[j] != host_e[i] || host_k[j] >= opt_.tail_skip;
+-                if (low) ++stats_.tail_experts;
+-                else host[kept++] = host[i];
++                if (low) {
++                    ++stats_.tail_experts;
++#if defined(STRATA_USE_HIP)
++                    if (trace) trace->placement[host_k[i]] = 2;
++#endif
++                } else host[kept++] = host[i];
+             }
+             n_host = kept;
+         }
+@@ -4296,6 +4556,9 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
+             const int most = kernels::native_mmvq_slots_wide() ? kSlots : 8;
+             const int per = rows_ >= most ? most : rows_ >= 8 ? 8 : 1;
+             ScaledRows sum{};
++#if defined(STRATA_USE_HIP)
++            if (trace && n_cached) visit_trace_->mark(VisitTrace::kGpuBegin, st_);
++#endif
+             for (int i0 = 0; i0 < n_cached; i0 += per) {
+                 const int m = std::min(per, n_cached - i0);
+                 kernels::MmvqSlots gate_up{}, up{}, down{};
+@@ -4360,6 +4623,9 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
+                         add_scaled(sum, k + 1, n_embd_, st_);
+                 }
+             }
++#if defined(STRATA_USE_HIP)
++            if (trace && n_cached) visit_trace_->mark(VisitTrace::kGpuEnd, st_);
++#endif
+ #if defined(STRATA_GPU_METAL)
+             if (opt_.metal_optimize && n_host > 0)
+                 ck(gpu::metal::submit(static_cast<gpu::Stream>(st_)), "submitting cached experts");
+@@ -4407,11 +4673,23 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
+                 if (!pool_help()) std::this_thread::yield();
+             }
+         };
++#if defined(STRATA_USE_HIP)
++        if (trace) trace->cpu_begin = CpuExpertTiming::now_ns();
++        CpuExpertTiming* timing = trace ? &trace->cpu : nullptr;
++#else
++        CpuExpertTiming* timing = nullptr;
++#endif
+         cpu_experts(*workers_, host, n_host, m, (int) L.gu_type, (int) L.u_type, (int) L.d_type, n_embd_, n_ff_exp_,
+-                    h_x_ + (size_t) at * e_row, limit, gelu_, cpu, meanwhile, any_late ? late : nullptr, &wait, situ_);
++                    h_x_ + (size_t) at * e_row, limit, gelu_, cpu, meanwhile, any_late ? late : nullptr, &wait, situ_, timing);
++#if defined(STRATA_USE_HIP)
++        if (trace) trace->cpu_ready = CpuExpertTiming::now_ns();
++#endif
+         pool_reads_.clear();
+         stats_.cpu_ms += ms_since(t0);
+     }
++#if defined(STRATA_USE_HIP)
++    if (trace) ck(visit_trace_->marker_error, "Inkling visit trace expert marker");
++#endif
+     return any_host;
+ }
+ 
+@@ -5037,6 +5315,9 @@ void Engine::run(const int32_t* tokens, int n) {
+ 
+     // h_r_ and h_cpu_ may still be the source of the previous call's copies
+     ck(cudaStreamSynchronize(cs(st_)), "eval");
++#if defined(STRATA_USE_HIP)
++    if (visit_trace_) trace_visits_flush();
++#endif
+     // Greedy answers have to be a function of the request alone: which experts take the GPU path and which the
+     // CPU one decides a layer's sums to the last bit (the two paths add in different orders), so the cache's
+     // state at the first layer may not depend on whether an upload happened to have finished.  Every expert on
+@@ -5627,7 +5908,12 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
+         } else {
+             tail();
+         }
+-        if (want_logits) ck(cudaStreamSynchronize(cs(st_)), "eval");
++        if (want_logits) {
++            ck(cudaStreamSynchronize(cs(st_)), "eval");
++#if defined(STRATA_USE_HIP)
++            if (visit_trace_) trace_visits_flush();
++#endif
++        }
+     }
+     // behind the logits: the caller has them while the card does this
+     if (draft_) draft_rows(tokens, ahead_pos_ == pos_ && tokens[0] == ahead_tok_ ? 1 : 0, n);
+@@ -5645,7 +5931,16 @@ void Engine::layer(int il, int n) {
+     } else {
+         ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
+         moe_shared(L, il, n);
+-        if (moe(L, il, n)) moe_add(n);
++#if defined(STRATA_USE_HIP)
++        const bool trace = visit_trace_ && visit_trace_->active();
++        if (trace) visit_trace_->mark(VisitTrace::kSharedDone, st_);
++#endif
++        if (moe(L, il, n)) {
++#if defined(STRATA_USE_HIP)
++            if (trace) visit_trace_->mark(VisitTrace::kCpuReady, st_);
++#endif
++            moe_add(n);
++        }
+     }
+     layer_tail(L, il, n);
+ }
+@@ -5911,6 +6206,9 @@ void Engine::window(const int32_t* tokens, int t) {
+     ck(cudaMemcpyAsync(h_wlogits_, wlogits_, (size_t) t * n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
+        "logits");
+     ck(cudaStreamSynchronize(cs(st_)), "window");
++#if defined(STRATA_USE_HIP)
++    if (visit_trace_) trace_visits_flush();
++#endif
+     if (timed && !recorded_ && !freeze_experts_) took_way(t, ms_since(t0));
+     recorded_ = recorded_ || recorded;
+     win_ = t;
+diff --git a/src/poly/engine.hpp b/src/poly/engine.hpp
+index c942c4bd..0c6ca8cd 100644
+--- a/src/poly/engine.hpp
++++ b/src/poly/engine.hpp
+@@ -472,6 +472,14 @@ protected:
+     virtual void layer_tail(Layer& L, int il, int n) = 0;
+     /// The looped model visits a physical layer more than once, and keeps token state between those visits.
+     virtual void run_visits(int n) { (void) n; }
++#if defined(STRATA_USE_HIP)
++    struct VisitTrace;
++    std::unique_ptr<VisitTrace> visit_trace_;
++    bool trace_token_begin(int n);
++    void trace_visit_begin(int visit, int il, int pass);
++    void trace_visit_end();
++    void trace_visits_flush();
++#endif
+     /// The model's output for `rows` tokens from row `first` of the call, normed: what the output matrix takes.
+     virtual void output_rows(int first, int rows, float* h) = 0;
+     /// A token's experts and their weights from its scores at layer il's router.  `token` is the token the row is
+diff --git a/src/poly/inkling2.cu b/src/poly/inkling2.cu
+index 09bc907a..a66f4825 100644
+--- a/src/poly/inkling2.cu
++++ b/src/poly/inkling2.cu
+@@ -1303,7 +1303,14 @@ void Inkling2::run_visits(int n) {
+         ~Lanes() { kernels::iq_set_slot_lanes(false); }
+     } lanes;
+     depth_n_ = 0;
++#if defined(STRATA_USE_HIP)
++    const bool trace = visit_trace_ && trace_token_begin(n);
++#endif
+     for (visit_ = 0; visit_ < kVisits; ++visit_) {
++        const int il = physical(visit_);
++#if defined(STRATA_USE_HIP)
++        if (trace) trace_visit_begin(visit_, il, visit_ >= kStart && visit_ < kCoda ? (visit_ - kStart) / kCore : -1);
++#endif
+         if (visit_ == kStart) axpy(r_, 1.f, prelude_, n * kWidth, false, st_);
+         if (visit_ == kStart + kCore || visit_ == kStart + 2 * kCore) {
+             // The old partial and the one just before it are the previous pass's two core blocks.
+@@ -1318,7 +1325,10 @@ void Inkling2::run_visits(int n) {
+                     ck(cudaMemcpyAsync(ds_taps_ + (size_t) j * rows_ * kWidth, r_, (size_t) n * kWidth * sizeof(float),
+                                        cudaMemcpyDeviceToDevice, cs(st_)),
+                        "DSpark taps");
+-        layer(physical(visit_), n);
++        layer(il, n);
++#if defined(STRATA_USE_HIP)
++        if (trace) trace_visit_end();
++#endif
+     }
+ }
+ 
