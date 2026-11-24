@@ -16,6 +16,25 @@ using one Radeon GPU. Frequently used expert weights stay in VRAM; the CPU runs 
 
 ## Inkling-2-Mini performance
 
+**Current RDNA2 baseline: Bartowski's `Q4_0` on engine `6d7e00d3`.** Medians of three interleaved, untraced
+runs per model on an RX 6700 XT (`gfx1031`), Ryzen 7 5700X, and 32 GiB RAM. Each model read the same prompt
+and decoded the same forced continuation (2,048 + 256 or 16,384 + 128 tokens), with Q8_0 KV, the 2 GiB
+VRAM reserve, and the settings below. Each run started from a copy of the same expert profile; no DSpark.
+
+| GGUF | Size (GiB) | 2K prefill | 2K decode | 16K prefill | 16K decode |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| **Q4_0** | 14.03 | **702.0** | **43.67** | **922.7** | **41.35** |
+| Q4_1 | 15.45 | 541.7 | 41.88 | 888.3 | 39.12 |
+| UD-IQ4_XS | 14.65 | 655.2 | 40.44 | 919.1 | 38.51 |
+
+All rates are in tokens/s. Q4_0's decode runs ranged from 39.18 to 45.04 tokens/s at 2K and 38.48 to 42.42 at
+16K. On a separate 64-token CPU check, Q4_0 had higher perplexity than Q4_1 (5.44 vs. 5.01); that sample is
+too small to rank general answer quality. Compare future engine changes against **the same Q4_0 file**, not
+the historical UD-IQ4_XS numbers below. The Q4_0 file's SHA-256 is
+`e8a583198523fe1119120061ed68fc3ce14dd1052ef53815014c867b307b9e37`.
+
+### Earlier UD-IQ4_XS measurements
+
 **About 992 tokens/s reading a fresh 2K prompt and 46–50 tokens/s writing in short agent requests.**
 Measured separately on an **RX 6700 XT (12 GiB, `gfx1031`)** with a Ryzen 7 5700X, 32 GiB of RAM, TheRock HIP 7.13,
 and Unsloth's `UD-IQ4_XS` GGUF. Both benchmarks used Q8_0 KV and no DSpark drafter.
@@ -46,8 +65,9 @@ was left off.
 ## Run Inkling-2-Mini
 
 Inkling is not in the interactive installer yet. On Linux, set up the [HIP build prerequisites](docs/AMD_HIP.md#build)
-and [download Unsloth's `UD-IQ4_XS` GGUF weights](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF/resolve/45fd08764f2b0bf16b03a5483a80e5c7aaec8772/Inkling-2-Mini-UD-IQ4_XS.gguf?download=true)
-(14.7 GiB). This example targets the tested RX 6700 XT (`gfx1031`).
+and [download Bartowski's `Q4_0` GGUF weights](https://huggingface.co/bartowski/Inkling-2-Mini-GGUF/resolve/ad66863fd3b7f3236c0b7a0862412c9e00f78a6e/Inkling-2-Mini-Q4_0.gguf?download=true)
+(14.03 GiB). This example targets the tested RX 6700 XT (`gfx1031`). `Q4_1` and the older `UD-IQ4_XS` layout
+remain supported.
 
 <details>
 <summary>Build and run on the RX 6700 XT</summary>
@@ -59,7 +79,7 @@ python -m pip install -r requirements.txt
 cmake -S . -B build-inkling -DCMAKE_BUILD_TYPE=Release \
   -DSTRATA_ENABLE_HIP=ON -DSTRATA_ENABLE_CUDA=OFF -DCMAKE_HIP_ARCHITECTURES=gfx1031
 cmake --build build-inkling --target strata-poly -j4
-python tools/strata_tokenizer.py --gguf /path/to/Inkling-2-Mini-UD-IQ4_XS.gguf --out packs/inkling2
+python tools/strata_tokenizer.py --gguf /path/to/Inkling-2-Mini-Q4_0.gguf --out packs/inkling2
 ```
 
 Save this as `strata-inkling-2-mini.json` in the repository root, using the same GGUF path as above.
@@ -72,22 +92,27 @@ The `env` block includes the speed options used in the measurements; they are no
   "backend": "hip",
   "model_name": "inkling-2-mini",
   "tokenizer": "packs/inkling2/tokenizer",
-  "args": ["--model", "/path/to/Inkling-2-Mini-UD-IQ4_XS.gguf",
+  "args": ["--model", "/path/to/Inkling-2-Mini-Q4_0.gguf",
            "--max-context", "200000", "--kv", "q8_0", "--prompt-batch", "2048",
            "--vram-reserve-mib", "2048", "--threads", "8", "--expert-swaps", "64",
            "--conversation-cache-mib", "0"],
   "env": {
     "DEBUG_HIP_DYNAMIC_QUEUES": "0",
-    "STRATA_HIP_NVFP4_MMQ": "1",
     "STRATA_INKLING_FLASH": "1",
     "STRATA_POLY_DIRECT_STAGE": "1",
     "STRATA_INKLING_DECODE": "1",
     "STRATA_INKLING_PREFETCH": "1",
-    "STRATA_HIP_NVFP4_TAIL": "1",
     "STRATA_INKLING_BATCH_KV_RELEASE": "1",
     "STRATA_HIP_SMALL_GEMM_2X2": "1",
     "STRATA_INKLING_LANE_PROB": "1",
-    "STRATA_INKLING_STATE_PACK": "1"
+    "STRATA_INKLING_STATE_PACK": "1",
+    "STRATA_INKLING_NORM_Q8": "1",
+    "STRATA_INKLING_TAIL_MOE": "1",
+    "STRATA_INKLING_ROUTE_DUAL": "1",
+    "STRATA_INKLING_FLASH_LEAN": "1",
+    "STRATA_INKLING_FLASH_H2": "1",
+    "STRATA_INKLING_KCOPY": "1",
+    "STRATA_INKLING_DECODE_CHUNKS": "160"
   }
 }
 ```
@@ -100,6 +125,8 @@ python -m serve.server --engine strata --config strata-inkling-2-mini.json --hos
 
 Open the web chat at `http://127.0.0.1:8080` or use `http://127.0.0.1:8080/v1` as the OpenAI-compatible base
 URL for your app. Keep the server on loopback unless you set an API key.
+If you switch GGUFs, keep separate expert profiles and disk session directories.
+A snapshot saved with a different weights file cannot be restored on Q4_0.
 
 ## Other models
 
@@ -418,7 +445,8 @@ Each model's diagram and how it works: [docs/HOW_IT_WORKS_MODELS.md](docs/HOW_IT
 
 ## Credits and license
 
-Inkling-2-Mini is by Thinking Machines Lab; the GGUF above is quantized by Unsloth.
+Inkling-2-Mini is by Thinking Machines Lab. The Q4_0 and Q4_1 GGUFs above are by Bartowski; the
+UD-IQ4_XS GGUF from the earlier measurements is by Unsloth.
 Qwen3.8-Flash-Next is by the [Qwen team](https://huggingface.co/Qwen/Qwen3.8-Flash-Next). It was compressed by
 [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF), UkisAI (Swift 1.5) and Unsloth.
 GLM 5.3 Flash runs from the files of

@@ -28,7 +28,7 @@ To serve images, add a `vision` section to the Inkling `strata-poly` run config 
 ```json
 "vision": {
   "exe": "/path/to/the/inkling-build/bin/strata-vision",
-  "model": "/path/to/Inkling-2-Mini-Q4_1.gguf",
+  "model": "/path/to/Inkling-2-Mini-Q4_0.gguf",
   "mmproj": "/path/to/Inkling-2-Mini/mmproj-F16.gguf",
   "gpu": false,
   "elastic": false,
