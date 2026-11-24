@@ -72,6 +72,7 @@ private:
     bool loop_layout_ = false;  // inkling2_loop stores physical-layer geometry and per-layer control queries
     bool flash_ = false;    // STRATA_INKLING_FLASH=1 (load_geometry())
     bool decode_ = false;   // STRATA_INKLING_DECODE=1 (load_geometry())
+    bool ds_attend_group_ = false;   // STRATA_INKLING_DSPARK_TARGET_GROUP=1: long verifier attention on gfx1031
     bool dense_q4_0_ = false;  // STRATA_INKLING_Q4_0_DENSE=1: group one-token Q4_0 projections on gfx1031
     bool norm_q8_ = false;  // STRATA_INKLING_NORM_Q8=1 (load_geometry()): a visit's stream norms and Q8_1 together
     bool moe_tail_ = false; // STRATA_INKLING_TAIL_MOE=1 (load_geometry()): a fused visit's expert sum in the tail

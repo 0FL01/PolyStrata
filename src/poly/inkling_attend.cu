@@ -606,12 +606,16 @@ template <bool Q8> __global__ void decode_kernel(const float* q, const float* re
 // whole; decode_kernel read a key a thread, 1,024 bytes apart across the threads. The eight lanes add their parts of
 // the 3 heads' scores and relative terms by shuffles; each group of eight lanes keeps its own running
 // maximum, sum and values, and the four groups of a wave fold together at the end. Same output as decode_kernel
-// (decode_combine_kernel reads it), other sums.
+// (decode_combine_kernel reads it), other sums. For a long verifier window the four-wave launch schedules every
+// row's work for the same chunk next to one another. It writes the same partials in the same layout.
 constexpr int kAttWaves = kKv, kAttThreads = 32 * kAttWaves, kAttUnroll = 2;
-__global__ void __launch_bounds__(kAttThreads, 2)
+template <int Waves = kAttWaves>
+__global__ void __launch_bounds__(32 * Waves, 2)
 decode_q8_kernel(const float* q, const float* rel, const float* table, KvView k, KvView v, int64_t pos, int window,
                  int ring, int chunk, float* part) {
-    const int c = blockIdx.x, row = blockIdx.y, g = threadIdx.x / 32, lane = threadIdx.x & 31;
+    constexpr bool grouped = Waves != kAttWaves;
+    const int c = grouped ? blockIdx.z : blockIdx.x, row = blockIdx.y;
+    const int g = (grouped ? Waves * blockIdx.x : 0) + threadIdx.x / 32, lane = threadIdx.x & 31;
     const int sub = lane & 7, quad = lane >> 3;   // the 16 dimensions of the lane, and which of four keys
     const int64_t end = pos + row + 1, start = oldest(end, window);
     const int count = (int) (end - start), first = c * chunk, last = min(first + chunk, count);
@@ -725,7 +729,8 @@ decode_q8_kernel(const float* q, const float* rel, const float* table, KvView k,
         l[r] = sum;
     }
     if (quad != 0) return;
-    float* dst = part + (((size_t) row * kKv + g) * gridDim.x + c) * kChunkFloats;
+    const int chunks = grouped ? gridDim.z : gridDim.x;
+    float* dst = part + (((size_t) row * kKv + g) * chunks + c) * kChunkFloats;
 #pragma unroll
     for (int r = 0; r < kGroup; ++r) {
 #pragma unroll
@@ -813,7 +818,7 @@ void attend_plain(const Attend& a, float* scores, float* partial, int tiles, cud
 
 size_t decode_floats() { return (size_t) kDecodeBlocks * kChunkFloats; }
 
-void attend_decode(const Attend& a, float* scratch, cudaStream_t st, void* q8) {
+void attend_decode(const Attend& a, float* scratch, cudaStream_t st, void* q8, bool group_rows) {
     if (a.n <= 0) return;
     if (kKv * a.n > kDecodeBlocks) throw std::runtime_error("Inkling decode attention: too many rows");
     const int64_t end = a.pos + a.n;
@@ -838,8 +843,13 @@ void attend_decode(const Attend& a, float* scratch, cudaStream_t st, void* q8) {
         constexpr int kAttMin = 32, kStep = 4 * kAttUnroll;
         const int chunk = std::max(kAttMin, div_up(div_up(span, std::min(most, kAttChunks)), kStep) * kStep);
         chunks = div_up(span, chunk);
-        decode_q8_kernel<<<dim3(chunks, a.n), kAttThreads, 0, st>>>(a.q, a.rel, a.table, a.k, a.v, a.pos, a.window,
-                                                                   a.ring, chunk, scratch);
+        if (group_rows && !a.window && span >= 32768 && a.n >= 2 && a.n <= 4) {
+            constexpr int waves = 4;
+            decode_q8_kernel<waves><<<dim3(kKv / waves, a.n, chunks), waves * 32, 0, st>>>(
+                a.q, a.rel, a.table, a.k, a.v, a.pos, a.window, a.ring, chunk, scratch);
+        } else
+            decode_q8_kernel<><<<dim3(chunks, a.n), kAttThreads, 0, st>>>(a.q, a.rel, a.table, a.k, a.v, a.pos,
+                                                                       a.window, a.ring, chunk, scratch);
     } else {
         const int chunk = div_up(div_up(span, most), kThreads) * kThreads;
         const dim3 grid(div_up(span, chunk), kKv, a.n);

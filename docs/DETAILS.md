@@ -1324,6 +1324,11 @@ KV, adding the cache-tile path to value reuse raised fixed-window 64K DSpark dec
 the same expert placement. Matching tokens at a fixed window schedule does not qualify adaptive verification:
 faster proposals can change the policy's window choices, and the multi-row target verifier does not always match
 serial decoding with live expert swaps.
+`STRATA_INKLING_DSPARK_TARGET_GROUP=1` groups the target's work for the same chunk across rows, so nearby workgroups
+read the same K/V. It is off by default and takes only full-context Q8_0 attention at 32K and above, for windows of
+two to four rows with a native DSpark drafter on `gfx1031`. The chunks, FP32 reduction order, KV layout and state
+format stay the same. On an RX 6700 XT with fixed windows and expert placement, decode at 64K rose from 29.54 to
+31.18 t/s. This changes neither the drafter nor the target verifier's equivalence to serial decoding.
 Inkling uses `--conversation-cache-min-free-mib` and a fixed 4096 MiB disk reserve, and does not use
 `--session-save-reclaim`. On RX 6700 XT / Ryzen 7 5700X, with Inkling-2-Mini UD-IQ4_XS and Q8_0 KV, a 32,768-token
 snapshot (663,435,880 bytes) saved in 602 ms and restored in 980 ms. A fresh process read only the 30-token

@@ -620,6 +620,12 @@ void Inkling2::load_geometry() {
         // a window's guesses need the short convolutions' state after each of its tokens, which the decode switch's
         // kernels leave (layer_head(), layer_tail())
         if (!decode_) throw std::runtime_error("the DSpark drafter of Inkling-2-Mini needs STRATA_INKLING_DECODE=1");
+        const char* group = std::getenv("STRATA_INKLING_DSPARK_TARGET_GROUP");
+        ds_attend_group_ = q8() && kernels::gfx_arch_is(p.gcnArchName, "gfx1031") &&
+                           group && group[0] == '1' && group[1] == '\0';
+        if (ds_attend_group_)
+            std::fputs("strata-poly: STRATA_INKLING_DSPARK_TARGET_GROUP=1: group long verifier attention rows on gfx1031\n",
+                       stderr);
         // its block of 8 rows goes through the scratch that holds a call's rows
         if (opt_.prompt_batch < kDsBlock)
             throw std::runtime_error("the DSpark drafter of Inkling-2-Mini needs --prompt-batch 8 or more");
@@ -1171,7 +1177,7 @@ void Inkling2::attention(const Block& b, int n) {
     a.out = att_;
     // Prompt batches only: a token's answer and short calls keep the plain kernels and their sums.
     if (flash_ && n >= kStageRows) inkling::attend_flash(a, cs(st_));
-    else if (decode_ && n < kStageRows) inkling::attend_decode(a, chunks_, cs(st_), attq_);
+    else if (decode_ && n < kStageRows) inkling::attend_decode(a, chunks_, cs(st_), attq_, ds_attend_group_);
     else inkling::attend_plain(a, scores_, partial_, attend_tiles_, cs(st_));
 }
 
