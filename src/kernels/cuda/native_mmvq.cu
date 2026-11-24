@@ -1889,6 +1889,52 @@ void launch_slots(const S& slots, int count, int n_in, int n_out, cudaStream_t s
     }
 }
 
+#if defined(STRATA_USE_HIP)
+// Four rows share the same Q8_1 loads. Each lane visits the same blocks (including the gate/up's second
+// round) as the generic Q4_0 slots kernel. Down needs only three waves; keep the fourth wave's zero add.
+template<int Blocks, int Waves>
+__global__ __launch_bounds__(WARP * Waves, 1)
+void inkling_q4_0_slots_kernel(MmvqSlots slots) {
+    constexpr int Rows = 4;
+    using F = SmallTraits<Q40Block, 4>;
+    const SlotPtrs at = slot_ptrs(slots, int(blockIdx.y));
+    const auto* w = static_cast<const Q40Block*>(at.w);
+    const auto* x = static_cast<const Q81Block*>(at.x);
+    const int row0 = Rows * int(blockIdx.x), t = int(threadIdx.x), lane = t % WARP, wave = t / WARP;
+    float tmp[Rows] = {};
+    for (int b = t / F::T; b < Blocks; b += F::BPI) {
+        const int j = F::kqs(t);
+        const auto* q = reinterpret_cast<const int*>(x[b].qs);
+        const int x0 = q[j], x1 = q[j + 4], x2 = q[j + 1], x3 = q[j + 5];
+        const float2 ds = __half22float2(x[b].ds);
+#pragma unroll
+        for (int r = 0; r < Rows; ++r) {
+            const Q40Block& wb = w[(row0 + r) * Blocks + b];
+            const int v0 = load_int_b2(wb.qs, j), v1 = load_int_b2(wb.qs, j + 1);
+            int sum = STRATA_DP4A(v0 & 0x0f0f0f0f, x0, 0);
+            sum = STRATA_DP4A((v0 >> 4) & 0x0f0f0f0f, x1, sum);
+            sum = STRATA_DP4A(v1 & 0x0f0f0f0f, x2, sum);
+            sum = STRATA_DP4A((v1 >> 4) & 0x0f0f0f0f, x3, sum);
+            const float d = wb.d;
+            tmp[r] += d * (sum * ds.x - 4 * ds.y);
+        }
+    }
+    __shared__ float partial[Waves - 1][Rows][WARP];
+    if (wave)
+        for (int r = 0; r < Rows; ++r) partial[wave - 1][r][lane] = tmp[r];
+    __syncthreads();
+    if (wave) return;
+#pragma unroll
+    for (int r = 0; r < Rows; ++r) {
+#pragma unroll
+        for (int l = 0; l < WARPS - 1; ++l)
+            tmp[r] += l < Waves - 1 ? partial[l][r][lane] : 0.0f;
+        tmp[r] = warp_sum(tmp[r]);
+        if (lane == r) at.y[row0 + r] = tmp[r];
+    }
+}
+#endif
+
 #if !defined(__HIPCC__)   // CUDA only: the HIP paths keep native_mmvq's kernels
 // ============================ ncols = 2..4 from interleaved activations (fork F4, Eddoursul) ============================
 //
@@ -3620,8 +3666,8 @@ bool native_mmvq_slots_wide() {
     return on;
 }
 
-bool native_mmvq_slots(int ggml_type, const MmvqSlots& slots, int count, int n_in, int n_out, void* stream) {
-    if (!slots_kind(ggml_type)) return false;
+namespace {
+void validate_slots(const MmvqSlots& slots, int count, int n_out) {
     if (n_out <= 0 || count < 1 || count > kMmvqSlotsMax)
         throw std::invalid_argument("native MMVQ requires n_out > 0 and 1 to 32 matrices");
     for (int i = 0; i < count; ++i) {
@@ -3629,9 +3675,29 @@ bool native_mmvq_slots(int ggml_type, const MmvqSlots& slots, int count, int n_i
         validate_pointer(slots.x[i]);
         validate_pointer(slots.y[i]);
     }
+}
+}  // namespace
+
+bool native_mmvq_slots(int ggml_type, const MmvqSlots& slots, int count, int n_in, int n_out, void* stream) {
+    if (!slots_kind(ggml_type)) return false;
+    validate_slots(slots, count, n_out);
     launch_slots_of(ggml_type, slots, count, n_in, n_out, stream);
     return true;
 }
+
+#if defined(STRATA_USE_HIP)
+bool native_inkling_q4_0_slots(const MmvqSlots& slots, int count, int n_in, int n_out, void* stream) {
+    if (count < 2 || count > 8 || n_out != 2304 || (n_in != 2304 && n_in != 1152)) return false;
+    validate_slots(slots, count, n_out);
+    validate_stream(stream);
+    const auto s = static_cast<cudaStream_t>(stream);
+    const dim3 grid(unsigned(n_out / 4), unsigned(count));
+    if (n_in == 2304) inkling_q4_0_slots_kernel<72, 4><<<grid, 4 * WARP, 0, s>>>(slots);
+    else inkling_q4_0_slots_kernel<36, 3><<<grid, 3 * WARP, 0, s>>>(slots);
+    launch_check();
+    return true;
+}
+#endif
 
 bool native_mmvq_ids_supported(int ggml_type) { return slots_kind(ggml_type) != 0; }
 

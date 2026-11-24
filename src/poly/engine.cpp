@@ -4311,14 +4311,22 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
                     down.x[j] = (const uint8_t*) q8_ + (size_t) j * q8_row;
                     down.y[j] = d_ + (size_t) ((i0 + j) % kSumRows) * e_row;
                 }
+                const auto launch_slots = [&](uint32_t type, const kernels::MmvqSlots& s, int ni, int no) {
+                    if (m <= 1) return false;
+#if defined(STRATA_USE_HIP)
+                    if (inkling_q4_0_slots_ && n == 1 && !block_pass_ && type == GGML_TYPE_Q4_0 &&
+                        kernels::native_inkling_q4_0_slots(s, m, ni, no, st_)) return true;
+#endif
+                    return kernels::native_mmvq_slots((int) type, s, m, ni, no, st_);
+                };
                 // a mixed layer's gate and up are each a matrix of n_ff rows of its own type, up's into the second half
                 const int gu_rows = L.mixed() ? n_ff_exp_ : 2 * n_ff_exp_;
-                const bool one = m > 1 && kernels::native_mmvq_slots((int) L.gu_type, gate_up, m, n_embd_, gu_rows, st_);
+                const bool one = launch_slots(L.gu_type, gate_up, n_embd_, gu_rows);
                 for (int j = 0; j < m && !one; ++j)
                     kernels::native_mmvq((int) L.gu_type, gate_up.w[j], gate_up.x[j], gate_up.y[j], n_embd_, gu_rows, 1,
                                          st_);
                 if (L.mixed()) {
-                    const bool one_u = m > 1 && kernels::native_mmvq_slots((int) L.u_type, up, m, n_embd_, n_ff_exp_, st_);
+                    const bool one_u = launch_slots(L.u_type, up, n_embd_, n_ff_exp_);
                     for (int j = 0; j < m && !one_u; ++j)
                         kernels::native_mmvq((int) L.u_type, up.w[j], up.x[j], up.y[j], n_embd_, n_ff_exp_, 1, st_);
                 }
@@ -4333,7 +4341,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
                     expert_activation(g_, h_, m, limit, es);
                     kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_, m, st_);
                 }
-                if (!(m > 1 && kernels::native_mmvq_slots((int) L.d_type, down, m, n_ff_exp_, n_embd_, st_)))
+                if (!launch_slots(L.d_type, down, n_ff_exp_, n_embd_))
                     for (int j = 0; j < m; ++j)
                         kernels::native_mmvq((int) L.d_type, down.w[j], down.x[j], down.y[j], n_ff_exp_, n_embd_, 1,
                                              st_);

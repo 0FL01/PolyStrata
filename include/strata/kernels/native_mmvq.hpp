@@ -160,6 +160,11 @@ struct MmvqSlots {
     float* y[kMmvqSlotsMax];
 };
 bool native_mmvq_slots(int ggml_type, const MmvqSlots& slots, int count, int n_in, int n_out, void* stream);
+#if defined(STRATA_USE_HIP)
+// Opt-in gfx1031 Inkling Q4_0, 2..8 experts, 2304 outputs and 2304 or 1152 inputs. Same sums as the regular
+// slots path. The caller selects the device and format; unsupported shapes return false without launching.
+bool native_inkling_q4_0_slots(const MmvqSlots& slots, int count, int n_in, int n_out, void* stream);
+#endif
 // Whether the slots launches take a warp per row group where a row's blocks fit one warp (an expert's IQ4_XS down
 // projection of 512 values), and strata-poly gives them its cached experts 32 at a time instead of 8.  The same bits
 // either way.  On by default on HIP (measured on an RX 7800 XT), off by default on CUDA (not measured there);

@@ -777,6 +777,14 @@ runs. Decode stayed within the spread.
 dot products or FP32 accumulation order. Single-matrix and grouped-ID paths keep their previous kernels;
 the grouped prefill switch above is independent. See the [decode measurements](goals/2026-11-24-inkling2-decode-implementation.md).
 
+`STRATA_INKLING_Q4_0_SLOTS=1` (opt-in, gfx1031 with `STRATA_INKLING_DECODE=1`) runs four rows per workgroup
+for one-token cached Q4_0 expert products. It keeps the GGUF bytes, Q8_1 inputs, per-lane dot products and
+FP32 sum order. It uses four waves for gate/up and three for down, with the original fourth zero in the down sum.
+Single experts, grouped prefill, device-picked expert IDs and other formats use the old kernels. On an RX 6700 XT
+with Bartowski Q4_0 and Q8_0 KV, four nearest pairs per context, 256 forced decode tokens, median decode went from
+45.70 to 47.66 tok/s at 2K, 44.78 to 46.16 at 4K, and 44.07 to 44.85 at 16K. All 12 pairs were faster with the
+switch on. See the [Q4_0 decode goal](goals/2026-11-24-inkling2-q4-0-decode.md) for controls and parity checks.
+
 `STRATA_INKLING_BATCH_KV_RELEASE=1` (opt-in, gfx1031, VRAM pool off) waits for free-memory accounting once
 after a KV trim, instead of once per KV region. The device barrier, release/remap operations, retained
 addresses, KV policy and subsequent expert-cache refill stay on their existing paths. The wait allows at

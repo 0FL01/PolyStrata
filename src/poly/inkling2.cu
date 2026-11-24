@@ -529,6 +529,11 @@ void Inkling2::load_geometry() {
             if (il < kStart || il >= kStart + kCore) use_w_[(size_t) il] = 2.f;
     }
     if (decode_) std::fputs("strata-poly: STRATA_INKLING_DECODE=1: decode kernels for a few tokens at a time\n", stderr);
+    const char* q4_slots = std::getenv("STRATA_INKLING_Q4_0_SLOTS");
+    inkling_q4_0_slots_ = decode_ && kernels::gfx_arch_is(p.gcnArchName, "gfx1031") &&
+                         q4_slots && q4_slots[0] == '1' && q4_slots[1] == '\0';
+    if (inkling_q4_0_slots_)
+        std::fputs("strata-poly: STRATA_INKLING_Q4_0_SLOTS=1: four-row expert MMVQ on gfx1031\n", stderr);
     const char* norm_q8 = std::getenv("STRATA_INKLING_NORM_Q8");
     norm_q8_ = decode_ && norm_q8 && norm_q8[0] == '1' && norm_q8[1] == '\0';
     if (norm_q8_)
