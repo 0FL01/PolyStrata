@@ -58,7 +58,12 @@ __global__ void __launch_bounds__(kHead) attend_part_kernel(const float* q, cons
                                                              float* part) {
     __shared__ float qs[kQ][kHead];
     __shared__ float tile[kTile][kHead + 1];
-    __shared__ float s[kQ][kTile];
+    // The cached path reads a key's weights for all queries together. Pad the transposed rows for LDS.
+    __shared__ float s[ReuseV ? kTile : kQ][ReuseV ? kQ + 2 : kTile];
+    const auto score = [&](int qi, int j) -> float& {
+        if constexpr (ReuseV) return s[j][qi];
+        else return s[qi][j];
+    };
     __shared__ float m[kQ], l[kQ], fac[kQ];
     const int g = blockIdx.x, b = blockIdx.y, d = threadIdx.x, lane = d % 32, wave = d / 32;
     for (int qi = 0; qi < kQ; ++qi) {
@@ -79,11 +84,22 @@ __global__ void __launch_bounds__(kHead) attend_part_kernel(const float* q, cons
         // the slots of the tile's cached keys: consecutive positions, wrapped once at most
         int64_t slot0 = lo + first;
         if (ring) slot0 %= ring;
+        // A full cache-only tile that doesn't cross the ring end needs neither check per key.
+        const bool direct = ReuseV && first + kTile <= n_ctx && (!ring || slot0 + kTile <= ring);
         __syncthreads();
-        for (int j = 0; j < count; ++j) {
-            int64_t slot = slot0 + j;
-            if (ring && slot >= ring) slot -= ring;
-            tile[j][d] = key_value(k, kb, first + j, n_ctx, slot, g, d);
+        if (direct) {
+            const int i = g * kHead + d;
+            for (int j = 0; j < kTile; ++j) {
+                const int64_t slot = slot0 + j;
+                tile[j][d] = (float) k.codes[slot * kKey + i] *
+                    __half2float(__ushort_as_half(k.scales[slot * (kKey / 32) + i / 32]));
+            }
+        } else {
+            for (int j = 0; j < count; ++j) {
+                int64_t slot = slot0 + j;
+                if (ring && slot >= ring) slot -= ring;
+                tile[j][d] = key_value(k, kb, first + j, n_ctx, slot, g, d);
+            }
         }
         __syncthreads();
         // a lane a key, a wave six of the queries
@@ -97,17 +113,17 @@ __global__ void __launch_bounds__(kHead) attend_part_kernel(const float* q, cons
                     for (int i = 0; i < kQ / 4; ++i) dot[i] = __fmaf_rn(qs[wave * (kQ / 4) + i][e], kv, dot[i]);
                 }
 #pragma unroll
-            for (int i = 0; i < kQ / 4; ++i) s[wave * (kQ / 4) + i][j] = j < count ? dot[i] * kScale : -INFINITY;
+            for (int i = 0; i < kQ / 4; ++i) score(wave * (kQ / 4) + i, j) = j < count ? dot[i] * kScale : -INFINITY;
         }
         __syncthreads();
         if (d < kQ) {
             float mx = m[d];
-            for (int j = 0; j < count; ++j) mx = fmaxf(mx, s[d][j]);
+            for (int j = 0; j < count; ++j) mx = fmaxf(mx, score(d, j));
             const float f = expf(m[d] - mx);
             float sum = 0.f;
             for (int j = 0; j < kTile; ++j) {
-                const float p = j < count ? expf(s[d][j] - mx) : 0.f;
-                s[d][j] = p;
+                const float p = j < count ? expf(score(d, j) - mx) : 0.f;
+                score(d, j) = p;
                 sum += p;
             }
             m[d] = mx;
@@ -119,13 +135,25 @@ __global__ void __launch_bounds__(kHead) attend_part_kernel(const float* q, cons
             // Load a value once per lane. Each query keeps the same rescale and key order.
 #pragma unroll
             for (int qi = 0; qi < kQ; ++qi) acc[qi] *= fac[qi];
-#pragma unroll 1
-            for (int j = 0; j < count; ++j) {
-                int64_t slot = slot0 + j;
-                if (ring && slot >= ring) slot -= ring;
-                const float value = key_value(v, vb, first + j, n_ctx, slot, g, d);
+            if (direct) {
+                const int i = g * kHead + d;
+#pragma unroll 2
+                for (int j = 0; j < kTile; ++j) {
+                    const int64_t slot = slot0 + j;
+                    const float value = (float) v.codes[slot * kKey + i] *
+                        __half2float(__ushort_as_half(v.scales[slot * (kKey / 32) + i / 32]));
 #pragma unroll
-                for (int qi = 0; qi < kQ; ++qi) acc[qi] = __fmaf_rn(s[qi][j], value, acc[qi]);
+                    for (int qi = 0; qi < kQ; ++qi) acc[qi] = __fmaf_rn(score(qi, j), value, acc[qi]);
+                }
+            } else {
+#pragma unroll 1
+                for (int j = 0; j < count; ++j) {
+                    int64_t slot = slot0 + j;
+                    if (ring && slot >= ring) slot -= ring;
+                    const float value = key_value(v, vb, first + j, n_ctx, slot, g, d);
+#pragma unroll
+                    for (int qi = 0; qi < kQ; ++qi) acc[qi] = __fmaf_rn(score(qi, j), value, acc[qi]);
+                }
             }
         } else {
             for (int j = 0; j < count; ++j) {
@@ -136,7 +164,7 @@ __global__ void __launch_bounds__(kHead) attend_part_kernel(const float* q, cons
             __syncthreads();
             for (int qi = 0; qi < kQ; ++qi) {
                 float a = acc[qi] * fac[qi];
-                for (int j = 0; j < count; ++j) a = __fmaf_rn(s[qi][j], tile[j][d], a);
+                for (int j = 0; j < count; ++j) a = __fmaf_rn(score(qi, j), tile[j][d], a);
                 acc[qi] = a;
             }
         }
