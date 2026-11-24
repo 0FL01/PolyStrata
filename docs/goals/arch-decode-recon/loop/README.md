@@ -1,6 +1,6 @@
 # Loop message hoisting — CPU handoff
 
-**CP-P3-01: PASS (source invariance). CP-P3-02: INCONCLUSIVE for the fresh baseline and individual fused phases.**
+**CP-P3-01: PASS (source invariance).** The [fresh Tideglass attribution](../profiler/results-2k.md) found only 0.312 ms/token in the entire controller-input dispatch, including live work. Individual fused phases were not timed separately. Do not queue the standalone prototype on this evidence; the steps below are the historical handoff for a possible reopening.
 
 The historical RX 6700 XT traces bound the entire fused message/current-input dispatch budget at **0.302–0.325 ms/token** (median across full-token windows, per fixture). Only some of this work is invariant. Eliminating that whole busy time for free would turn the separate historical 2K Bartowski 51.325 t/s into at most **52.196 t/s (+1.70%) in this busy-only scenario**. Even deleting both historical, profiler-inflated gaps around every input dispatch for free maps to only +3.93%. Neither example predicts Tideglass performance. Rank and output accounted for roughly 0.83–0.85 ms/token of additional busy time in the historical controller, but their live dependence keeps it out of this bound.
 

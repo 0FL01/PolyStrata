@@ -2,6 +2,8 @@
 
 Source: `c0dd0e52` (`398027f8` changes no engine code). Use the campaign’s HIP Release build and Tideglass v2.1 on the RX 6700 XT (`gfx1031`). This is **traced attribution**, not the CP-01 untraced throughput test.
 
+**Fresh result:** [verified 2K attribution and P3 decision](results-2k.md). The fused input accounts for 0.312 ms/token; removing all of it for free would improve traced wall throughput by at most 0.86% under the dispatch-only model.
+
 ## Run one trace (orchestrator GPU queue only)
 
 From the repository root, use the same untouched config, binary, profile seed, and exact prompt as the matched CP-01 leg. Use a new `trial` path. The guard creates its output and its parent; the harness creates `run`.
@@ -40,7 +42,7 @@ After the guard exits successfully, run on CPU (can overlap the next independent
 
 Protocol: [goal §5](../../2026-11-24-inkling2-architecture-aware-decode-recon.md#5-context-pack-orchestration-protocol), [CP-01](../../2026-11-24-inkling2-architecture-aware-decode-recon.md#cp-01--fresh-baseline), [CP-P3-02](../../2026-11-24-inkling2-architecture-aware-decode-recon.md#cp-p3-02--baseline-controller-profiling), [campaign manifest](../research-manifest.md).
 
-- **STATUS:** CPU method tested; fresh CP-01/P3-02 measurement pending the GPU queue. **HYPOTHESIS:** previous-pass bank work occupies part of the serial controller-input slot; use a dispatch ceiling before investing in an exact split.
+- **STATUS:** [Fresh 2K attribution verified](results-2k.md#5-disposition-and-evidence). **HYPOTHESIS:** previous-pass bank work occupies part of the serial controller-input slot; use a dispatch ceiling before investing in an exact split.
 - **METHOD / REPRODUCTION_COMMANDS / ARTIFACT_PATHS:** see above. Retain `$trial/guard/{warnings.json,stop-reasons.json,vram.jsonl}`, `$trial/run/{config.json,metrics.json,prompt.csv,engine.log,trace/}` and `$trial/controller-cost-breakdown.json` together in the private campaign directory. `trace/launch.json` records profiler provenance. Do not commit raw traces or user config.
 - **MEASUREMENTS:** CPU replay of three archived RX 6700 XT CSV sets, each with 23 decode steps. Not Tideglass v2.1, not the pinned binary, and not fresh evidence; these validate parser behavior only. All had 24 logits-copy blits and exactly 96 controller stream rows/token, with no unmatched controller sequences.
 
@@ -51,7 +53,7 @@ Protocol: [goal §5](../../2026-11-24-inkling2-architecture-aware-decode-recon.m
   | `dspark-speed-1795285637/trace-1` (Nov 21) | Fused one-stream | 39.185 ms/token | 19.121 ms/token | 1.865 ms/token | 0.651 ms/token | 1.0169× |
 
   Reproduce each from `$HOME/.cache/opencode-tmp/opencode/<Archive>` with `analyze.py --steps 23 --kernel <archive>/trace-TG_kernel_trace.csv --copies <archive>/trace-TG_memory_copy_trace.csv --agent-info <archive>/trace-TG_agent_info.csv`. The first archive's launch recipe is `inkling-perf.g6YsYt9b/{trace.sh,bench.py}`; the second's historical decode-slicer is `dspark-speed-1795285637/trace_summary.py`. Neither archive contains HIP API records; a CPU fixture checks host API nesting and overlap instead.
-- **BASELINE_COMPARISON / FIRST_DIVERGENCE / ACCURACY_EVIDENCE:** pending fresh trace. No engine/model changes or optimization parity claim. **MEASURED_UPPER_BOUND:** fresh dispatch ceiling pending; archived numbers above are not campaign sizing.
-- **INTERPRETATION / NEXT_ATOMIC_EXPERIMENT:** run the matched 2K traced leg and confirm the expected fused QKV/FFN count and head boundaries. Decide from the fresh dispatch budget whether to invest a GPU slot in a separately instrumented bank-only vs live-only timing split. Do not attempt occupancy counters on gfx1031.
+- **BASELINE_COMPARISON / FIRST_DIVERGENCE / ACCURACY_EVIDENCE / MEASURED_UPPER_BOUND:** see [fresh measurements](results-2k.md). All 33 IDs matched the untraced prefix; no optimization parity claim. Archived numbers above are not campaign sizing.
+- **INTERPRETATION / NEXT_ATOMIC_EXPERIMENT:** Park standalone P3 on the fresh budget. Revisit only with evidence of a larger budget or a separate launch-saving fusion. Do not attempt occupancy counters on gfx1031.
 
 CPU checks: `python -B docs/goals/arch-decode-recon/profiler/test_analyze.py`.

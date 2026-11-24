@@ -1,0 +1,31 @@
+diff --git a/src/poly/inkling2.cu b/src/poly/inkling2.cu
+--- a/src/poly/inkling2.cu
++++ b/src/poly/inkling2.cu
+@@ -1436,6 +1436,27 @@
+ 
+     depth_mix(fp(b.fquery), cur_, 0, n);
+     if (loop) control(b, il, 3, cur_, n);
+     kernels::native_add_rms_norm_q8_1(cur_, nullptr, fp(L.ffn_norm), xn_, xq_, kWidth, n, rms_eps_, 128, st_);
++    if (const char* path = std::getenv("STRATA_CP04_CAPTURE")) {
++        const char* pos = std::getenv("STRATA_CP04_POSITION");
++        const char* visit = std::getenv("STRATA_CP04_VISIT");
++        static bool saved = false;
++        if (!saved && pos && visit && n == 1 && !block_pass_ && pos_ == std::strtoll(pos, nullptr, 10) &&
++            visit_ == std::strtol(visit, nullptr, 10)) {
++            std::vector<float> xf(kWidth);
++            std::vector<uint8_t> xq(kernels::native_q8_1_bytes(kWidth));
++            if (cudaMemcpyAsync(xf.data(), xn_, xf.size() * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)) != cudaSuccess ||
++                cudaMemcpyAsync(xq.data(), xq_, xq.size(), cudaMemcpyDeviceToHost, cs(st_)) != cudaSuccess ||
++                cudaStreamSynchronize(cs(st_)) != cudaSuccess)
++                throw std::runtime_error("CP04: cannot read expert input");
++            FILE* f = std::fopen(path, "wbx");
++            if (!f) throw std::runtime_error("CP04: cannot create input file");
++            const bool ok = std::fwrite(xf.data(), sizeof(float), xf.size(), f) == xf.size() &&
++                            std::fwrite(xq.data(), 1, xq.size(), f) == xq.size();
++            if (std::fclose(f) || !ok) throw std::runtime_error("CP04: cannot write input file");
++            saved = true;
++            std::fprintf(stderr, "CP04 capture: pos=%lld visit=%d layer=%d\n", static_cast<long long>(pos_), visit_, il);
++        }
++    }
+     // with STRATA_INKLING_ROUTE_DUAL and one token, the router's gemv below also writes the host h_rl_ and h_x_,
+     // and moe_router() launches no copy2 for them

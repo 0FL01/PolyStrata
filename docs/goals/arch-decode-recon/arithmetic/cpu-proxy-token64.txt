@@ -1,0 +1,16 @@
+model=/home/stfu/.lmstudio/models/unsloth/Inkling-2-Mini/Tideglass-Inkling-2-Mini-Unbound-v2.1.gguf bytes=15537527488 layer=3 expert=0 token_for_proxy=64 weight=0.125 (0x3e000000) beta=4 linear=25
+activation=GGUF Q8_0 embedding through selected layer's FFN RMSNorm (proxy, not a decoded FFN row)
+CPU AVX2 vs CPU EMULATION of HIP: CPU replay matches production cpu_experts weighted output
+activation xq                   scales 0/72 differ; codes 4/2304 differ, first block 50 lane 3 0xe8 (-24) vs 0xe7 (-25)
+gate FP32                       1152/1152 differ, first [0] 0xbf19d0ac (-0.60084033) vs 0xbf18fce2 (-0.597608685), max_abs=0.0761710405
+up FP32                         1152/1152 differ, first [0] 0x3fedd645 (+1.85810149) vs 0x3fec2b2e (+1.84506774), max_abs=0.0677306652
+SiTU FP32                       1152/1152 differ, first [0] 0xbec88ecd (-0.391714483) vs 0xbec683b1 (-0.387723476), max_abs=0.168106556
+intermediate hq                 scales 36/36 differ, first block 0 0x2985 vs 0x2986; codes 427/1152 differ, first block 0 lane 2 0xb1 (-79) vs 0xb0 (-80)
+down FP32                       2304/2304 differ, first [0] 0xbed0aed9 (-0.407583982) vs 0xbec88956 (-0.39167279), max_abs=0.129988909
+one weighted expert sum         2304/2304 differ, first [0] 0xbd50aed9 (-0.0509479977) vs 0xbd488956 (-0.0489590988), max_abs=0.0162486136
+first code detail: x[1603]=-0.872510493 (0xbf5f5cd9) amax=4.52280951 (0x4090badb) scale_half=0x288f; CPU before rounding -24.5 (0xc1c40000), emulated HIP -24.5 (0xc1c40000)
+emulated fused vs direct xq     scales 0/72 differ; codes 0/2304 differ; sums 0/72 differ
+gate: CPU vs matched d/codes    1152/1152 differ, first [0] 0xbf19d0ac (-0.60084033) vs 0xbf19623c (-0.599155188), max_abs=0.0716611743
+gate: HIP model codes vs CPU    1152/1152 differ, first [0] 0xbf18fce2 (-0.597608685) vs 0xbf19623c (-0.599155188), max_abs=0.00894284248
+gate: CPU vs centered control   956/1152 differ, first [0] 0xbf19d0ac (-0.60084033) vs 0xbf19d0b4 (-0.600840807), max_abs=9.53674316e-07
+gate row0: weight scale b0=0x1e00 raw-sum b0=0x417c (+2.7421875), b0 d*sum(codes)=+2.73028564; centered control=0xbf19d0b4
