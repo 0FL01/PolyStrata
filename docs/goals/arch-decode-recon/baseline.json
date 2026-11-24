@@ -110,5 +110,61 @@
     "min_free_mib": 2036.671875,
     "memory_warnings": 22,
     "stop_reasons": []
+  },
+  {
+    "run": "mixed-131072",
+    "guard": "guard-131072",
+    "context": 131072,
+    "workload": "mixed",
+    "prompt_sha256": "09731c32455b81cfbaa225fe635a8723bf736d13d9771b9e28a141a188a7c02c",
+    "binary_sha256": "877fbdfed4120abe7ee9f5e093a3af17f9c8220ebb28a8388a650cf338a775ef",
+    "seed_sha256": "9293626a35e6fa2ecd34ba5078eb5c7add2f39fec1afe7fde425cd116bd2d946",
+    "decode_steps": 256,
+    "ids_sha256": "64a821e64669a67eea83b18eb80319f7087ec4ab585dac3962b6aa11ea4605ff",
+    "prompt_ms": 209064.6,
+    "engine_decode_ms": 9499.2,
+    "arrival_span_ms": 9498.438518,
+    "decode_t_s": 26.9517983945327,
+    "arrival_ms": {
+      "p10": 32.4447325,
+      "median": 36.6811055,
+      "p90": 42.70879349999999,
+      "p99": 48.835325499999996
+    },
+    "request_expert_hits": 63688,
+    "request_expert_lookups": 98688,
+    "resident_at_load": 1176,
+    "total_experts": 3072,
+    "min_free_mib": 2000.5,
+    "memory_warnings": 22,
+    "stop_reasons": []
+  },
+  {
+    "run": "mixed-199743",
+    "guard": "guard-199743",
+    "context": 199743,
+    "workload": "mixed",
+    "prompt_sha256": "0db3ab0f2c303e06a2d6b5804a10b771350adccebaba15d4c49594e352de7d53",
+    "binary_sha256": "877fbdfed4120abe7ee9f5e093a3af17f9c8220ebb28a8388a650cf338a775ef",
+    "seed_sha256": "9293626a35e6fa2ecd34ba5078eb5c7add2f39fec1afe7fde425cd116bd2d946",
+    "decode_steps": 256,
+    "ids_sha256": "2b89c62d2b9fc0a5359fcd6c8b5f4546e292ae9c85d38b193779a879241991fd",
+    "prompt_ms": 369822.2,
+    "engine_decode_ms": 11990.2,
+    "arrival_span_ms": 11989.917725,
+    "decode_t_s": 21.351272450036767,
+    "arrival_ms": {
+      "p10": 42.908429,
+      "median": 46.03183,
+      "p90": 50.698068000000006,
+      "p99": 60.904408000000004
+    },
+    "request_expert_hits": 49431,
+    "request_expert_lookups": 98688,
+    "resident_at_load": 1176,
+    "total_experts": 3072,
+    "min_free_mib": 2008.7734375,
+    "memory_warnings": 22,
+    "stop_reasons": []
   }
 ]

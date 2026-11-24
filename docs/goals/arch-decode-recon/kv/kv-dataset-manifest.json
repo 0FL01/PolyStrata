@@ -44,6 +44,26 @@
       "payload_xxh_style": "e13c8b8e35ecfa77",
       "sample_tile_starts": [0, 5952, 11936, 17920, 23904, 29888, 35840, 41824, 47808, 53792, 59776, 65760],
       "checksums_reread_and_roundtrip": true
+    },
+    {
+      "path": "mixed-131072/session.bin",
+      "committed": 131328,
+      "bytes": 2379572392,
+      "records": 137,
+      "header_xxh_style": "7c55027271503df5",
+      "payload_xxh_style": "e801382887033e77",
+      "sample_tile_starts": [0, 11936, 23872, 35808, 47744, 59680, 71616, 83552, 95488, 107424, 119360, 131296],
+      "checksums_reread_and_roundtrip": true
+    },
+    {
+      "path": "mixed-199743/session.bin",
+      "committed": 199999,
+      "bytes": 3575278660,
+      "records": 208,
+      "header_xxh_style": "0006dfda2472230e",
+      "payload_xxh_style": "bfd7d0091ac72805",
+      "sample_tile_starts": [0, 18176, 36352, 54528, 72704, 90880, 109056, 127232, 145408, 163584, 181760, 199936],
+      "checksums_reread_and_roundtrip": true
     }
   ]
 }
