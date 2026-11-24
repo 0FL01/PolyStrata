@@ -1,6 +1,6 @@
 # Goal: Raise Inkling-2-Mini decode throughput on RDNA2
 
-Status: active
+Status: complete
 Source: 2026-11-24 user instructions to implement the decode RECON, iterate on evidence, and ship verified wins.
 Last updated: 2026-11-24
 
@@ -13,14 +13,16 @@ Use the profiling plan as a map of hypotheses; change direction when a measureme
 
 - R1: Ship repeatable end-to-end decode wins. Acceptance: same-card, same-model interleaved A/B with the same
   tokens and comparable placement; each accepted change builds, lands on `origin/main`, and passes a local
-  production smoke check. Evidence: per-build rates, commit, installed binary and live check. Status: in_progress.
+  production smoke check. Evidence: two positive short-context tests on the final path, a neutral old/new
+  cross-check, `e72e40d7` on `origin/main`, and the live API check below. Status: verified.
 - R2: Preserve answer quality. Acceptance: compare raw greedy IDs at the same settings and placement for each
   change; check changed arithmetic at its boundary and resolve candidate-specific divergence before shipping.
   Evidence: byte-identical FP32/Q8_1 boundary dumps and all 96 greedy IDs on each of four matched-placement
   fixtures; no first differing ID. Status: verified.
 - R3: Reprofile after a substantial win and continue while there is a concrete prospective test. Acceptance:
   close tested hypotheses with measured outcomes, report remaining limits, and provide the final HIP binary.
-  Evidence: traces, benchmark outcomes and binary hash. Status: in_progress.
+  Evidence: final Release trace, correlated 16K/64K host traces, follow-up trials and installed binary hash.
+  Status: verified.
 
 Constraints: gfx1031 HIP and system RAM only; no change to the configured 2 GiB VRAM reserve, quantization,
 attention chunking or floating-point reduction order for the initial experiments. New production paths are opt-in;
@@ -32,12 +34,10 @@ Inkling decode kernels in `src/kernels/cuda/iq_kernels.cu` and `src/poly/`, thei
 expert path, and the measured-results docs. Temporary profilers and microbenchmarks stay outside the tree unless
 needed for a concrete regression. No new dependency, API, or service.
 
-## Current Checkpoint
+## Baseline and artifacts
 
 Baseline `992ebbb0` (`cedd3bf3` production binary, SHA256 `607933d4190d067246f14ce6313bea0d05b7addf0287aa1435339277d40efe81`).
-The scale-select Release candidate builds, passes `poly_mmvq_segments_test`, and gives a small repeatable
-short-context win on the stock workload. Ship it opt-in and verify the installed engine through the loopback API.
-Do not ship the other trial kernels. RECON and implementation artifacts on the test host:
+Only scale-select shipped, opt-in. RECON and implementation artifacts on the test host:
 `~/.cache/opencode-tmp/opencode/inkling-decode-recon.Sy4nkYZ3/` and `~/.cache/opencode-tmp/opencode/inkling-decode-impl.C2bRhNAk/`.
 
 ## Checkpoint evidence
@@ -49,6 +49,8 @@ Do not ship the other trial kernels. RECON and implementation artifacts on the t
   pairs. A separate test switched kernels on mirrored token positions at 87.8% hits: 46.27 → 46.57 tok/s
   (+0.65%, both pairs positive, 1,006 positions, block-bootstrap interval −0.09% to +1.51%). This supports a
   small short-context gain; the interval includes zero and neither test supports a fixed percentage across workloads.
+  A separate two-start-per-build comparison against the previously installed `cedd3bf3` binary was essentially
+  flat (45.280 → 45.275 tok/s at 87.8–88.0% hits), so a speedup is not visible in every short run.
 - The three-arm test on RX 6700 XT, Ryzen 7 5700X, Inkling-2-Mini UD-IQ4_XS, Q8_0 KV, 2K + 256 forced,
   swaps on, averaged 43.95 tok/s off, 45.23 with scale select, and 44.35 with select and VOP3 (four starts
   each). The GPU cache ranged from 1,052 to 1,154 loaded experts across starts. VOP3 did not add a gain over
@@ -105,6 +107,19 @@ Do not ship the other trial kernels. RECON and implementation artifacts on the t
 - Hoisting the SWA ring index calculation to the host kept all three output buffers exact before, across, and
   after wrap. It saved 0.36–0.56 µs hot and 0.40–1.04 µs read-flushed per visit. At 40 visits the measured
   savings amount to 0.014–0.042 ms/token before end-to-end overhead, below the observed timing spread.
-- Non-temporal K/V code loads to preserve a 48 MiB resident payload kept outputs exact but did not make
+- Non-temporal K/V code loads (`slc` in the emitted ISA) to preserve a 48 MiB resident payload kept outputs exact but did not make
   re-reading the resident bytes faster. After a read flush, the combined attention + resident-read median was
   590.44 → 589.92 µs at 64K and 1382.77 → 1384.21 µs at 190K; the input, work and returned bytes were the same.
+
+## Completion
+
+- Built `build-poly-hip/strata-poly` with `cmake --build build-poly-hip --target strata-poly poly_mmvq_segments_test -j 4`
+  (HIP Release, gfx1031); `poly_mmvq_segments_test` passed on the RX 6700 XT. SHA256:
+  `495923d467a4d88c47b993c84c97e1ec15fb58042cbcdafccca0a7860b096140`.
+- Pushed `e72e40d7` to `origin/main` and deployed the matching binary locally as `strata-poly-e72e40d7`.
+  `strata.service` is active on `127.0.0.1:8080` with `STRATA_HIP_NVFP4_SLOT_SELECT=1`; the real engine process
+  was checked. `/health` and the authenticated chat request both returned HTTP 200. The previous config was
+  backed up with mode 0600. The guard recorded no stop reason across 95 runs; the minimum free VRAM was 1,877 MiB.
+- The measured short-context gains did not resolve CPU multi-miss exposure or long Q8_0 attention bandwidth.
+  None of the tested follow-ups had a repeatable end-to-end win or enough isolated headroom to justify another
+  implementation. The 2 GiB reserve, expert placement policy, attention math and session format are unchanged.
