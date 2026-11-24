@@ -12,7 +12,7 @@ The [corpus manifest](corpus-manifest.json) freezes eight actual prefix/target w
 
 ## Preflight blockers
 
-- **GPU**: CPU-only `Guard(...).boot_clean()` failed with `the GPU took a fault or a reset earlier in this boot; reboot first: … [gfxhub] page fault`. The current boot has 12 matching lines at `2026-11-23T19:15:23+03:00`. `card1` is the intended GPU. No guard bypass, driver action, service restart or inference was attempted. The smallest unlock is a clean boot and unmodified guard preflight before stopping production for the first run.
+- **GPU (at P0)**: CPU-only `Guard(...).boot_clean()` failed with `the GPU took a fault or a reset earlier in this boot; reboot first: … [gfxhub] page fault`. That boot had 12 matching lines at `2026-11-23T19:15:23+03:00`. `card1` is the intended GPU. No guard bypass, driver action, service restart or inference was attempted. A user-arranged reboot and unmodified guard preflight later cleared [P3](p3-report.md).
 - **Orca A0 (at P0)**: an authenticated HEAD of the pinned HF `resolve` URL returned `403` / `x-error-code: GatedRepo`; no local donor in the searched model directory or HF cache matched. The later [A0 RECON](a0-report.md) confirmed entitlement and read the pinned header. U returned `206` for a 16-byte probe with the expected commit and total size, so the H inventory was independent of this blocker.
 
 Production was active on loopback and unauthenticated `/v1/models` returned 401. Its files, sessions, binary, process and configuration were not changed. Only a read-only seed copy of the expert profile was created under the experiment directory; subsequent standalone runs must receive writable copies, never the seed or the live profile.

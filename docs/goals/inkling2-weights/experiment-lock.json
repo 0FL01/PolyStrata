@@ -108,6 +108,7 @@
   "standalone": {
     "engine_argv_before_workload": ["--model", "{model}", "--kv", "q8_0", "--max-context", "200000", "--prompt-batch", "2048", "--vram-reserve-mib", "2048", "--threads", "8", "--expert-swaps", "64", "--conversation-cache-mib", "0", "--expert-profile", "{per_run_profile}", "--lookup", "0", "--no-draft"],
     "sampling_argv": ["--temperature", "0", "--seed", "42"],
+    "observer_sha256": "f90b724f8c2d5bf063e506061d80467c875112adc9323cdeb6912483167217bc",
     "quality_chat_reasoning_effort": "high",
     "sessions": "standalone; no snapshots, no disk sessions, private working directory per run",
     "profile_seed_path": "/home/stfu/.cache/opencode-tmp/opencode/inkling-weights/expert-profile.seed.txt",
@@ -130,8 +131,9 @@
   },
   "gpu_guard": {
     "path": "rdna2-rnd/scripts/run_guarded.py",
-    "boot_gate": "blocked",
-    "evidence": "Guard.boot_clean() rejected [gfxhub] page fault on 2026-11-23T19:15:23+03:00 in the current boot",
+    "boot_gate": "passed on the 2026-11-24T20:01:11+03:00 boot",
+    "evidence": "unchanged guard -- /usr/bin/true passed with 10,927.6 MiB sampled free VRAM and no stop reasons; each runtime still uses the guard",
+    "previous_boot_evidence": "Guard.boot_clean() rejected [gfxhub] page fault on 2026-11-23T19:15:23+03:00",
     "fault_override_used": false
   }
 }

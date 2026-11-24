@@ -1,6 +1,6 @@
 # P4 — Inkling-2-Mini NLL observer
 
-**Status:** host arithmetic and gfx1031 compile/link passed. On-model alignment, finite outputs and repeatability are **blocked**, not verified: [`experiment-lock.json`](experiment-lock.json) records `Guard.boot_clean()` rejecting the current boot after the `[gfxhub]` page fault. No GPU command, model inference, service change, or guard override ran for this checkpoint.
+**Status: passed.** Host arithmetic, HIP `gfx1031` build, on-model alignment and repeatability all passed, the latter after the user rebooted and P3 cleared. No guard override or production configuration change.
 
 - Source: local plan §§5.2 and 7. Parent H0 SHA-256: `e8a583198523fe1119120061ed68fc3ce14dd1052ef53815014c867b307b9e37` (already verified for P0).
 - Runtime pin: `c014d6ecc79d65b724cf98aae554cbdaab8242c5`, Release HIP `gfx1031`, ROCm `7.13.0a20260515`. The runtime source and build inputs match the pin; the pre-experiment checkout `c0e42140` differs from it only in a report. Lock SHA-256: `f260b75d7e61d560be7a7f6f30ec3d449d5e361f4442a992086d19e2908f705d`. Corpus [manifest](corpus-manifest.json) SHA-256 at this checkpoint: `7cd7d79bf597f5219b34b3f2402cd37f64fb40118225594e5f1ea99cfbc382ca`.
@@ -99,4 +99,8 @@ print('P4 diagnostic alignment passed')
 PY
 ```
 
-The `1e-5` absolute NLL allowance is for the CLI's `%.6g` probabilities and its FP32 subtraction before `exp`. Check that the CLI and observer logs show the same loaded placement; if the guard refuses, a target is absent from top-k, or the repeat/alignment comparison fails, record it instead of passing P4. The next step is this guarded H0 check, not candidate evaluation.
+The `1e-5` absolute NLL allowance is for the CLI's `%.6g` probabilities and its FP32 subtraction before `exp`. Check that the CLI and observer logs show the same loaded placement; if the guard refuses, a target is absent from top-k, or the repeat/alignment comparison fails, record it instead of passing P4.
+
+## Runtime result (RX 6700 XT)
+
+The four forced IDs `11,150220,152693,73121` were the CLI's greedy tokens on the frozen `2k-ru` prefix. Positions `2048–2051` matched and every observer score was finite. Maximum `|NLL + log(CLI p)|` was **1.237×10⁻⁶ nat**. The two independent observer TSVs were byte-identical (SHA-256 `2673309d7005881add6da8fb09c5aa3ecbc703a853dbf5b9803aa442fdbe2e13`). The forced CLI and observer both loaded 1,316/3,072 routed experts with 8 CPU threads. All four guard reason lists were empty. Private logs under the experiment root: `p4-greedy.wy23gv`, `p4-follow.wdFCay`, `p4-obs1.LM4dRO`, `p4-obs2.jDXd7b`. P5 is the next gate; no result on modified weights follows from this check.
