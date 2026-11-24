@@ -785,6 +785,13 @@ with Bartowski Q4_0 and Q8_0 KV, four nearest pairs per context, 256 forced deco
 45.70 to 47.66 tok/s at 2K, 44.78 to 46.16 at 4K, and 44.07 to 44.85 at 16K. All 12 pairs were faster with the
 switch on. See the [Q4_0 decode goal](goals/2026-11-24-inkling2-q4-0-decode.md) for controls and parity checks.
 
+`STRATA_INKLING_Q4_0_DENSE=1` (opt-in, gfx1031 with `STRATA_INKLING_DECODE=1`) groups a visit's compatible
+Q4_0 input projections into one four-row MMVQ launch. Each row keeps its original Q8_1 input, dot product and
+FP32 sum. It does not change the output projection, other formats, or prompt batches. With four-row expert
+slots already on, RX 6700 XT, Bartowski Q4_0 and Q8_0 KV, median decode rose from 48.83 to 50.13 tok/s at
+2K, 47.64 to 48.52 at 4K, and 46.04 to 47.10 at 16K (320 forced tokens per run, eight adjacent pairs in all).
+On a restored 64K prefix, the two 96-token greedy pairs had gains of 3.55% and 1.60%; all token IDs matched.
+
 `STRATA_INKLING_BATCH_KV_RELEASE=1` (opt-in, gfx1031, VRAM pool off) waits for free-memory accounting once
 after a KV trim, instead of once per KV region. The device barrier, release/remap operations, retained
 addresses, KV policy and subsequent expert-cache refill stay on their existing paths. The wait allows at

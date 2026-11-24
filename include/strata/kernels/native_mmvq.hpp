@@ -205,6 +205,11 @@ struct MmvqSegments {
     int rows[kMost] = {};
 };
 bool native_mmvq_segments(int ggml_type, const MmvqSegments& s, int n_in, void* stream);
+#if defined(STRATA_USE_HIP)
+// Opt-in gfx1031 Inkling Q4_0 projections: 2304 inputs and output rows in groups of four. Same per-row
+// sums as separate native_mmvq calls. The caller selects the format and device.
+bool native_inkling_q4_0_segments(const MmvqSegments& s, int n_in, void* stream);
+#endif
 /// native_mmvq(14, ...) for one column with a warp a row and no sum across warps: an output head of 200,058 rows took
 /// 1,030-1,150 us on an RX 6700 XT where the one-block-a-row kernel took 1,165-1,315.  Another order of the sums
 /// (strata-poly: every one-row logits call under Inkling's decode switch, a prompt's last token's too).

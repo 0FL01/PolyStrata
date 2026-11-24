@@ -534,6 +534,11 @@ void Inkling2::load_geometry() {
                          q4_slots && q4_slots[0] == '1' && q4_slots[1] == '\0';
     if (inkling_q4_0_slots_)
         std::fputs("strata-poly: STRATA_INKLING_Q4_0_SLOTS=1: four-row expert MMVQ on gfx1031\n", stderr);
+    const char* q4_dense = std::getenv("STRATA_INKLING_Q4_0_DENSE");
+    dense_q4_0_ = decode_ && kernels::gfx_arch_is(p.gcnArchName, "gfx1031") &&
+                  q4_dense && q4_dense[0] == '1' && q4_dense[1] == '\0';
+    if (dense_q4_0_)
+        std::fputs("strata-poly: STRATA_INKLING_Q4_0_DENSE=1: grouped four-row Q4_0 projections on gfx1031\n", stderr);
     const char* norm_q8 = std::getenv("STRATA_INKLING_NORM_Q8");
     norm_q8_ = decode_ && norm_q8 && norm_q8[0] == '1' && norm_q8[1] == '\0';
     if (norm_q8_)
@@ -1468,7 +1473,9 @@ void Inkling2::project(const Block& b, const float* xq, const float* xk, const f
                 s.y[s.count] = parts[j].y;
                 s.rows[s.count++] = parts[j].w->n_out;
             }
-        if (!kernels::native_mmvq_segments((int) type, s, kWidth, st_)) continue;
+        const bool q4 = dense_q4_0_ && !block_pass_ && type == GGML_TYPE_Q4_0 &&
+                        kernels::native_inkling_q4_0_segments(s, kWidth, st_);
+        if (!q4 && !kernels::native_mmvq_segments((int) type, s, kWidth, st_)) continue;
         for (int j = i; j < 5; ++j)
             if (parts[j].w->type == type && fits(*parts[j].w)) parts[j].done = true;
     }

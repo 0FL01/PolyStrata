@@ -1890,17 +1890,16 @@ void launch_slots(const S& slots, int count, int n_in, int n_out, cudaStream_t s
 }
 
 #if defined(STRATA_USE_HIP)
+constexpr int kInklingQ40Rows = 4;
 // Four rows share the same Q8_1 loads. Each lane visits the same blocks (including the gate/up's second
-// round) as the generic Q4_0 slots kernel. Down needs only three waves; keep the fourth wave's zero add.
+// round) as the generic Q4_0 kernel. Down needs only three waves; keep the fourth wave's zero add.
 template<int Blocks, int Waves>
-__global__ __launch_bounds__(WARP * Waves, 1)
-void inkling_q4_0_slots_kernel(MmvqSlots slots) {
-    constexpr int Rows = 4;
+__device__ __forceinline__ void inkling_q4_0_rows(SlotPtrs at, int row0) {
+    constexpr int Rows = kInklingQ40Rows;
     using F = SmallTraits<Q40Block, 4>;
-    const SlotPtrs at = slot_ptrs(slots, int(blockIdx.y));
     const auto* w = static_cast<const Q40Block*>(at.w);
     const auto* x = static_cast<const Q81Block*>(at.x);
-    const int row0 = Rows * int(blockIdx.x), t = int(threadIdx.x), lane = t % WARP, wave = t / WARP;
+    const int t = int(threadIdx.x), lane = t % WARP, wave = t / WARP;
     float tmp[Rows] = {};
     for (int b = t / F::T; b < Blocks; b += F::BPI) {
         const int j = F::kqs(t);
@@ -1932,6 +1931,19 @@ void inkling_q4_0_slots_kernel(MmvqSlots slots) {
         tmp[r] = warp_sum(tmp[r]);
         if (lane == r) at.y[row0 + r] = tmp[r];
     }
+}
+
+template<int Blocks, int Waves>
+__global__ __launch_bounds__(WARP * Waves, 1)
+void inkling_q4_0_slots_kernel(MmvqSlots slots) {
+    inkling_q4_0_rows<Blocks, Waves>(slot_ptrs(slots, int(blockIdx.y)), kInklingQ40Rows * int(blockIdx.x));
+}
+
+__global__ __launch_bounds__(WARP * WARPS, 1)
+void inkling_q4_0_segments_kernel(MmvqSegments s) {
+    int b = int(blockIdx.x), j = 0;
+    while (j < s.count - 1 && b >= s.rows[j] / kInklingQ40Rows) b -= s.rows[j++] / kInklingQ40Rows;
+    inkling_q4_0_rows<72, WARPS>({s.w[j], s.x[j], s.y[j]}, kInklingQ40Rows * b);
 }
 #endif
 
@@ -3547,6 +3559,26 @@ bool native_mmvq_segments(int ggml_type, const MmvqSegments& s, int n_in, void* 
     return true;
 }
 
+#if defined(STRATA_USE_HIP)
+bool native_inkling_q4_0_segments(const MmvqSegments& s, int n_in, void* stream) {
+    if (s.count < 2 || s.count > MmvqSegments::kMost || n_in != 2304) return false;
+    unsigned blocks = 0;
+    for (int j = 0; j < s.count; ++j) {
+        if (s.rows[j] <= 0 || s.rows[j] % kInklingQ40Rows != 0) return false;
+        blocks += unsigned(s.rows[j] / kInklingQ40Rows);
+    }
+    for (int j = 0; j < s.count; ++j) {
+        validate_pointer(s.w[j]);
+        validate_pointer(s.x[j]);
+        validate_pointer(s.y[j]);
+    }
+    validate_stream(stream);
+    inkling_q4_0_segments_kernel<<<blocks, WARPS * WARP, 0, static_cast<cudaStream_t>(stream)>>>(s);
+    launch_check();
+    return true;
+}
+#endif
+
 bool native_mmvq_supported(int ggml_type) noexcept {
     return ggml_type == 2 || ggml_type == 3 || ggml_type == 6 || ggml_type == 7 || ggml_type == 8 ||
            ggml_type == 10 || ggml_type == 11 || ggml_type == 12 || ggml_type == 13 || ggml_type == 14 || ggml_type == 20 ||
@@ -3691,7 +3723,7 @@ bool native_inkling_q4_0_slots(const MmvqSlots& slots, int count, int n_in, int 
     validate_slots(slots, count, n_out);
     validate_stream(stream);
     const auto s = static_cast<cudaStream_t>(stream);
-    const dim3 grid(unsigned(n_out / 4), unsigned(count));
+    const dim3 grid(unsigned(n_out / kInklingQ40Rows), unsigned(count));
     if (n_in == 2304) inkling_q4_0_slots_kernel<72, 4><<<grid, 4 * WARP, 0, s>>>(slots);
     else inkling_q4_0_slots_kernel<36, 3><<<grid, 3 * WARP, 0, s>>>(slots);
     launch_check();
