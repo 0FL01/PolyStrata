@@ -1,6 +1,6 @@
 # Goal: Measure and deploy an Inkling-2-Mini weight variant
 
-Status: blocked
+Status: active
 
 Source: local `docs/goals/2026-11-24-inkling2-h0-h3-abliteration-agent-plan.md` (digest in the [lock](inkling2-weights/experiment-lock.json)), plus the user's request to iterate through the plan and deploy at the end.
 
@@ -12,7 +12,7 @@ Last updated: 2026-11-24
 | --- | --- | --- | --- |
 | R1 | P0–P2: pin the experiment; reproduce the 32/1/36 precision transplant plan; verify a bounded streaming writer on small fixtures. | [Experiment lock](inkling2-weights/experiment-lock.json), [corpus](inkling2-weights/corpus-manifest.json), [inventory](inkling2-weights/transplant-plan.json), [fixture results](inkling2-weights/p2-report.md). | verified |
 | R2 | P3–P5: prove no-op parity against H0 and establish a fresh RDNA2 baseline with an exact active-vocabulary NLL observer and timing noise. | [No-op parity](inkling2-weights/p3-report.md), [observer alignment](inkling2-weights/p4-report.md), [fresh H0 result](inkling2-weights/h0-result.json) on RX 6700 XT. | verified |
-| R3 | H1-B through H3-E: build the fixed variants on the copy, verify every untouched payload and evaluate the incremental changes on one release binary/configuration. | [H1-B](inkling2-weights/h1-build-report.md) passed; [H1-E](inkling2-weights/h1-e-report.md) quality complete, timing aborted on original H0. | blocked (GPU guard) |
+| R3 | H1-B through H3-E: build the fixed variants on the copy, verify every untouched payload and screen the incremental changes on one release binary/configuration. | [H1](inkling2-weights/h1-e-report.md) is a verified parent, not a recommendation. Offline builds can proceed independently; GPU comparisons are deferred. | H2-B in progress |
 | R4 | A0 through F0: use authorized pinned Mix-16G data, compare D0 and the fixed A1 transfer; open A2 only on the plan's evidence. Recommend the smallest demonstrated combination. | [Authorized A0 inventory](inkling2-weights/orca-inventory.json) and [compatibility report](inkling2-weights/a0-report.md); D0/A1 results and final model SHA pending. | A0 verified; runtime work blocked on R3 |
 | R5 | User: deploy the qualified modified weights next to the original, with an identifying prefix including `OrcaRouter` for an actual Orca transfer; preserve the original and clean up only this task's disposable files. | Final path and SHA, original SHA, production API smoke and cleanup record. | blocked (no qualified candidate) |
 
@@ -22,11 +22,12 @@ Last updated: 2026-11-24
 - Keep the exact H0/U/A pins and stage whitelists. No keep decision based on structural compatibility alone, no alternate unpinned donor, no gated access bypass, and no speculative MoE changes. Evaluate false refusals on benign, checkable tasks.
 - RDNA2 only. Use bounded guarded runs, isolated expert profiles and sessions, no driver changes or performance counters. Do not pass a GPU fault override without separate user approval or restart the host as part of this task. Keep production configuration intact until a candidate passes; final deployment has its own smoke and rollback.
 - Experiment scripts in `tools/inkling_weights/`, stage evidence in `docs/goals/inkling2-weights/`, and large outputs and logs outside git. Engine changes only if required for the observer or qualifying a listed variant; no changes to the release timing path for NLL.
-- Work one atomic stage at a time, recording a verdict before starting the next. The user's request to iterate authorizes proceeding to the next stage after each checkpoint, but not treating a failed gate as a pass. Stop when no independent in-scope checkpoint remains or the final deployment and cleanup pass.
+- Record each build before advancing to the next. On 2026-11-24 the user asked to simplify tests and continue: the next **offline** build depends on its parent's verified file, not on a completed GPU matrix. Do not turn a failed or skipped check into a pass.
+- Reuse completed H0/H1 quality evidence. For intermediate variants run guarded finite-logit and four frozen critical tasks, not the 32-task and 20-run matrices by default. Defer matched 2K/16K timing to the finalist; use a short screen first and expand only if a promotion decision needs more evidence. A short screen does not establish the original noise estimates or waive the final check. The real GPU fault stop and GGUF integrity checks still apply.
 
 ## Current checkpoint
 
-- **H1-E (R3)**: finished quality (31/32 tasks, 4/4 critical, 2,048 finite scores); timing stopped on a fresh `[gfxhub] page fault` during `16k-06-A`, the original H0. Read-only `Guard.boot_clean()` still refuses this boot. The smallest unlock is an approved clean boot with a passing unmodified guard; retry the complete locked timing pair, not only the final rows. Do not open H2-B or start a GPU service on this boot.
+- **H2-B (R3)**: on the independently verified H1 file, replace only the full 201,024-row token embedding and verify the output on CPU. Keep H1 timing explicitly incomplete. A `[gfxhub] page fault` in original H0 still blocks new GPU work on this boot, not CPU-only builds.
 - **A0 (R4)**: authorized Mix-16G access is confirmed. The exact pinned header and one selected payload passed bounded range checks. D0 is eligible for a guarded load attempt; A1's 24 Q8_0 projections need no external scales. The full donor has not been acquired or hashed, and neither D0 nor A1 has run.
 
 ## Checkpoints recorded

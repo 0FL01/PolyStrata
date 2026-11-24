@@ -237,11 +237,13 @@ def execute(args, out):
         for kind, csv in zip(("prefix", "suffix"), workloads[split]):
             (out / f"{split}-{kind}.ids.csv").write_bytes(csv.encode("ascii"))
 
+    orders = {split: ("AB" if split == "2k" else "BA") if args.quick else ORDER for split in workloads}
     write_json(out / "config.json", dict(lock_sha256=hashlib.sha256(lock_data).hexdigest(),
                guard_sha256=hashlib.sha256(GUARD.read_bytes()).hexdigest(), corpus_sha256=lock["corpus_sha256"],
                hardware=hw, boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
                release=lock["release_binary"], profile_seed_sha256=standalone["profile_seed_sha256"], models=models,
-               warmup_order="AB", measured_order=ORDER, timeout_s=limit, sensor_paths={k: str(v) for k, v in sensors.items()}))
+                warmup_order="AB", measured_order=orders if args.quick else ORDER,
+                quick_screen=args.quick, timeout_s=limit, sensor_paths={k: str(v) for k, v in sensors.items()}))
     sys.path.insert(0, str(GUARD.parent))
     sys.dont_write_bytecode = True
     from run_guarded import Guard
@@ -251,7 +253,7 @@ def execute(args, out):
     result = {}
     for split, (prefix, suffix) in workloads.items():
         runs = []
-        for i, arm in enumerate("AB" + ORDER):
+        for i, arm in enumerate("AB" + orders[split]):
             run = out / (f"{split}-warmup-{i + 1}-{arm}" if i < 2 else f"{split}-{i - 1:02d}-{arm}")
             print(run.name, flush=True)
             metrics = run_one(Guard, run, release, flags, sampling, Path(models[arm]["path"]), seed, env,
@@ -268,6 +270,7 @@ def execute(args, out):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--quick", action="store_true", help="screen one measured A/B pair at each length, not a full timing matrix")
     for arm in "ab":
         p.add_argument(f"--model-{arm}", type=Path, help="GGUF path (default: locked H0)")
         p.add_argument(f"--sha256-{arm}", help="expected full GGUF SHA-256 (default: locked H0 SHA-256)")

@@ -97,7 +97,9 @@ def main():
     parser.add_argument('--model', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True, help='a new directory under the private experiment root')
     parser.add_argument('--suite', choices=('tasks', 'orca'), default='tasks')
-    parser.add_argument('--case', action='append', help='run only specified frozen case(s) instead of the full suite')
+    select = parser.add_mutually_exclusive_group()
+    select.add_argument('--case', action='append', help='run only specified frozen case(s) instead of the full suite')
+    select.add_argument('--smoke', action='store_true', help='run only the four H0-passing critical tasks')
     args = parser.parse_args()
     os.umask(0o077)
     lock = json.loads(LOCK.read_bytes())
@@ -105,6 +107,10 @@ def main():
     for file, digest in corpus['tokenizer']['files_sha256'].items():
         checked_bytes(ROOT / file, digest)
     cases = corpus['tasks'] if args.suite == 'tasks' else [c for group in corpus['orca']['cases'].values() for c in group]
+    if args.smoke:
+        if args.suite != 'tasks':
+            parser.error('--smoke applies only to the task suite')
+        cases = [c for c in cases if c.get('smoke_candidate', False)]
     if args.case:
         cases = [c for c in cases if c['id'] in args.case]
         if {c['id'] for c in cases} != set(args.case):

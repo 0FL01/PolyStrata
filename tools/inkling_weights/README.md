@@ -37,10 +37,12 @@ Use these from the checkout with production inactive, after the boot guard passe
 
 ```sh
 WORK="$HOME/.cache/opencode-tmp/opencode/inkling-weights"
-.venv/bin/python -B -m tools.inkling_weights.chat_pilot --model "$MODEL" --output "$WORK/candidate-chat"
+.venv/bin/python -B -m tools.inkling_weights.chat_pilot --smoke --model "$MODEL" --output "$WORK/candidate-chat"
 .venv/bin/python -B -m tools.inkling_weights.nll_pilot --model "$MODEL" --output "$WORK/candidate-nll" \
-  --observer "$OBSERVER" --reference "$PREVIOUS_NLL_RESULT"
-python3 -B -m tools.inkling_weights.timing --model-b "$MODEL" --sha256-b "$MODEL_SHA256"
+  --observer "$OBSERVER" --case 2k-en
+python3 -B -m tools.inkling_weights.timing --quick --model-b "$MODEL" --sha256-b "$MODEL_SHA256"
 ```
 
-Chat uses the shipped Inkling output parser and passes only final content to the frozen validators. `--suite orca` selects the separate low-effort diagnostic; its validator cannot classify refusals. For NLL, omit `--reference` for a new baseline, or pass equal-document results for per-document paired deltas. Both pilots accept repeated `--case` for narrowly scoped smoke checks. Timing defaults both arms to H0; set `--model-a` and `--sha256-a` for a different parent. The runner prints its private evidence directory, runs two unmeasured warm-ups and then `ABBABAAB` at each length, checks all 512 output IDs, and keeps observer/logit printing off. Report the 511 timed decode steps and label VRAM as sampled and durations as estimates from rounded CLI rates.
+`--smoke` runs the four H0-passing critical tasks instead of all 32. Chat uses the shipped Inkling output parser and passes only final content to the validators. `--suite orca` selects the separate low-effort diagnostic; its validator cannot classify refusals. Both quality pilots accept repeated `--case`. For a full paired NLL comparison, use `--reference` with a result from the same documents.
+
+Use `--quick` timing on a finalist: after the two warm-ups, one measured pair per length (`AB` at 2K, `BA` at 16K), eight launches instead of 20. It is a screen, not a noise estimate. Run without `--quick` only when a decision needs the full `ABBABAAB` comparison or to reproduce P5. Both modes check all 512 output IDs (511 timed decode steps), retain sampled VRAM and keep observer/logit printing off. With no model flags both arms use H0; set `--model-a` and `--sha256-a` for a different parent.
