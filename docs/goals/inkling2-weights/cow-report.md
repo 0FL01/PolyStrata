@@ -1,6 +1,6 @@
 # Btrfs reflink migration
 
-The active workcopies are under `~/.cache/opencode-tmp/opencode/inkling-weights/cow.SJvJg9/`. Each clone shares its parent's existing extents. The writer appended only the replacement tensors and updated the header; it did not download the donors again. Runtime pilots reuse these paths, not a fresh GGUF for each run. The original H0 still has its pinned SHA-256 and was not written to.
+The workcopy paths are under `~/.cache/opencode-tmp/opencode/inkling-weights/cow.SJvJg9/`. A1's path there is now a symlink to the same [experimental artifact beside H0](f0-precision-report.md#decision-and-handoff). Each clone shares its parent's existing extents. The writer appended only the replacement tensors and updated the header; it did not download the donors again. Runtime pilots reuse these paths, not a fresh GGUF for each run. The original H0 still has its pinned SHA-256 and was not written to.
 
 | Variant | File in the workcopy directory | Logical bytes | Verified SHA-256 |
 | --- | --- | ---: | --- |
