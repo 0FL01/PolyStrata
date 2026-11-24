@@ -127,7 +127,7 @@ private:
     const uint8_t* ds_w1_ = nullptr;        // markov_w1: F16 rows of kDsRank, in the mapped file
     std::vector<float> ds_hidden_, ds_hidden_b_;   // dspark_hidden_out [kWidth][kDsRank] and its bias, for prepare_head()
     float ds_eps_ = 0, ds_cap_ = 0, ds_theta_ = 0;
-    bool ds_head_ready_ = false;
+    bool ds_head_ready_ = false, ds_reuse_v_ = false;
     float* ds_taps_ = nullptr;              // the rows entering visits kTap of the last call, rows_ apart
     float *ds_x_ = nullptr, *ds_xa_ = nullptr, *ds_q_ = nullptr, *ds_qr_ = nullptr, *ds_k_ = nullptr,
           *ds_kr_ = nullptr, *ds_v_ = nullptr, *ds_ao_ = nullptr, *ds_out_ = nullptr, *ds_g_ = nullptr,

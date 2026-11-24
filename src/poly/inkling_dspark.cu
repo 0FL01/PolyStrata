@@ -52,6 +52,7 @@ __device__ __forceinline__ float key_value(const Q8Rows& c, const float* own, in
     return own[((kk - n_ctx) * kKv + g) * kHead + d];
 }
 
+template<bool ReuseV>
 __global__ void __launch_bounds__(kHead) attend_part_kernel(const float* q, const float* kb, const float* vb, Q8Rows k,
                                                              Q8Rows v, int64_t lo, int64_t n_ctx, int ring, int parts,
                                                              float* part) {
@@ -114,16 +115,30 @@ __global__ void __launch_bounds__(kHead) attend_part_kernel(const float* q, cons
             fac[d] = f;
         }
         __syncthreads();
-        for (int j = 0; j < count; ++j) {
-            int64_t slot = slot0 + j;
-            if (ring && slot >= ring) slot -= ring;
-            tile[j][d] = key_value(v, vb, first + j, n_ctx, slot, g, d);
-        }
-        __syncthreads();
-        for (int qi = 0; qi < kQ; ++qi) {
-            float a = acc[qi] * fac[qi];
-            for (int j = 0; j < count; ++j) a = __fmaf_rn(s[qi][j], tile[j][d], a);
-            acc[qi] = a;
+        if constexpr (ReuseV) {
+            // Load a value once per lane. Each query keeps the same rescale and key order.
+#pragma unroll
+            for (int qi = 0; qi < kQ; ++qi) acc[qi] *= fac[qi];
+#pragma unroll 1
+            for (int j = 0; j < count; ++j) {
+                int64_t slot = slot0 + j;
+                if (ring && slot >= ring) slot -= ring;
+                const float value = key_value(v, vb, first + j, n_ctx, slot, g, d);
+#pragma unroll
+                for (int qi = 0; qi < kQ; ++qi) acc[qi] = __fmaf_rn(s[qi][j], value, acc[qi]);
+            }
+        } else {
+            for (int j = 0; j < count; ++j) {
+                int64_t slot = slot0 + j;
+                if (ring && slot >= ring) slot -= ring;
+                tile[j][d] = key_value(v, vb, first + j, n_ctx, slot, g, d);
+            }
+            __syncthreads();
+            for (int qi = 0; qi < kQ; ++qi) {
+                float a = acc[qi] * fac[qi];
+                for (int j = 0; j < count; ++j) a = __fmaf_rn(s[qi][j], tile[j][d], a);
+                acc[qi] = a;
+            }
         }
     }
     __syncthreads();
@@ -200,10 +215,13 @@ void mix_taps(const Taps& t, const float* norm, float* out, int first, int n, fl
 size_t attend_floats() { return (size_t) kKv * kParts * kQ * (kHead + 2); }
 
 void attend(const float* q, const float* kb, const float* vb, Q8Rows k, Q8Rows v, int64_t lo, int64_t pos, int ring,
-            float* scratch, float* out, cudaStream_t st) {
+            float* scratch, float* out, cudaStream_t st, bool reuse_v) {
     const int64_t n_ctx = pos - lo;
     const int parts = std::min(kParts, div_up(n_ctx + kBlock, kTile));
-    attend_part_kernel<<<dim3(kKv, parts), kHead, 0, st>>>(q, kb, vb, k, v, lo, n_ctx, ring, parts, scratch);
+    if (reuse_v)
+        attend_part_kernel<true><<<dim3(kKv, parts), kHead, 0, st>>>(q, kb, vb, k, v, lo, n_ctx, ring, parts, scratch);
+    else
+        attend_part_kernel<false><<<dim3(kKv, parts), kHead, 0, st>>>(q, kb, vb, k, v, lo, n_ctx, ring, parts, scratch);
     attend_add_kernel<<<dim3(kKv, kQ), kHead, 0, st>>>(scratch, parts, out);
 }
 

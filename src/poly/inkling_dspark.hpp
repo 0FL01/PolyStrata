@@ -32,7 +32,7 @@ struct Q8Rows {
 /// (normed, rotated), kb and vb: [8][8][128]; out: [8][24][128].  scratch: attend_floats() floats.
 size_t attend_floats();
 void attend(const float* q, const float* kb, const float* vb, Q8Rows k, Q8Rows v, int64_t lo, int64_t pos, int ring,
-            float* scratch, float* out, cudaStream_t st);
+            float* scratch, float* out, cudaStream_t st, bool reuse_v);
 
 /// x = [state, w1, hidden, context] (256 + 256 + 2304 + 2304 floats).
 void joint(const float* state, const float* w1, const float* hidden, const float* context, float* x,

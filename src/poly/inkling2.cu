@@ -611,6 +611,12 @@ void Inkling2::load_geometry() {
     looped_ = true;
     clamp_exp_.assign(kPhysical + 1, INFINITY);
     if (drafter) {
+        const char* reuse_v = std::getenv("STRATA_INKLING_DSPARK_REUSE_V");
+        ds_reuse_v_ = kernels::gfx_arch_is(p.gcnArchName, "gfx1031") &&
+                      reuse_v && reuse_v[0] == '1' && reuse_v[1] == '\0';
+        if (ds_reuse_v_)
+            std::fputs("strata-poly: STRATA_INKLING_DSPARK_REUSE_V=1: reuse drafter attention values on gfx1031\n",
+                       stderr);
         // a window's guesses need the short convolutions' state after each of its tokens, which the decode switch's
         // kernels leave (layer_head(), layer_tail())
         if (!decode_) throw std::runtime_error("the DSpark drafter of Inkling-2-Mini needs STRATA_INKLING_DECODE=1");
@@ -1604,7 +1610,8 @@ void Inkling2::ds_block(int32_t token) {
         const bool ring = ds_swa(l);
         dspark::attend(ds_qr_, ds_kr_, ds_v_, {(int8_t*) c.planes[0].data, (uint16_t*) c.planes[1].data},
                        {(int8_t*) c.planes[2].data, (uint16_t*) c.planes[3].data},
-                       ring ? std::max<int64_t>(0, a - kWindow) : 0, a, ring ? kWindow : 0, ds_att_, ds_ao_, cs(st_));
+                       ring ? std::max<int64_t>(0, a - kWindow) : 0, a, ring ? kWindow : 0, ds_att_, ds_ao_, cs(st_),
+                       ds_reuse_v_);
         lin(L.o, ds_ao_, ds_out_, kDsBlock);
         axpy(ds_out_, 1.f, ds_x_, kDsBlock * kWidth, true, st_);
         rms_norm(ds_x_, fp(L.ffn_norm), ds_xa_, kWidth, kDsBlock, ds_eps_, st_);
