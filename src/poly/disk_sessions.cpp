@@ -86,7 +86,7 @@ DiskSessions::DiskSessions(Engine& e, bool enabled, uint64_t ram_floor)
     : engine_(e), ram_floor_(ram_floor), supported_(false) {
     if (!enabled) return;
     const auto* arch = e.gg_->get("general.architecture");
-    const bool known_draft = !e.draft_ || (e.dg_ && !e.block_layer_);
+    const bool known_draft = !e.draft_ || e.uses_dspark();
     supported_ = arch && is_inkling2_architecture(arch->s) && known_draft && !e.split_ && !e.next_ &&
                  e.sequences() == 1 && e.lo_ == 0 && e.hi_ == e.n_layer_ && e.row_bytes() > 0 &&
                  e.row_bytes() <= ConversationBuffer::segment_bytes;
@@ -131,7 +131,7 @@ bool DiskSessions::run(bool save, const std::string& path, Conversations<Engine>
 
     Engine& e = engine_;
     const Layout layout{e.max_context(), e.n_vocab(), e.n_embd(), e.n_layer_, (int) e.opt_.kv_format,
-                         e.state_bytes(), e.row_bytes(), e.draft_};
+                        e.state_bytes(), e.row_bytes(), e.uses_dspark()};
     const auto& ids = kept.seq();
     int64_t pos = e.pos();
     if (save && (pos != (int64_t) ids.size() || !layout.valid_tokens(ids)))

@@ -328,6 +328,8 @@ public:
     /// every expert: the block runs the whole model, and with experts on the CPU it cost more than its right guesses
     /// saved (Clover on an 8 GB laptop wrote 57.7 tokens/s after a 32K prompt with its guesses, 61.6 without).
     bool drafts() const { return next_ ? next_->drafts() : draft_ || (block_guess_ && all_cached()); }
+    /// Inkling's native, external drafter, with its own committed KV and context vector.
+    bool uses_dspark() const { return looped_ && draft_ && dg_ && !block_layer_; }
     /// The guesses of a window come out of draft(token, 0, &p) together: asking for one more costs nothing.
     bool guesses_at_once() const { return next_ ? next_->guesses_at_once() : block_guess_; }
     /// Test only: the calls read()'s layer-major path gave the draft block's rows (draft_rows()) on the card that has

@@ -1314,6 +1314,9 @@ With DSpark, the file also holds the drafter's committed attention cache and its
 the exact loaded draft GGUF. It does not hold pending guesses or the window selection policy. A changed draft budget
 can restore the same file. Plain and DSpark files cannot be restored in each other's mode: read the conversation
 again with the desired mode, then save it to a new file.
+For DSpark, `--draft-max 3` is a budget, not a fixed window: the policy asks for zero to three proposals, and
+asks for fewer near the context or generation limit. `--draft-max 0` keeps the drafter's state and disk layout
+without asking it for proposals; use `--lookup 0` as well to disable lookup guesses.
 Inkling uses `--conversation-cache-min-free-mib` and a fixed 4096 MiB disk reserve, and does not use
 `--session-save-reclaim`. On RX 6700 XT / Ryzen 7 5700X, with Inkling-2-Mini UD-IQ4_XS and Q8_0 KV, a 32,768-token
 snapshot (663,435,880 bytes) saved in 602 ms and restored in 980 ms. A fresh process read only the 30-token

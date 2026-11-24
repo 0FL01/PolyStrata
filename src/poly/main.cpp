@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -28,6 +29,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -573,33 +575,40 @@ struct Session {
         };
         if (max_new > 0) {
             int32_t w[strata::spec::DraftPolicy::kMaxT], d[strata::spec::DraftPolicy::kMaxT];
+            const bool dspark = engine.uses_dspark();
             const int block_window = engine.guesses_at_once() ? most : draft_most;
             int32_t t = pick(engine.logits());   // picked, and not shown yet
             while (show(t)) {
                 // t goes into the model now, and with it guesses at what follows when there are any that pay
                 const Clock::time_point round = Clock::now();
-                const bool room = engine.pos() + most <= engine.max_context();
-                const int offered = look && room ? repeats.propose(most - 1, w + 1) : 0;
+                const int64_t ctx_left = engine.max_context() - engine.pos();
+                // There are still max_new - produced picks to make after t.  If all guesses match, the last
+                // pick is shown without feeding it, so verifying more rows cannot save a call.
+                const int width = dspark ? (int) std::min<int64_t>({most, ctx_left, max_new - r.produced})
+                                         : ctx_left >= most ? most : 1;
+                const int draft_width = std::min(width, block_window);
+                const int offered = look && width > 1 ? repeats.propose(width - 1, w + 1) : 0;
                 const int match = repeats.last_match();
-                const int widest = match >= kCopyMatch ? most : std::min(most, block_window);   // this round's window
+                const int widest = match >= kCopyMatch || (dspark && draft_most == 1) ? width : draft_width;
                 const int k = std::min(offered, widest - 1);
                 // A repeat that fills the window, from a match of a length that has been right nine times in ten,
                 // is taken as it is: the block would mostly say the same, and asking it takes time.  Otherwise the
                 // block guesses, each guess from the one before, while a guess more pays (Guesses).
-                const bool blocks = engine.drafts() && room && !(k == widest - 1 && policy.lookup_rate(match) >= 0.9);
+                const bool blocks = engine.drafts() && draft_width > 1 &&
+                                    !(k == widest - 1 && policy.lookup_rate(match) >= 0.9);
                 const bool ask = guesses.begin(blocks, policy);
                 // the round's time, as the policy counts it: a window of `in` tokens wrote n of them
                 const auto count = [&](int in, int n) {
                     return guesses.end(in, n, ms_since(round), engine.took_record());
                 };
                 strata::spec::DraftPolicy::Pick use = policy.choose(1, k, match);
-                if (draft_log && engine.drafts() && room) {
+                if (draft_log && engine.drafts() && draft_width > 1) {
                     // STRATA_DRAFT_LOG: the block's every guess of the round, written beside the token they follow,
                     // and the token fed alone, so that the guesses can be checked against another implementation's
                     // at every position of a plain decode
                     std::fprintf(draft_log, "%lld %d", (long long) engine.pos(), t);
                     int32_t from = t;
-                    for (int n_d = 0; n_d < std::min(most, block_window) - 1; ++n_d) {
+                    for (int n_d = 0; n_d < draft_width - 1; ++n_d) {
                         float p = 0.f;
                         const Clock::time_point asked_at = Clock::now();
                         from = engine.draft(from, n_d, &p);
@@ -610,7 +619,7 @@ struct Session {
                     use = {false, 1};
                 } else if (ask) {
                     int n_d = 0;
-                    for (int32_t from = t; n_d < std::min(most, block_window) - 1 && guesses.wants(n_d); from = d[n_d++]) {
+                    for (int32_t from = t; n_d < draft_width - 1 && guesses.wants(n_d); from = d[n_d++]) {
                         float p = 0.f;
                         const Clock::time_point asked_at = Clock::now();
                         d[n_d] = engine.draft(from, n_d, &p);
@@ -1265,8 +1274,8 @@ void usage() {
                  "  --draft-model FILE     a file of the same model to take that block from, when --model has none;\n"
                  "                         for Gemma 4, its draft model (a gemma4-assistant file); for\n"
                  "                         Inkling-2-Mini, its DSpark drafter (needs STRATA_INKLING_DECODE=1)\n"
-                 "  --draft-max N          the most guesses a window takes from a block that makes them one by one\n"
-                 "                         (default 3)\n"
+                 "  --draft-max N          budget for guesses made one by one (default 3); the policy may use fewer\n"
+                 "                         with DSpark, 0 keeps its session state but does not ask for guesses\n"
                  "  --draft-vocab N        the block guesses among the vocabulary's first N tokens (default:\n"
                  "                         131072 for Qwen3.6, Ornith and Tiel, all of it for the others; 0 = all)\n"
                  "  --no-graphs            launch a token's kernels one by one (default: a layer's are recorded once\n"
@@ -1369,7 +1378,7 @@ int main(int argc, char** argv) {
     Sampling s;
     bool want_serve = false, want_disk_sessions = false;
     long long max_new = 32;
-    int top_probs = 0, lookup = 3, image_pad = -1, check = 0, draft_max = 0;
+    int top_probs = 0, lookup = 3, image_pad = -1, check = 0, draft_max = -1;
     std::string images;
     std::vector<int32_t> ids, eos, follow;
     for (int i = 1; i < argc; ++i) {
@@ -1420,7 +1429,14 @@ int main(int argc, char** argv) {
         }
         else if (a == "--window") o.window = std::atoi(val());
         else if (a == "--lookup") lookup = std::atoi(val());
-        else if (a == "--draft-max") draft_max = std::atoi(val());
+        else if (a == "--draft-max") {
+            const std::string_view v = val();
+            const auto [end, ec] = std::from_chars(v.data(), v.data() + v.size(), draft_max);
+            if (ec != std::errc{} || end != v.data() + v.size() || draft_max < 0) {
+                std::fputs("strata-poly: --draft-max needs a nonnegative integer\n", stderr);
+                return 2;
+            }
+        }
         else if (a == "--no-draft") o.draft = false;
         else if (a == "--draft-model") o.draft_model = val();
         else if (a == "--expert-swaps") o.expert_swaps = std::atoi(val());
@@ -1547,7 +1563,8 @@ int main(int argc, char** argv) {
                                      "(--conversation-cache-mib N asks for one anyway)\n");
         }
         Session ss(engine, eos, cache, lookup);
-        if (draft_max > 0) ss.draft_most = std::min(draft_max + 1, strata::spec::DraftPolicy::kMaxT);
+        if (draft_max > 0 || (engine.uses_dspark() && draft_max == 0))
+            ss.draft_most = 1 + std::min(draft_max, strata::spec::DraftPolicy::kMaxT - 1);
         int rc = 0;
         if (want_serve) {
             rc = serve(ss, want_disk_sessions);
