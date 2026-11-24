@@ -583,6 +583,7 @@ __device__ __forceinline__ float ue4m3_to_f32_half(uint8_t x) {
 }
 
 // One call = two sub-blocks (32 values); `bq8_1` is the block's first q8_1 block (two per 64 values).
+template<bool ScaleSelect = false>
 __device__ __forceinline__ float vec_dot_nvfp4_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
                                                     const int& kbx, const int& iqs) {
     const block_nvfp4* bq4 = (const block_nvfp4*) vbq + kbx;
@@ -598,7 +599,17 @@ __device__ __forceinline__ float vec_dot_nvfp4_q8_1(const void* __restrict__ vbq
         sumi = ggml_cuda_dp4a(v0.y, get_int_b4(bq8->qs, i8 + 2), sumi);
         sumi = ggml_cuda_dp4a(v1.x, get_int_b4(bq8->qs, i8 + 1), sumi);
         sumi = ggml_cuda_dp4a(v1.y, get_int_b4(bq8->qs, i8 + 3), sumi);
-        sum += ue4m3_to_f32_half(bq4->d[is]) * __low2float(bq8->ds) * (float) sumi;
+        const uint8_t byte = bq4->d[is];
+        float scale;
+        if constexpr (ScaleSelect) {
+            const uint32_t exp = (byte >> 3) & 15u, man = byte & 7u;
+            const float normal = __uint_as_float(((exp + 119u) << 23) | (man << 20));
+            // Zero already falls through the subnormal case. Only 0x7f (not 0xff) maps to zero here.
+            scale = byte == 0x7fu ? 0.f : exp ? normal : (float) man * 0x1p-10f;
+        } else {
+            scale = ue4m3_to_f32_half(byte);
+        }
+        sum += scale * __low2float(bq8->ds) * (float) sumi;
     }
     return sum;
 }
@@ -3507,7 +3518,7 @@ __global__ void __launch_bounds__(128) mmvq_slots_kernel(S slots, size_t row_byt
 }
 
 // mmvq_slots_kernel with L lanes a row, 32 / L rows a warp: the calls k = lane, lane + L, ... and a sum over the L.
-template<int TY, int L, typename S>
+template<int TY, int L, typename S, bool ScaleSelect = false>
 __global__ void __launch_bounds__(128) mmvq_slot_lanes_kernel(S slots, size_t row_bytes, int n_in, int n_out) {
     using F = Fmt<TY>;
     const int part = threadIdx.x % L, row = (blockIdx.x * 4 + threadIdx.y) * (32 / L) + threadIdx.x / L;
@@ -3519,7 +3530,12 @@ __global__ void __launch_bounds__(128) mmvq_slot_lanes_kernel(S slots, size_t ro
         const int calls = n_in / F::qk * F::ipb;
         for (int k = part; k < calls; k += L) {
             const int kbx = k / F::ipb, iqs = F::step * (k % F::ipb);
-            s += F::dot(wr, x + kbx * (F::qk / 32), kbx, iqs);
+            if constexpr (ScaleSelect) {
+                static_assert(TY == 40);
+                s += vec_dot_nvfp4_q8_1<true>(wr, x + kbx * (F::qk / 32), kbx, iqs);
+            } else {
+                s += F::dot(wr, x + kbx * (F::qk / 32), kbx, iqs);
+            }
         }
     }
 #pragma unroll
@@ -3533,7 +3549,26 @@ void slots_of(int t, const S& slots, int count, int n_in, int n_out, void* strea
     if (g_slot_lanes && t == 40) {   // NVFP4: half a warp a row
         constexpr int lanes = 16, rows = 4 * (32 / lanes);
         const dim3 grid((unsigned) ((n_out + rows - 1) / rows), (unsigned) count), block(32, 4);
-        mmvq_slot_lanes_kernel<40, lanes, S><<<grid, block, 0, (cudaStream_t) stream>>>(slots, rb, n_in, n_out);
+#if defined(__HIPCC__)
+        if constexpr (std::is_same_v<S, MmvqSlots>) {
+            static const bool select = [] {
+                const char* v = std::getenv("STRATA_HIP_NVFP4_SLOT_SELECT");
+                if (!v || v[0] != '1' || v[1]) return false;
+                int dev = 0;
+                cudaDeviceProp p;
+                return cudaGetDevice(&dev) == cudaSuccess && cudaGetDeviceProperties(&p, dev) == cudaSuccess &&
+                       strata::kernels::gfx_arch_is(p.gcnArchName, "gfx1031");
+            }();
+            // Inkling's joined gate/up and down only. Grouped ID, single-matrix and other shapes keep their kernels.
+            if (select && n_out == 2304 && (n_in == 2304 || n_in == 1152))
+                mmvq_slot_lanes_kernel<40, lanes, S, true><<<grid, block, 0, (cudaStream_t) stream>>>(slots, rb, n_in, n_out);
+            else
+                mmvq_slot_lanes_kernel<40, lanes, S><<<grid, block, 0, (cudaStream_t) stream>>>(slots, rb, n_in, n_out);
+        } else
+#endif
+        {
+            mmvq_slot_lanes_kernel<40, lanes, S><<<grid, block, 0, (cudaStream_t) stream>>>(slots, rb, n_in, n_out);
+        }
         check("iq_mmvq_slots");
         return;
     }

@@ -771,6 +771,12 @@ inputs in over 1,400 launches during a real 32K prefill. Against `ed88e9ba` (the
 four 32K runs per build averaged 34.91 -> 34.47 s (1.27% less), with all 32 greedy IDs identical in all eight
 runs. Decode stayed within the spread.
 
+`STRATA_HIP_NVFP4_SLOT_SELECT=1` (opt-in, gfx1031) decodes UE4M3 scales with selects in Inkling's
+16-lane NVFP4 expert slots for the joined gate/up and down shapes. This is the small-token path enabled by
+`STRATA_INKLING_DECODE=1`, so it can also run on a short prompt tail. It does not change the scales, signed
+dot products or FP32 accumulation order. Single-matrix and grouped-ID paths keep their previous kernels;
+the grouped prefill switch above is independent. See the [decode measurements](goals/2026-11-24-inkling2-decode-implementation.md).
+
 `STRATA_INKLING_BATCH_KV_RELEASE=1` (opt-in, gfx1031, VRAM pool off) waits for free-memory accounting once
 after a KV trim, instead of once per KV region. The device barrier, release/remap operations, retained
 addresses, KV policy and subsequent expert-cache refill stay on their existing paths. The wait allows at
