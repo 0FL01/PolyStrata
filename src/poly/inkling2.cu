@@ -1197,6 +1197,21 @@ void Inkling2::save_card_state(uint8_t* dst) {
         // Bring the seal to the committed position, without modifying its exact hot tail. Packed rows below
         // this checkpoint's seal now exist even if no more inputs are evaluated before a rollback.
         for (int i = 0; i < kVisits; ++i) if (!local(i)) seal(caches_[i], pos_);
+        if (pack && looped_) {
+            static const bool pack_v4 = [] {
+                const char* p = std::getenv("STRATA_INKLING_V4_STATE_PACK");
+                return p && p[0] == '1' && p[1] == '\0';
+            }();
+            if (pack_v4 && try_pack_state(dst)) {
+                static const bool logged = [] {
+                    std::fputs("strata-poly: STRATA_INKLING_V4_STATE_PACK=1: packed checkpoints in expert stage\n",
+                               stderr);
+                    return true;
+                }();
+                (void) logged;
+                return;
+            }
+        }
         ck(cudaStreamSynchronize(cs(st_)), "save hybrid Inkling state");
         uint8_t* out = dst + native_session_state_bytes();
         const int64_t first = inkling::v4_seal(pos_), n = pos_ - first;
@@ -1226,8 +1241,19 @@ bool Inkling2::try_pack_state(uint8_t* dst) {
     const int64_t keep = std::min(opt_.max_context, kWindow - 1);
     const int64_t first = std::max<int64_t>(0, pos_ - keep);
     const size_t one = (size_t) keep * kv_bytes();
-    if (bytes != state_bytes + (kVisits - kVisits / kBlock) * one || swa_plan_.ring_rows < keep)
+    const size_t prefix_bytes = state_bytes + (kVisits - kVisits / kBlock) * one;
+    const int64_t hot_keep = v4_ ? inkling::v4_checkpoint_rows(opt_.max_context) : 0;
+    const int64_t hot_first = v4_ ? inkling::v4_seal(pos_) : 0;
+    if (bytes != prefix_bytes + (kVisits / kBlock) * (size_t) hot_keep * (kKey + kScaleBytes) ||
+        swa_plan_.ring_rows < keep)
         return false;
+    if (v4_) {
+        if (!q8() || hot_rows_ < hot_keep || pos_ - hot_first > hot_keep) return false;
+        for (int i = 0; i < kVisits; ++i) if (!local(i)) {
+            const auto& p = caches_[i].planes;
+            if (!p[2].data || p[2].stride != kKey || !p[3].data || p[3].stride != kScaleBytes) return false;
+        }
+    }
     for (int i = 0; i < kVisits; ++i) if (local(i))
         for (int j = 0; j < 4; ++j) {
             const auto& p = caches_[i].planes[j];
@@ -1269,6 +1295,22 @@ bool Inkling2::try_pack_state(uint8_t* dst) {
             }
             plane += (size_t) keep * p.stride;
         }
+    }
+    if (v4_) {
+        // Unlike SWA there is no left padding. Keep the native Q8 tail in chronological order, then zeros.
+        uint8_t* plane = stage_ + prefix_bytes;
+        for (int i = 0; i < kVisits; ++i) if (!local(i))
+            for (int v = 2; v < 4; ++v) {
+                const Plane& p = caches_[i].planes[v];
+                for (int64_t row = hot_first; row < pos_;) {
+                    const int64_t at = row % hot_rows_, count = std::min(pos_ - row, hot_rows_ - at);
+                    ck(cudaMemcpyAsync(plane + (size_t) (row - hot_first) * p.stride, p.data + at * p.stride,
+                                       (size_t) count * p.stride, cudaMemcpyDeviceToDevice, cs(st_)),
+                       "pack Inkling hot V state");
+                    row += count;
+                }
+                plane += (size_t) hot_keep * p.stride;
+            }
     }
     ck(cudaMemcpyAsync(dst, stage_, bytes, cudaMemcpyDeviceToHost, cs(st_)), "save packed Inkling state");
     ck(cudaStreamSynchronize(cs(st_)), "save packed Inkling state");
