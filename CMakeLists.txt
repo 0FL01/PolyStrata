@@ -2158,6 +2158,8 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
       target_include_directories(inkling-nll-observer PRIVATE ${_inkling_nll_includes})
       target_link_libraries(inkling-nll-observer PRIVATE ${_inkling_nll_libraries})
     endif()
+    add_executable(poly_inkling_swa_layout_test src/poly/inkling_swa_layout_test.cpp)
+    add_test(NAME poly_inkling_swa_layout_test COMMAND poly_inkling_swa_layout_test)
     # STRATA_INKLING_FLASH: the fused prompt attention against the plain kernels, and both timed; needs a card
     # (77 = skipped)
     add_executable(poly_inkling_attend_test src/poly/inkling_attend_test.cu src/poly/inkling_attend.cu

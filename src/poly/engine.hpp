@@ -456,6 +456,10 @@ protected:
     /// The layers' places in state_, and the attention's caches: a row a position.  Only for the layers this
     /// engine runs (runs()).
     virtual void alloc_caches() = 0;
+    // VRAM saved by smaller fixed buffers and by compact mapped rows, respectively.
+    // Until funding is requested the expert cache sizes itself as if these bytes were still in use.
+    virtual size_t kv_headroom_bytes() const { return 0; }
+    virtual size_t kv_codec_saved_bytes() const { return 0; }
     /// What row_bytes(), save_rows() and load_rows() are for the layers this engine runs.
     virtual size_t card_row_bytes() const = 0;
     virtual void save_card_rows(int64_t first, int64_t n, uint8_t* dst) = 0;
@@ -835,6 +839,10 @@ protected:
     void take_bound(int s);
     void hold(int s);   ///< bind() on this card alone
     size_t other_rows() const;
+    size_t charged_rows() const;
+    size_t placement_free(size_t free) const;
+    size_t expert_kv_cap_ = 0;   ///< optional combined mapped rows + whole-slot arena limit
+    bool fund_experts_ = false;
     size_t budget_ = 0;          ///< their VRAM and the expert cache's together, as the cache was filled
     int asked_reserve_mib_ = -1; ///< Options::vram_reserve_mib as load() got it
     int reserve_mib_ = 0;        ///< what the cache was sized to leave free

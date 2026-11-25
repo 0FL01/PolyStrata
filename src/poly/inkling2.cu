@@ -28,6 +28,25 @@ constexpr int kKvWidth = 1024;    // Inkling2::kKey
 constexpr int kValueTile = 128;
 int div_up(int a, int b) { return (a + b - 1) / b; }
 
+static_assert(sizeof(uint4) == inkling::kSwaCopyAlign && alignof(uint4) <= inkling::kSwaCopyAlign);
+struct SwaCopyPlanes {
+    uint4* ring[4];
+    uint4* stage[4];
+    int stride[4];   // vectors per row
+};
+
+template <bool Gather>
+__global__ void swa_tail_copy(SwaCopyPlanes p, int ring, int ring_head, int stage_head, int rows) {
+    const int j = blockIdx.y, stride = p.stride[j], i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (!stride || i >= rows * stride) return;   // FP16 has no scale planes
+    const int row = i / stride;
+    int slot = ring_head + row;
+    if (slot >= ring) slot -= ring;   // at most one ring, in either direction
+    const int in_ring = slot * stride + i - row * stride, in_stage = stage_head * stride + i;
+    if constexpr (Gather) p.stage[j][in_stage] = p.ring[j][in_ring];
+    else p.ring[j][in_ring] = p.stage[j][in_stage];
+}
+
 template <bool Maximum> __device__ float wave_reduce(float x) {
     for (int d = 16; d > 0; d /= 2) {
         const float y = __shfl_down(x, d, 32);
@@ -827,8 +846,21 @@ size_t Inkling2::kv_bytes() const {
 size_t Inkling2::card_row_bytes() const { return kVisits / kBlock * kv_bytes() + (draft_ ? ds_row_bytes() : 0); }
 
 void Inkling2::alloc_caches() {
-    ring_ = std::min(opt_.max_context, kWindow + rows_ - 1);
-    auto* rings = (uint8_t*) seq_alloc((size_t) (kVisits - kVisits / kBlock) * ring_ * kv_bytes(), "Inkling SWA KV");
+    constexpr int visits = kVisits - kVisits / kBlock;
+    const char* compact = std::getenv("STRATA_INKLING_COMPACT_SWA");
+    const bool enabled = compact && compact[0] == '1' && compact[1] == '\0';
+    swa_plan_ = inkling::plan_swa(opt_.max_context, kWindow, rows_, std::min(opt_.window, rows_), visits, kv_bytes(),
+                                 (size_t) rows_ * kWidth * sizeof(float), enabled);
+    const int ring = swa_plan_.ring_rows;
+    if (enabled) {
+        if (swa_plan_.saved_bytes)
+            std::fprintf(stderr, "strata-poly: STRATA_INKLING_COMPACT_SWA=1: %d -> %d rows per target SWA visit; "
+                         "%zu-byte stage in %s, %zu bytes saved\n", std::min(opt_.max_context, kWindow + rows_ - 1),
+                         ring, (size_t) swa_plan_.stage_rows * kv_bytes(),
+                         swa_plan_.borrow_input ? "input_[0]" : "dedicated scratch", swa_plan_.saved_bytes);
+        else std::fputs("strata-poly: STRATA_INKLING_COMPACT_SWA=1: stock allocation is no larger\n", stderr);
+    }
+    auto* rings = (uint8_t*) seq_alloc((size_t) visits * ring * kv_bytes(), "Inkling SWA KV");
     const size_t wide = kKey * (q8() ? 1 : sizeof(uint16_t));
     const size_t scale = q8() ? kKey / 32 * sizeof(uint16_t) : 0;
     for (int i = 0; i < kVisits; ++i) {
@@ -839,7 +871,7 @@ void Inkling2::alloc_caches() {
             if (!stride) continue;
             if (local(i)) {
                 p.data = rings;
-                rings += (size_t) ring_ * stride;
+                rings += (size_t) ring * stride;
             } else p.data = (uint8_t*) kv_alloc(stride, 1);
         }
     }
@@ -906,7 +938,7 @@ void Inkling2::ring_state(int visit, int64_t pos, const uint8_t* src, uint8_t* d
     for (const auto& p : caches_[visit].planes) if (p.stride) {
         if (dst) std::memset(dst, 0, (size_t) (keep - (pos - first)) * p.stride);
         for (int64_t i = first; i < pos;) {
-            const int64_t at = i % ring_, n = std::min(pos - i, ring_ - at);
+            const auto [at, n] = inkling::swa_ring_span(i, pos, swa_plan_.ring_rows);
             const size_t off = (size_t) (i - (pos - keep)) * p.stride, bytes = (size_t) n * p.stride;
             if (dst) ck(cudaMemcpy(dst + off, p.data + at * p.stride, bytes, cudaMemcpyDeviceToHost), "save Inkling SWA");
             else ck(cudaMemcpy(p.data + at * p.stride, src + off, bytes, cudaMemcpyHostToDevice), "load Inkling SWA");
@@ -958,15 +990,14 @@ bool Inkling2::try_pack_state(uint8_t* dst) {
     if (!dst || draft_ || !direct_stage_ || !stage_ || split_ || next_ || recording_ ||
         lo_ != 0 || hi_ != n_layer_ || n_layer_ != kPhysical || layers_.size() != kPhysical ||
         state_n_ != rec_n_ || rec_n_ != (size_t) kVisits * kConvFloats || !state_ ||
-        ring_ <= 0 || pos_ < 0 || pos_ > opt_.max_context)
+        swa_plan_.ring_rows <= 0 || pos_ < 0 || pos_ > opt_.max_context)
         return false;
     const size_t state_bytes = state_n_ * sizeof(float), bytes = card_state_bytes();
     if (stage_bytes_ < bytes) return false;
     const int64_t keep = std::min(opt_.max_context, kWindow - 1);
     const int64_t first = std::max<int64_t>(0, pos_ - keep);
     const size_t one = (size_t) keep * kv_bytes();
-    if (bytes != state_bytes + (kVisits - kVisits / kBlock) * one ||
-        ring_ != std::min(opt_.max_context, kWindow + rows_ - 1))
+    if (bytes != state_bytes + (kVisits - kVisits / kBlock) * one || swa_plan_.ring_rows < keep)
         return false;
     for (int i = 0; i < kVisits; ++i) if (local(i))
         for (int j = 0; j < 4; ++j) {
@@ -1001,7 +1032,7 @@ bool Inkling2::try_pack_state(uint8_t* dst) {
         for (const auto& p : caches_[i].planes) if (p.stride) {
             // Same source row, destination padding and oldest-first order as ring_state().
             for (int64_t row = first; row < pos_;) {
-                const int64_t at = row % ring_, count = std::min(pos_ - row, ring_ - at);
+                const auto [at, count] = inkling::swa_ring_span(row, pos_, swa_plan_.ring_rows);
                 const size_t off = (size_t) (row - (pos_ - keep)) * p.stride;
                 ck(cudaMemcpyAsync(plane + off, p.data + at * p.stride, (size_t) count * p.stride,
                                    cudaMemcpyDeviceToDevice, cs(st_)), "pack Inkling SWA state");
@@ -1085,6 +1116,28 @@ void Inkling2::assign_scratch() {
         s3q8_ = fbuf(3 * (size_t) kStageRows * kernels::native_q8_1_bytes(kWidth) / sizeof(float));
     }
     for (auto& x : input_) x = fbuf(width);
+    if (swa_plan_.stage_rows) {
+        // fbuf() runs first without a backing allocation. Budget dedicated space in both
+        // passes; bind a borrowed slice only once input_[0] has its real pointer.
+        uint8_t* stage = nullptr;
+        if (swa_plan_.borrow_input) {
+            // Sink projection is the last reader on a local visit. It, staging, attention,
+            // commit, and the next writer (including drafter_kept()) all use st_.
+            stage = (uint8_t*) input_[0];
+            if (stage) {
+                constexpr size_t align = inkling::kSwaCopyAlign;
+                stage += (align - (uintptr_t) stage % align) % align;
+            }
+        } else stage = (uint8_t*) fbuf(swa_plan_.scratch_bytes / sizeof(float));
+        // The HIP allocation and every fbuf offset are at least 16-byte aligned; so are the plane strides.
+        const size_t wide = kKey * (q8() ? 1 : sizeof(uint16_t));
+        const size_t scale = q8() ? kKey / 32 * sizeof(uint16_t) : 0;
+        for (int j = 0; j < 4; ++j) {
+            const size_t stride = j % 2 ? scale : wide;
+            swa_stage_.planes[j] = {stride ? stage : nullptr, stride};
+            if (stage) stage += (size_t) swa_plan_.stage_rows * stride;
+        }
+    }
     for (auto& x : depth_) x = fbuf(width);
     prelude_ = fbuf(width);
     bank0_ = fbuf(width);
@@ -1133,13 +1186,27 @@ void Inkling2::conv(float* x, float* state, const float* w, const float* dynamic
     conv_span_kernel<<<grid, kThreads, 0, cs(st_)>>>(x, state, halo_, w, dynamic, width, n);
 }
 
-void Inkling2::store(const float* x, Cache& c, int side, int n) {
+void Inkling2::copy_swa(const Cache& live, int ring_head, int stage_head, int n, bool gather) {
+    if (!n) return;
+    SwaCopyPlanes p{};
+    for (int j = 0; j < 4; ++j) {
+        p.ring[j] = (uint4*) live.planes[j].data;
+        p.stage[j] = (uint4*) swa_stage_.planes[j].data;
+        p.stride[j] = (int) (live.planes[j].stride / sizeof(uint4));
+    }
+    const dim3 grid(div_up(n * p.stride[0], kThreads), 4);
+    const int ring = swa_plan_.ring_rows;
+    if (gather) swa_tail_copy<true><<<grid, kThreads, 0, cs(st_)>>>(p, ring, ring_head, stage_head, n);
+    else swa_tail_copy<false><<<grid, kThreads, 0, cs(st_)>>>(p, ring, ring_head, stage_head, n);
+    ck(cudaGetLastError(), gather ? "gather Inkling SWA" : "commit Inkling SWA");
+}
+
+void Inkling2::store(const float* x, Cache& c, int side, int64_t pos, int ring, int n) {
     auto& values = c.planes[2 * side];
     auto& scales = c.planes[2 * side + 1];
-    const bool swa = local(visit_);
-    int64_t pos = swa ? pos_ % ring_ : pos_;
+    if (ring) pos %= ring;
     for (int at = 0; at < n;) {
-        const int m = swa ? std::min(n - at, ring_ - (int) pos) : n;
+        const int m = ring ? std::min(n - at, ring - (int) pos) : n;
         if (q8()) store_q8(x, (int8_t*) values.data, (uint16_t*) scales.data, kKey, pos, m, st_);
         else store_f16(x, (uint16_t*) values.data, kKey, pos, m, st_);
         at += m;
@@ -1149,18 +1216,28 @@ void Inkling2::store(const float* x, Cache& c, int side, int n) {
 }
 
 void Inkling2::attention(const Block& b, int n) {
-    Cache& c = caches_[visit_];
     const bool swa = local(visit_);
+    Cache& live = caches_[visit_];
+    const int live_ring = swa ? swa_plan_.ring_rows : 0;
+    const auto layout = swa && swa_plan_.stage_rows ? inkling::swa_stage_layout(pos_, kWindow)
+                                                    : inkling::SwaStageLayout{};
+    const bool staged = swa && swa_plan_.stage_rows && !layout.fits_ring(n, live_ring);
+    Cache& c = staged ? swa_stage_ : live;
+    const int ring = staged ? 0 : live_ring;
+    // Only the target local attention uses this shifted coordinate. Relative distances and the
+    // capped decode span are identical, and the shift is a multiple of the Flash key tile.
+    const int64_t pos = staged ? layout.append() : pos_;
+    if (staged) copy_swa(live, (int) (layout.first % live_ring), layout.head, layout.history, true);
     if (fused(n) && q8()) {
         const int blocks = 2 * (kKey / 32) * n;
         if (!kv_stored_)
             store2_q8_kernel<<<div_up(blocks, 256), 256, 0, cs(st_)>>>(
                 k_, v_, (int8_t*) c.planes[0].data, (__half*) c.planes[1].data, (int8_t*) c.planes[2].data,
-                (__half*) c.planes[3].data, pos_, swa ? ring_ : 0, n);
+                (__half*) c.planes[3].data, pos, ring, n);
         kv_stored_ = false;
     } else {
-        store(k_, c, 0, n);
-        store(v_, c, 1, n);
+        store(k_, c, 0, pos, ring, n);
+        store(v_, c, 1, pos, ring, n);
     }
     inkling::Attend a;
     a.q = q_;
@@ -1170,15 +1247,20 @@ void Inkling2::attention(const Block& b, int n) {
     a.gate = gate_;
     a.k = {c.planes[0].data, (const uint16_t*) c.planes[1].data};
     a.v = {c.planes[2].data, (const uint16_t*) c.planes[3].data};
-    a.pos = pos_;
+    a.pos = pos;
     a.n = n;
     a.window = swa ? kWindow : 0;
-    a.ring = swa ? ring_ : 0;
+    a.ring = ring;
     a.out = att_;
     // Prompt batches only: a token's answer and short calls keep the plain kernels and their sums.
     if (flash_ && n >= kStageRows) inkling::attend_flash(a, cs(st_));
     else if (decode_ && n < kStageRows) inkling::attend_decode(a, chunks_, cs(st_), attq_, ds_attend_group_);
     else inkling::attend_plain(a, scores_, partial_, attend_tiles_, cs(st_));
+    if (staged) {
+        // Only new rows need copying back. Short/verifier calls already wrote into their own ring.
+        const int count = std::min(n, live_ring), skip = n - count;
+        copy_swa(live, (int) ((pos_ + skip) % live_ring), layout.append() + skip, count, false);
+    }
 }
 
 void Inkling2::depth_mix(const float* query, float* dst, int first, int n) {
@@ -1397,7 +1479,7 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
         if (n == 1 && q8()) {   // attention() finds K and V stored
             Cache& c = caches_[visit_];
             const KvStore to{(int8_t*) c.planes[0].data, (int8_t*) c.planes[2].data, (__half*) c.planes[1].data,
-                             (__half*) c.planes[3].data, swa ? pos_ % ring_ : pos_};
+                             (__half*) c.planes[3].data, swa ? pos_ % swa_plan_.ring_rows : pos_};
             heads_kv_kernel<<<2 * kHeads + 2 * kKv, kThreads, 0, cs(st_)>>>(ck, cv, h, to, rms_eps_, pos_, alpha_,
                                                                            rec_n_);
             kv_stored_ = true;

@@ -65,13 +65,26 @@ update. See [`Inkling2::run_visits`, `depth_mix` and `control`][graph] and the [
 | Logical visit (48) | KV and three prior inputs per channel for each of the K, V, attention-output and FFN-output convolutions | Keep all 48 histories independent across token and prompt-chunk boundaries. Restore convolution history and sliding-window tails as well as full KV when resuming a prefix. |
 | Current call | Prelude, depth residuals and the two message banks, one row per input position | Scratch, not committed sequence state. Prefill runs each prompt chunk through all 48 visits; spilling only the residual between visits would lose inputs. |
 
-[`Inkling2::alloc_caches`][graph] allocates **40 window rings and 8 full caches**. A ring has room for up to
+[`Inkling2::alloc_caches`][graph] allocates **40 window rings and 8 full caches**. By default a ring has room for up to
 `1024 + rows_ − 1` positions (capped by configured context), so writing a chunk does not overwrite keys its
 first query still needs. With default Q8_0 KV, one full visit stores `2 × (1024 codes + 32 two-byte scales)`
 = 2,176 bytes per position. The eight together hold **17 KiB per stored position** (32 KiB with FP16). These are target KV
 payloads, not total VRAM: they exclude rings, convolution state, scratch, allocation rounding and any drafter.
 Beyond the window only eight attention scans keep getting longer, but all 48 routers still run per token.
 The release config's 1,048,576 positions are a model limit, not a tested RDNA2 memory budget.
+
+**Compact window storage** (`STRATA_INKLING_COMPACT_SWA=1`, off by default) retains the prior 1,023 rows plus
+the verifier width in each target ring. A wide prompt uses a single staging area; it borrows `input_[0]` after
+the sink projection if the area fits. The first staged key keeps its position modulo 16 so Flash reads the same
+tiles. Serial decode and DSpark verification use the ring directly. At prompt batch 2,048 and Q8 KV without a
+drafter, the ring payload falls by 169.92 MiB without a new staging allocation. The default placement policy
+leaves that estimated saving free; `STRATA_INKLING_FUND_EXPERTS=1` allows the usual whole-expert cache to use it.
+Changing the CPU/GPU split can change generated tokens; saving VRAM is not itself a speed or quality result.
+The saved window state still contains the same oldest-first tail, not the physical ring or the stage.
+
+For matched-budget runs, `STRATA_INKLING_EXPERT_KV_MIB` limits the expert arena plus charged growing KV on
+one card with VMM and no pool. It does **not** limit total process VRAM or replace `--vram-reserve-mib`.
+Do not freeze a full startup arena and then try to grow into the same budget: frozen experts cannot be evicted.
 
 ## Reading a GGUF and comparing changes
 
@@ -96,7 +109,8 @@ The release config's 1,048,576 positions are a model limit, not a tested RDNA2 m
 - On the RX 6700 XT, [exact SWA compaction](goals/2026-11-25-exact-swa-memory-compaction.md) reclaimed VRAM without
   changing expert placement. The [global attention and KV study](goals/2026-11-25-adaptive-global-kv/README.md)
   separates fewer KV reads from lower KV residency and measures both against time to a correct tool-assisted answer.
-  These are prototype results, not shipped settings.
+  The study numbers are from prototypes. [Production checks](goals/2026-11-25-adaptive-global-kv/production.md)
+  distinguish current builds and actual deployment from the research measurements.
 
 [config]: https://huggingface.co/thinkingmachines/Inkling-2-Mini/blob/c9d028302cd0f035fdf8e7e91f089a4ce94d2195/config.json
 [graph]: ../src/poly/inkling2.cu

@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -1325,6 +1326,10 @@ void Engine::cover(int64_t end) {
         if (want > k.mapped) more += want - k.mapped;   // trim_card_kv() leaves a piece it cuts through
         held += k.mapped;
     }
+    if (!fund_experts_) held += kv_codec_saved_bytes();
+    if (expert_kv_cap_ && (held - arena_.mapped + more > expert_kv_cap_ ||
+            (freeze_experts_ && held + more > expert_kv_cap_)))
+        throw std::runtime_error("the attention rows and non-evictable experts exceed STRATA_INKLING_EXPERT_KV_MIB");
     if (exp_ && pool_on_) {
         // What the rows need beyond what the pool holds comes out of the expert cache, which gives its pieces to the
         // pool (shrink_cache()); nothing is asked of the card.  With the cache gone and the pool still short, the
@@ -1335,6 +1340,7 @@ void Engine::cover(int64_t end) {
         ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
         const size_t quarter = (size_t(std::max(reserve_mib_, 0)) << 20) / 4;
         size_t cut = held + more > budget_ ? held + more - budget_ : 0;
+        free_b = placement_free(free_b);
         if (free_b < more + quarter) cut = std::max(cut, more + quarter - free_b);
         if (cut) shrink_cache(cut);
     }
@@ -1342,6 +1348,12 @@ void Engine::cover(int64_t end) {
     for (Kv& k : kv_)
         vmm_map(k, size(k), (size_t) ((kKvGrow + k.per - 1) / k.per) * k.bytes, "the attention cache");
     kv_rows_ = rows;
+    if (expert_kv_cap_) {
+        const size_t charged = charged_rows();
+        const size_t backing = charged - (fund_experts_ ? 0 : kv_codec_saved_bytes());
+        std::fprintf(stderr, "strata-poly: Inkling cover rows=%lld mapped_kv=%zu charged_kv=%zu arena=%zu slots=%d\n",
+                     (long long) rows, backing, charged, arena_.mapped, cached_);
+    }
 }
 
 int64_t Engine::kv_rows_for(int64_t end) const {
@@ -1894,6 +1906,7 @@ void Engine::fill_expert_cache() {
     if (!opt_.gpu_experts || n_moe_ == 0) return;
     size_t free_b = 0, total_b = 0;
     ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
+    free_b = placement_free(free_b);
     const size_t ram = ram_available(), files = gg_->bytes() + (dg_ ? dg_->bytes() : 0);
     ram_tight_ = ram > 0 && files + (5ULL << 30) > ram;
     // 256 MiB at least, whatever was asked: the launches recorded later take theirs out of the reserve (mind_vram())
@@ -1979,6 +1992,11 @@ void Engine::fill_expert_cache() {
 #endif
                        full_bytes_ > 0 ? full_bytes_ : all;
     size_t arena = std::min({all, free_b - reserve, arena_.base ? arena_.reserved - 256 : most});
+    if (expert_kv_cap_) {
+        const size_t rows = charged_rows();
+        const size_t room = rows < expert_kv_cap_ ? (expert_kv_cap_ - rows) / grain_ * grain_ : 0;
+        arena = std::min(arena, room > 256 ? room - 256 : 0);
+    }
 #if defined(STRATA_GPU_METAL)
     size_t metal_cap = 0, metal_stage_need = 0;
     if (opt_.metal_balanced) {
@@ -2011,8 +2029,8 @@ void Engine::fill_expert_cache() {
             if (arena == 0) return;
         }
         exp_ = (uint8_t*) arena_.base;
-        budget_ = free_b - reserve + other_rows();   // when it holds every expert, the rest goes to the rows first
-        for (const Kv& k : kv_) budget_ += k.mapped;
+        budget_ = free_b - reserve + charged_rows();   // when it holds every expert, the rest goes to the rows first
+        if (expert_kv_cap_) budget_ = std::min(budget_, expert_kv_cap_);
     } else {
         exp_ = (uint8_t*) dmalloc(arena + 256, "the expert cache");
     }
@@ -2204,7 +2222,7 @@ bool Engine::mind_card_vram() {
     }
     size_t free_b = 0, total_b = 0;
     ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
-    const int64_t free = (int64_t) (free_b >> 20);   // this card's
+    const int64_t free = (int64_t) (placement_free(free_b) >> 20);   // this card's
     if (!vmm_) {   // a cache in one allocation is filled again
         if (free >= reserve_mib_ / 4) return false;
         resize_card_cache(opt_.vram_reserve_mib);
@@ -2233,6 +2251,7 @@ void Engine::widen_stage() {
     size_t free_b = 0, total_b = 0;
     ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
     if (pool_on_) free_b = vpool_bytes();   // what the card has is the pool's
+    else free_b = placement_free(free_b);
     const size_t quarter = pool_on_ ? 0 : (size_t(std::max(reserve_mib_, 0)) << 20) / 4;
     stage_cut_ = 0;
     if (exp_ && free_b < want + quarter) {
@@ -2268,8 +2287,8 @@ void Engine::narrow_stage() {
 
 // The cache's VRAM and the attention caches' as they are now become the budget cover() keeps them to.
 void Engine::held_is_budget() {
-    budget_ = arena_.mapped + other_rows();
-    for (const Kv& k : kv_) budget_ += k.mapped;
+    budget_ = arena_.mapped + charged_rows();
+    if (expert_kv_cap_) budget_ = std::min(budget_, expert_kv_cap_);
 }
 
 float* Engine::seq_state(int s, const float* p) const {
@@ -2307,6 +2326,18 @@ size_t Engine::other_rows() const {
     return b;
 }
 
+size_t Engine::charged_rows() const {
+    size_t b = other_rows();
+    for (const Kv& k : kv_) b += k.mapped;
+    return b + (fund_experts_ ? 0 : kv_codec_saved_bytes());
+}
+
+size_t Engine::placement_free(size_t free) const {
+    if (fund_experts_) return free;
+    const size_t saved = kv_headroom_bytes() + kv_codec_saved_bytes();
+    return free > saved ? free - saved : 0;
+}
+
 // `bytes` more VRAM at the cache's end, for the experts it lacks that are used most (use per byte, as
 // fill_expert_cache() chooses), side by side by layer.  VRAM the card does not give is not an error: the cache
 // keeps what was mapped.  Returns the experts it took.  `later`: the follower uploads them while the answer is
@@ -2315,6 +2346,12 @@ int Engine::grow_cache(size_t bytes, bool later) {
     if (!vmm_ || !exp_) return 0;
     // As shrink_cache(): a frozen answer's cache does not change under it.
     if (freeze_experts_) return 0;
+    if (expert_kv_cap_) {
+        const size_t held = arena_.mapped + charged_rows();
+        if (held >= expert_kv_cap_) return 0;
+        bytes = std::min(bytes, (expert_kv_cap_ - held) / grain_ * grain_);
+        if (!bytes) return 0;
+    }
     later = later && n_swap_ > 0;
     settle_swaps();
     ck(cudaStreamSynchronize(cs(st_)), "the expert cache");
@@ -2785,6 +2822,23 @@ void Engine::load(const Options& o) {
     if (opt_.vram_pool && !pool_on_)
         std::fprintf(stderr, "strata-poly: --vram-pool needs VMM, growing attention caches and one card: off\n");
     if (pool_on_) pg_ = up_to(size_t(2) << 20, grain_);
+#if defined(STRATA_USE_HIP)
+    if (looped_) {
+        const char* fund = std::getenv("STRATA_INKLING_FUND_EXPERTS");
+        fund_experts_ = fund && std::strcmp(fund, "1") == 0;
+        if (const char* cap = std::getenv("STRATA_INKLING_EXPERT_KV_MIB")) {
+            int mib = 0;
+            const char* end = cap + std::strlen(cap);
+            const auto [ptr, ec] = std::from_chars(cap, end, mib);
+            if (ec != std::errc{} || ptr != end || mib < 1 || !vmm_ || pool_on_ || split_ || !opt_.kv_grow)
+                throw std::runtime_error("STRATA_INKLING_EXPERT_KV_MIB requires positive MiB and "
+                                         "single-card growing VMM without a pool");
+            expert_kv_cap_ = size_t(mib) << 20;
+            std::fprintf(stderr, "strata-poly: Inkling expert arena + charged global KV limit %d MiB (%s)\n",
+                         mib, fund_experts_ ? "fund whole experts" : "keep KV savings free");
+        }
+    }
+#endif
 
     // the token table stays in the file, a row a token, and embed() reads a row in whatever type it has
     const TensorInfo* te = gg_->find("token_embd.weight");

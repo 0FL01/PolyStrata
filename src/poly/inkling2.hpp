@@ -2,6 +2,7 @@
 #pragma once
 
 #include "engine.hpp"
+#include "inkling_swa_layout.hpp"
 
 #include <array>
 #include <vector>
@@ -12,6 +13,7 @@ class Inkling2 final : public Engine {
 public:
     bool sees() const override { return true; }
     size_t card_row_bytes() const override;
+    size_t kv_headroom_bytes() const override { return swa_plan_.saved_bytes; }
     void save_card_rows(int64_t first, int64_t n, uint8_t* dst) override;
     void load_card_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n) override;
 
@@ -66,9 +68,11 @@ private:
     struct Cache { std::array<Plane, 4> planes; };
     std::array<Block, kPhysical> blocks_;
     std::array<Cache, kVisits> caches_;
+    inkling::SwaPlan swa_plan_{};
+    Cache swa_stage_{};
     Dev token_norm_, output_query_, loop_query_, loop_kv_query_;
     float qk_clip_ = 0, r_clip_ = 0, alpha_ = 0, cap_ = 0, expert_scale_ = 0;
-    int floor_ = 0, ring_ = 0, visit_ = 0, depth_n_ = 0, attend_tiles_ = 0;
+    int floor_ = 0, visit_ = 0, depth_n_ = 0, attend_tiles_ = 0;
     bool loop_layout_ = false;  // inkling2_loop stores physical-layer geometry and per-layer control queries
     bool flash_ = false;    // STRATA_INKLING_FLASH=1 (load_geometry())
     bool decode_ = false;   // STRATA_INKLING_DECODE=1 (load_geometry())
@@ -103,7 +107,8 @@ private:
     bool messages() const { return visit_ >= kStart + kCore && visit_ < kCoda; }
     size_t kv_bytes() const;
     void conv(float* x, float* state, const float* w, const float* dynamic, int width, int n);
-    void store(const float* x, Cache& c, int side, int n);
+    void store(const float* x, Cache& c, int side, int64_t pos, int ring, int n);
+    void copy_swa(const Cache& live, int ring_head, int stage_head, int n, bool gather);
     void attention(const Block& b, int n);
     void depth_mix(const float* query, float* dst, int first, int n);
     const float* message_query(const Block& b, int il, int stream) const;
