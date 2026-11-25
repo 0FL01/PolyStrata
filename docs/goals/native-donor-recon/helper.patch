@@ -1,0 +1,35 @@
+--- bench.cpp
++++ helper.cpp
+@@ -217,3 +217,5 @@
++#include "helper_capture.hpp"
++
+ void trial(Mode m, const Case& c, Workers& workers, SiTU situ, Helper* helper, int round, const char* pair, int part) {
+     const bool scheduled = helper != nullptr;
+     const bool async = m == helper_read || m == helper_t2 || m == helper_early;
+@@ -312,7 +314,9 @@
+     std::cerr << "tokens=" << tokens << " cases=" << cases.size() << " rounds=" << rounds << " SiTU=" << situ.beta
+               << '/' << situ.linear_beta << " model_bytes=" << gg.file_size() << '\n';
+     // Resolve pages and initialize thread-local scratch/reference outputs outside all measured regions.
++    const auto refs=read_frames(std::getenv("PSCPU_CAPTURE"));
+     for (auto& c : cases) {
++        use_capture(c,refs,false);
+         if (!scheduled && !c.hit) continue;
+         fault_in(c.pick);
+         for (int i = 0; i < c.target.n; ++i) fault_in(c.target.list[i]);
+@@ -320,6 +324,7 @@
+         if (scheduled) {
+             for (int i = 0; i < c.prev.n; ++i) fault_in(c.prev.list[i]);
+             c.prev.run(workers, c.xp, c.refp, situ);
++            use_capture(c,refs,true);
+         }
+     }
+     rusage before{}, after{};
+@@ -339,7 +344,7 @@
+     for (int r = 0; r < rounds; ++r) for (size_t i = 0; i < cases.size(); ++i) {
+         const auto& c = cases[r % 2 == 0 ? i : cases.size() - 1 - i];
+         if (!scheduled && !c.hit) continue;
+-        std::vector<Mode> arms = scheduled ? std::vector<Mode>{cold, inline_read, helper_read, helper_t2, helper_early}
++        std::vector<Mode> arms = scheduled ? std::vector<Mode>{cold, helper_read, helper_early}
+                                           : std::vector<Mode>{cold, oracle};
+         if (i % 2) std::reverse(arms.begin(), arms.end());
+         for (auto arm : arms) {
