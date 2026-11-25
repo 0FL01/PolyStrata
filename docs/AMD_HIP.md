@@ -729,6 +729,22 @@ run it; the report below is from a community machine: an RX 6900 XT 16 GB (gfx10
   `gfx103X-all` wheels on gfx1030, images, answer-quality benchmarks. RDNA1 (gfx1012, RX 5500 XT) builds by hand:
   [OLDER_GPUS.md](OLDER_GPUS.md#amd-building-gfx906-and-gfx1012).
 
+### Full-vocabulary sampling on a Ryzen host
+
+`STRATA_POLY_AVX2_SAMPLE=1` opts `strata-poly` into an AVX2 host sampler on supported x86-64 builds.
+It applies when temperature is positive and no tokens are filtered out (for example, top-k 0, top-p 1,
+min-p 0). Greedy and filtered draws still use their original paths. Unset the variable to use the scalar
+reference; for the API server, set it in the engine config's `env` and restart the engine. It does not
+change the model, KV precision, expert placement, reasoning budget, or sampling defaults.
+
+The vector loop evaluates the same weight polynomial without fused multiply-adds, then accumulates the
+same four double sums in token order. In paired 64K Agent Mode chats on a Ryzen 7 5700X and RX 6700 XT,
+the client received English reasoning at 28.16 → 27.44 ms/token and fenced code at 30.79 → 30.14 ms/token
+in alternating sampler windows (Tideglass, Q8_0 KV, temperature 1). With the setting held constant for
+whole requests, decode went from 32.58 to 33.39 tok/s for the design review and 35.41 to 36.30 tok/s
+for the coding request. It does not speed up the cold prompt read. See the
+[comparison and qualification](goals/2026-11-25-tideglass-agent-mode.md).
+
 ### Inkling-2-Mini prompt MMQ on gfx1031
 
 `STRATA_HIP_NVFP4_MMQ=1` enables the wave32 DP4A expert prompt path for Inkling-2-Mini's NVFP4 matrices on an RX 6700 XT

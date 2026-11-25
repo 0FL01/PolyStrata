@@ -34,6 +34,13 @@
 #include <unordered_map>
 #include <vector>
 
+// The scalar reference must also use separately rounded operations.
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__)) && !defined(__FAST_MATH__) && \
+    (!defined(__FINITE_MATH_ONLY__) || !__FINITE_MATH_ONLY__) && !defined(__FMA__) && !defined(__FMA4__)
+#define STRATA_POLY_HAVE_AVX2_SAMPLE 1
+#include <immintrin.h>
+#endif
+
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -103,7 +110,16 @@ public:
         const size_t k = s.top_k > 0 ? std::min((size_t) s.top_k, (size_t) n_vocab) : (size_t) n_vocab;
         // Nothing cut (top_k 0 or the whole vocabulary, top_p 1, min_p 0): the draw is over every token, so it needs
         // no order.  A heap of the whole vocabulary took 19.5 ms a token on a Ryzen 7 5700X, this one pass 0.3 ms.
-        if (k == (size_t) n_vocab && s.top_p >= 1.f && s.min_p <= 0.f) return draw_all(logits, n_vocab, s, rng);
+        if (k == (size_t) n_vocab && s.top_p >= 1.f && s.min_p <= 0.f) {
+#if defined(STRATA_POLY_HAVE_AVX2_SAMPLE)
+            static const bool avx2 = [] {
+                const char* value = std::getenv("STRATA_POLY_AVX2_SAMPLE");
+                return value && std::strcmp(value, "1") == 0 && __builtin_cpu_supports("avx2");
+            }();
+            if (avx2) return draw_all<true>(logits, n_vocab, s, rng);
+#endif
+            return draw_all(logits, n_vocab, s, rng);
+        }
 
         // The k best, the best first and of equals the lower id.  A token is a candidate only when it beats the
         // worst of the k so far, which is the heap's first; most of a vocabulary never does.
@@ -174,11 +190,77 @@ private:
         return p * scale;
     }
 
+    static double finish_run(const float* q, int i, int end, const double (&lane)[4]) {
+        double run = 0.0;
+        for (; i < end; ++i) run += q[i];
+        for (double v : lane) run += v;
+        return run;
+    }
+
+#if defined(STRATA_POLY_HAVE_AVX2_SAMPLE)
+    __attribute__((target("avx2,no-fma")))
+    static float max_avx2(const float* logits, int n) {
+        float mx = -INFINITY;
+        __m256 vmax = _mm256_set1_ps(mx);
+        int i = 0;
+        // MAXPS prefers its second operand on ties and unordered comparisons, as std::max prefers its first.
+        for (; i <= n - 8; i += 8) vmax = _mm256_max_ps(_mm256_loadu_ps(logits + i), vmax);
+        float lane[8];
+        _mm256_storeu_ps(lane, vmax);
+        for (float v : lane) mx = std::max(mx, v);
+        for (; i < n; ++i) mx = std::max(mx, logits[i]);
+        // Lane order is not id order. The only equal floats with different bits are signed zeroes.
+        if (mx == 0.f)
+            for (int j = 0; j < n; ++j)
+                if (logits[j] == 0.f) return logits[j];
+        return mx;
+    }
+
+    __attribute__((target("avx2,no-fma")))
+    static double weight_run_avx2(const float* logits, float* q, int n, float mx, float inv) {
+        const __m256 max_logit = _mm256_set1_ps(mx), inv_temp = _mm256_set1_ps(inv);
+        __m256d sums = _mm256_setzero_pd();
+        int i = 0;
+        for (; i + 8 <= n; i += 8) {
+            const __m256 x = _mm256_mul_ps(_mm256_sub_ps(_mm256_loadu_ps(logits + i), max_logit), inv_temp);
+            const __m256 valid = _mm256_cmp_ps(x, _mm256_set1_ps(-87.f), _CMP_GE_OQ);
+            // The same separately rounded operations as exp_below_0; mask before the float-to-int conversion.
+            const __m256 t = _mm256_mul_ps(_mm256_and_ps(x, valid), _mm256_set1_ps(1.44269504089f));
+            const __m256 bias = _mm256_set1_ps(12582912.f);
+            const __m256 rounded = _mm256_sub_ps(_mm256_add_ps(t, bias), bias);
+            const __m256 f = _mm256_mul_ps(_mm256_sub_ps(t, rounded), _mm256_set1_ps(0.69314718056f));
+            __m256 p = _mm256_set1_ps(1.f / 5040.f);
+            for (float c : {1.f / 720.f, 1.f / 120.f, 1.f / 24.f, 1.f / 6.f, 0.5f, 1.f, 1.f})
+                p = _mm256_add_ps(_mm256_mul_ps(p, f), _mm256_set1_ps(c));
+            const __m256i bits = _mm256_slli_epi32(_mm256_add_epi32(_mm256_cvttps_epi32(rounded),
+                                                                   _mm256_set1_epi32(127)), 23);
+            const __m256 weights = _mm256_and_ps(valid, _mm256_mul_ps(p, _mm256_castsi256_ps(bits)));
+            _mm256_storeu_ps(q + i, weights);
+            // Same four double lanes as the scalar path: the first four ids, then the next four, never combined first.
+            sums = _mm256_add_pd(sums, _mm256_cvtps_pd(_mm256_castps256_ps128(weights)));
+            sums = _mm256_add_pd(sums, _mm256_cvtps_pd(_mm256_extractf128_ps(weights, 1)));
+        }
+        for (int j = i; j < n; ++j) q[j] = exp_below_0((logits[j] - mx) * inv);
+        if (i + 4 <= n) {
+            sums = _mm256_add_pd(sums, _mm256_cvtps_pd(_mm_loadu_ps(q + i)));
+            i += 4;
+        }
+        double lane[4];
+        _mm256_storeu_pd(lane, sums);
+        return finish_run(q, i, n, lane);
+    }
+#endif
+
     // A token with probability softmax(logits / temperature): runs of kSumRun weights and their sums, the draw's run
     // by the runs' sums, its token by the sums in id order inside it.
+    template <bool UseAvx2 = false>
     int draw_all(const float* logits, int n_vocab, const Sampling& s, std::mt19937_64& rng) {
         float mx = -INFINITY;
-        for (int i = 0; i < n_vocab; ++i) mx = std::max(mx, logits[i]);
+#if defined(STRATA_POLY_HAVE_AVX2_SAMPLE)
+        if constexpr (UseAvx2) mx = max_avx2(logits, n_vocab);
+        else
+#endif
+            for (int i = 0; i < n_vocab; ++i) mx = std::max(mx, logits[i]);
         const float inv = 1.f / s.temperature;
         // nothing to draw from (every token taken out), or a temperature so small its scale overflows: the most likely
         if (!std::isfinite(mx) || !std::isfinite(inv)) return strata::poly::most_likely(logits, n_vocab);
@@ -188,16 +270,21 @@ private:
         double sum = 0.0;
         for (int at = 0; at < n_vocab; at += kSumRun) {
             const int end = std::min(n_vocab, at + kSumRun);
-            for (int i = at; i < end; ++i) q[i] = exp_below_0((logits[i] - mx) * inv);
-            // in doubles, as the scan below adds them: a run's sum is the mass the scan finds in it.  Four sums the
-            // loop can keep apart: one would wait on each add.
-            double lane[4] = {};
-            int i = at;
-            for (; i + 4 <= end; i += 4)
-                for (int j = 0; j < 4; ++j) lane[j] += q[i + j];
-            double run = 0.0;
-            for (; i < end; ++i) run += q[i];
-            for (double v : lane) run += v;
+            double run;
+#if defined(STRATA_POLY_HAVE_AVX2_SAMPLE)
+            if constexpr (UseAvx2) run = weight_run_avx2(logits + at, q + at, end - at, mx, inv);
+            else
+#endif
+            {
+                for (int i = at; i < end; ++i) q[i] = exp_below_0((logits[i] - mx) * inv);
+                // in doubles, as the scan below adds them: a run's sum is the mass the scan finds in it.  Four sums
+                // the loop can keep apart: one would wait on each add.
+                double lane[4] = {};
+                int i = at;
+                for (; i + 4 <= end; i += 4)
+                    for (int j = 0; j < 4; ++j) lane[j] += q[i + j];
+                run = finish_run(q, i, end, lane);
+            }
             runs_.push_back(run);
             sum += run;
         }
