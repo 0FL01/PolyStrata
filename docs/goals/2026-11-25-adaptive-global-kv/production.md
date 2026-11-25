@@ -1,6 +1,6 @@
 # Production Hybrid Decode — RX 6700 XT
 
-Status: active. Source: user's 2026-11-25 implementation request; [measured candidates](hybrid-decode.md), [KV evidence](hybrid-kv.md), [SWA contract](../2026-11-25-exact-swa-memory-compaction.md). The preceding documents describe prototypes, not the installed engine.
+Status: complete for implementation, qualification and deployment. A substantial general speedup of the mixed-workload service **was not demonstrated**. Source: user's 2026-11-25 implementation request; [measured candidates](hybrid-decode.md), [KV evidence](hybrid-kv.md), [SWA contract](../2026-11-25-exact-swa-memory-compaction.md). The preceding documents describe prototypes, not the installed engine.
 
 ## Finish line
 
@@ -118,6 +118,8 @@ Joined **4,608 W1 visits on each** of a 199104-row mixed checkpoint and independ
 In contrast, fresh wide prefill on the Agent checkpoint (303 + 100 + one row, compact bounded reader, **not** one live tool turn) spent 5.07 s in attributed GPU kernels/copies and only 69 ms of wide CPU expert time after its GPU dependencies. On the unmodified final H2 Release `932b14ef` versus the actual installed control, **same** 404 fresh input IDs, automatic placement: first ID **3.105 → 2.875 s** after separate RESTORE **3.091 → 3.317 s**; 32 serial intervals **20.56 → 28.30 ID/s**, p90 **55.80 → 42.54 ms**. First differing greedy ID at index 3. In separate ROC runs the eight global visits fell **11.05 → 3.58 ms**. This is not a task-success claim. `production-hybrid-20261125/final-404-pair.md`.
 
 Skipping follower RAM-to-pin packing for successfully registered file spans bypassed 54–55% of admissions (1.33–1.54 GiB per test leg). In 199K mixed, all 97 IDs, 22941/37248 hits, keys and destination offsets matched: paired W1 savings +0.90 / +0.06 ms vs +1.06 ms A/A drift. In the independent 197K Agent run even A/A diverged at ID 59 and placement changed; no attributable W1 gain on both. Direct DMA kept >21 ms minimum settlement slack and did not improve tool-return TTFT. **Not integrated.** `follower-direct.naKXxVyL/result.json`.
+
+One final residency test **without sparse or V4 attention** changed only `--stage-mib` on the installed ELF. Reducing the prompt stage from this GGUF's actual 567 MiB to 128 MiB funded **101–102 extra whole slots** at similar total VRAM; packed checkpoints still fit. Mixed 199K: 24.32 → 25.25 ID/s, p90 47.48 → 46.45 ms, 97/97 greedy IDs. Agent 197K + 404: 23.98 → 24.58 ID/s, p90 49.22 → 47.25 ms; later output IDs differed. Coding/42 passed faster (19.57 → 18.45 s); reasoning/42 **fell from 4/4 fields to 0/4**, with the same three input prompts and natural EOS in both. First difference at output index 2 in the final turn. Stopped before the remaining tasks, no change to the deployed stage size or reserve. More slots and dense attention do not imply the same model decision when the CPU/GPU expert split changes. `dense-stage128.dYeitADh/{result.json,quality/grade-result.json}`.
 
 ### Service selection and deployment
 
