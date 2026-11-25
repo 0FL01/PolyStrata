@@ -59,6 +59,9 @@ void attend_decode(const Attend& a, float* scratch, cudaStream_t st, void* q8 = 
 
 /// Dense causal mixed reader, including every prompt row. The caller may substitute a tiled flash reader.
 void attend_v4(const Attend& a, V4View v4, float* scratch, cudaStream_t st, void* q8 = nullptr);
+/// Approximate opt-in for wide global V4-refit calls only. False does not launch or touch the output.
+bool try_attend_compact_suffix_h2(const Attend& a, V4View v4, float* scratch, cudaStream_t st,
+                                  void* q8 = nullptr);
 /// Build a contiguous range of P128 centroids from committed/stored native Q8 keys; `stop` is exclusive.
 void k256_build(KvView k, uint32_t* index, int first, int stop, cudaStream_t st);
 size_t k256_scratch_floats();

@@ -11,6 +11,7 @@ namespace strata::poly {
 
 class Inkling2 final : public Engine {
 public:
+    ~Inkling2() override;
     bool sees() const override { return true; }
     size_t card_row_bytes() const override;
     size_t kv_headroom_bytes() const override { return swa_plan_.saved_bytes; }
@@ -91,6 +92,10 @@ private:
     bool flash_ = false;    // STRATA_INKLING_FLASH=1 (load_geometry())
     bool decode_ = false;   // STRATA_INKLING_DECODE=1 (load_geometry())
     bool k256_ = false, v4_ = false, v4_scalar_ = false;
+    bool suffix_h2_ = false;
+    int64_t suffix_h2_calls_ = 0, suffix_h2_rows_ = 0;
+    int64_t suffix_h2_first_pos_ = -1, suffix_h2_last_pos_ = -1;
+    int suffix_h2_first_rows_ = 0, suffix_h2_last_rows_ = 0;
     int hot_rows_ = 0;
     size_t hot_bytes_ = 0;
     bool ds_attend_group_ = false;   // STRATA_INKLING_DSPARK_TARGET_GROUP=1: long verifier attention on gfx1031

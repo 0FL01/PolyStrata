@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -1120,6 +1121,52 @@ void attend_decode(const Attend& a, float* scratch, cudaStream_t st, void* q8, b
     decode_combine_kernel<<<dim3(kHeads, a.n), kHead, 0, st>>>(scratch, chunks, a.sink, a.gate, a.out,
                                                                static_cast<Q81*>(q8));
     check("Inkling decode attention");
+}
+
+bool try_attend_compact_suffix_h2(const Attend& a, V4View v4, float* scratch, cudaStream_t st, void* q8) {
+    // Only wide global V4-refit continuations. In particular, a.window and a.ring are for SWA,
+    // not the separate native V ring. Every live V row at or above the seal must still fit in that ring.
+    if (a.n < 32 || !scratch || a.ring || a.window || v4.sealed <= 0 || a.pos < v4.sealed ||
+        a.pos > std::numeric_limits<int>::max() - a.n || v4.hot_ring <= 0 ||
+        a.pos + a.n - v4.sealed > v4.hot_ring || !a.k.data || !a.k.scales || !a.v.data ||
+        !a.v.scales || !v4.cold.data || !v4.cold.scales)
+        return false;
+    static const bool supported = [] {
+        int device = 0;
+        cudaDeviceProp props{};
+        auto e = cudaGetDevice(&device);
+        if (e == cudaSuccess) e = cudaGetDeviceProperties(&props, device);
+        if (e != cudaSuccess)
+            throw std::runtime_error(std::string("Inkling compact suffix H2: ") + cudaGetErrorString(e));
+        return kernels::gfx_arch_is(props.gcnArchName, "gfx1031");
+    }();
+    if (!supported) return false;
+
+    // Every split starts on a 16-key boundary. Each tile's splits fit in decode_floats(); the stream
+    // orders its combine before reuse of that scratch by the next tile. Large batches need no extra VRAM.
+    constexpr int rows = 16, keys = 16, max_splits = 64;
+    static_assert(rows * kKv <= kDecodeBlocks);
+    for (int r = 0; r < a.n;) {
+        const int n = std::min(rows, a.n - r);
+        const int64_t span = a.pos + r + n;
+        const int step = keys * std::min(max_splits, kDecodeBlocks / (kKv * n));
+        const int chunk = int((span + step - 1) / step) * keys;
+        const int chunks = int((span + chunk - 1) / chunk);
+        const size_t qr = (size_t) r * kQuery, hr = (size_t) r * kHeads;
+        Attend tile = a;
+        tile.q += qr;
+        tile.rel += hr * kRelative;
+        tile.pos += r;
+        tile.n = n;
+        launch_compact_suffix_h2(tile, scratch, st, v4, chunks, chunk);
+        check("Inkling compact suffix H2 splits");
+        auto* out_q = q8 ? static_cast<Q81*>(q8) + qr / 32 : nullptr;
+        decode_combine_kernel<<<dim3(kHeads, n), kHead, 0, st>>>(scratch, chunks, a.sink + hr, a.gate + qr,
+                                                                 a.out + qr, out_q);
+        check("Inkling compact suffix H2 combine");
+        r += n;
+    }
+    return true;
 }
 
 void attend_flash(const Attend& a, cudaStream_t st) {

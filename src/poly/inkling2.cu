@@ -523,6 +523,14 @@ __global__ void __launch_bounds__(256) control_out3_kernel(Control3 c, int ranks
 
 }  // namespace
 
+Inkling2::~Inkling2() {
+    // Report actual hits once, on normal shutdown. No log or device synchronization in the visit loop.
+    if (suffix_h2_)
+        std::fprintf(stderr, "SUFFIX_H2 calls=%lld rows=%lld first_pos=%lld first_rows=%d last_pos=%lld last_rows=%d\n",
+                     (long long) suffix_h2_calls_, (long long) suffix_h2_rows_, (long long) suffix_h2_first_pos_,
+                     suffix_h2_first_rows_, (long long) suffix_h2_last_pos_, suffix_h2_last_rows_);
+}
+
 void Inkling2::load_geometry() {
     int device = 0;
     cudaDeviceProp p{};
@@ -593,6 +601,11 @@ void Inkling2::load_geometry() {
     k256_ = kv_switch("STRATA_INKLING_K256");
     v4_ = kv_switch("STRATA_INKLING_V4");
     v4_scalar_ = v4_ && kv_switch("STRATA_INKLING_V4_SCALAR");
+    suffix_h2_ = v4_ && kv_switch("STRATA_INKLING_SUFFIX_H2") &&
+                 kernels::gfx_arch_is(p.gcnArchName, "gfx1031");
+    if (suffix_h2_)
+        std::fputs("strata-poly: STRATA_INKLING_SUFFIX_H2=1: approximate Flash16 H2 on wide global V4 calls\n",
+                   stderr);
 #if !defined(STRATA_POLY_V4_REFIT_HOST)
     if (v4_) throw std::runtime_error("Inkling V4 needs a build with the host refit codec");
 #endif
@@ -1502,7 +1515,19 @@ void Inkling2::attention(const Block& b, int n) {
     }
     // The original readers remain valid while the hot ring is unwrapped and no V4 row can be visible yet.
     if (hybrid && c.sealed) {
-        inkling::attend_v4(a, mixed, chunks_, cs(st_), fused(n) ? attq_ : nullptr);
+        void* q8_out = fused(n) ? attq_ : nullptr;
+        if (suffix_h2_ && n >= kStageRows && inkling::try_attend_compact_suffix_h2(a, mixed, chunks_, cs(st_), q8_out)) {
+            if (!suffix_h2_calls_) {
+                suffix_h2_first_pos_ = pos_;
+                suffix_h2_first_rows_ = n;
+            }
+            ++suffix_h2_calls_;
+            suffix_h2_rows_ += n;
+            suffix_h2_last_pos_ = pos_;
+            suffix_h2_last_rows_ = n;
+            return;
+        }
+        inkling::attend_v4(a, mixed, chunks_, cs(st_), q8_out);
         return;
     }
     // Prompt batches only: a token's answer and short calls keep the plain kernels and their sums.

@@ -13,4 +13,9 @@ void attend_flash_lean(const Attend& a, cudaStream_t st);
 /// products in packed halves (v_dot2_f32_f16, FP32 sums) - a precision change, opt-in.
 void attend_flash_h2(const Attend& a, cudaStream_t st);
 
+// A single 1..16-row tile of split-K H2 attention over disjoint global K/V (gfx1031).
+// The caller gives 16-key-aligned splits and combines their scratch; this does not write a.out.
+void launch_compact_suffix_h2(const Attend& tile, float* scratch, cudaStream_t st, V4View v4,
+                              int chunks, int chunk);
+
 }  // namespace strata::poly::inkling

@@ -97,6 +97,7 @@ KV, the HIP decode reader, a single sequence without DSpark, and a context of at
 | `STRATA_INKLING_V4=1` | Keep absolute Q8 K. Before an input batch, seal whole old pages of V to symmetric signed nibbles with one refitted FP16 scale per 32 values. A separate native Q8 ring holds the recent rows and the entire new batch. Needs growing VMM, without `--kv-whole` or `--vram-pool`. |
 | `STRATA_INKLING_FUND_EXPERTS=1` | Allow the cache to use actual savings for ordinary whole-expert slots. A combined budget counts the index, packed planes and fixed hot ring. Without funding, charge saved KV bytes to placement instead. |
 | `STRATA_INKLING_V4_SCALAR=1` | Reference CPU packer for V4. Otherwise use the byte-identical AVX2/F16C refit on eligible CPUs/blocks and scalar elsewhere. This is not a different attention policy. |
+| `STRATA_INKLING_SUFFIX_H2=1` | On gfx1031 with V4, use split Flash16 for global prefill batches of at least 32 rows once a sealed row is visible. The kernel reads old V4 and the wrapped Q8 tail directly. Its half-precision products and different reductions can change answers. It does not select pages for a prompt or change W1. |
 
 A compact checkpoint saves the exact native V tail for its own position. Restoring a branch does not guess
 the missing low bits from V4. Compact disk files have a **different format identity**; the compact reader can
