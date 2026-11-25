@@ -4,8 +4,10 @@ This fork targets **AMD RDNA2 only**, using HIP and system RAM. Develop, optimiz
 architectures and backends are out of scope. Inherited backends may remain, but do not add compatibility work or
 require builds and tests for them.
 
-The Qwen engine lives in `src/` and `include/`; `strata-poly` (`src/poly/`) runs Inkling-2-Mini and other GGUF models.
-The Qwen engine, installer (`setup.py`), and API server and web app (`serve/`) come from
+The primary focus is developing and optimizing [Inkling 2 Mini](docs/INKLING2.md) inference in `strata-poly` (`src/poly/`).
+Qwen-specific work is deferred and out of scope.
+
+The Qwen engine (`src/` and `include/`), installer (`setup.py`), and API server and web app (`serve/`) come from
 [Strata](https://github.com/Niko1221/Strata).
 
 ## Installing PolyStrata for a user

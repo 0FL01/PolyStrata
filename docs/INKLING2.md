@@ -1,0 +1,100 @@
+# Inkling 2 Mini: the inference graph
+
+**24 stored layers, 48 visits per token.** A *layer* owns weights; a *visit* is one use of those weights at a
+particular depth. For example, visits 11, 23 and 35 all use layer 11's weights. Each sees a different hidden
+state, chooses its own experts and writes its own keys and values at the **same token position**.
+
+The [release article](https://thinkingmachines.ai/news/inkling-2-mini/#architecture-and-training) reports 26.4B
+total parameters, 3.4B active and 5.4B weight activations per token counting repeated passes. The last figure
+describes work, not weights to allocate. Shapes below are from the released [model config][config]; storage and
+execution details refer to one sequence on one card in `strata-poly`. Mini has a fixed pass count;
+the variable-loop research checkpoint is a different model.
+
+## Follow a token through the loop
+
+| Stage | Visits (zero-based, inclusive) | Physical layers | Input at the start of the stage |
+| --- | --- | --- | --- |
+| Prelude | 0–5 | 0–5 | RMS-normalized token embedding |
+| Core, pass 1 | 6–17 | 6–17 | Prelude output; no message |
+| Core, pass 2 | 18–29 | 6–17 | Restart from prelude; read the two block outputs of pass 1 |
+| Core, pass 3 | 30–41 | 6–17 | Restart from prelude; read the two block outputs of pass 2 |
+| Coda | 42–47 | 18–23 | Continue from pass 3; no restart or message read |
+
+**Attention over depth is not attention over tokens.** Visit 0's attention takes the input row directly.
+Within each six-layer block, sublayer outputs accumulate in a partial residual. A learned depth query mixes
+the original input row, completed blocks and the current partial block. The values are RMS-normalized;
+the softmax runs over those states, not over token positions. The original input survives the core restarts.
+The final output also uses a learned depth mix, then RMS norm, vocabulary projection and logit softcap (30).
+Only 200,058 token IDs are valid; the embedding and head tensors are padded to 201,024 rows.
+
+At entry to visits 18 and 30, `run_visits` saves the previous pass's two six-layer block outputs in `bank0_`
+and `bank1_` and restores the prelude. Each core layer has separate message queries and controllers for Q, K,
+V and FFN. Each query mixes the two banks into a message. A rank-64 projection of the normalized current and
+message rows drives two gates, applied to the rows **before** that normalization:
+`(1 − tanh(forget)) * current + tanh(gain) * message`. The banks are stable
+during the consuming pass; the current row is not. In particular the FFN reads it **after** the attention
+update. See [`Inkling2::run_visits`, `depth_mix` and `control`][graph] and the [bank lifetime diagram][banks].
+
+## What one visit computes
+
+1. **Causal attention.** From width 2,304, project 24 query heads and 8 KV heads of width 128 (three query
+   heads per KV head). The first five visits of each six use a 1,024-token sliding window; the sixth attends
+   to the whole prefix. K and V each pass through a four-tap causal convolution; full attention adds
+   input-dependent taps. A window visit can share one input for Q/K/V outside the two message-reading passes;
+   inside them, the three controllers produce separate inputs even on window visits. Clip Q and K by head
+   norm, RMS-normalize V, and clip the relative query. Full attention also scales Q and the relative query
+   logarithmically above 8,192 positions.
+2. **Position and output gate.** The target does not use RoPE. Its score is `dot(Q,K)/sqrt(128)` plus a
+   learned 16-component relative term for distances 0–1,023. Older keys in a full visit still contribute
+   their content score. A projected sink enters the softmax denominator once per query head and has no
+   value vector. A sigmoid gate scales the weighted values before output projection and post-attention
+   convolution. See [the attention kernels](../src/poly/inkling_attend.cu).
+3. **Routed FFN.** From the updated residual, mix over depth, apply the message controller when present,
+   then normalize. `Inkling2::route` picks 8 of 128 experts by `sigmoid(logit) + bias`; only the **unbiased**
+   sigmoid scores of those eight are normalized and multiplied by the route scale (8 in the release).
+   Each expert has width 1,152: joined gate/up projections, SiTU (softcapped gate and up, not plain SwiGLU),
+   then down projection. There is no shared expert. The weighted sum goes through a four-tap convolution
+   before addition to the residual. There are `48 × 8 = 384` expert selections per token, not necessarily
+   384 distinct experts. Route again on every visit; a previous pass's IDs are not the route.
+
+## What can be shared in `strata-poly`?
+
+| Owner | What it holds | Consequence for an engine change |
+| --- | --- | --- |
+| Physical layer (24) | Dense weights, router, expert weights and their VRAM slots | Reuse a resident expert across passes by layer and expert ID. On serial decode, resident experts run on the GPU; misses can run on the CPU from system RAM. Changing placement can change arithmetic even with identical router decisions. |
+| Logical visit (48) | KV and three prior inputs per channel for each of the K, V, attention-output and FFN-output convolutions | Keep all 48 histories independent across token and prompt-chunk boundaries. Restore convolution history and sliding-window tails as well as full KV when resuming a prefix. |
+| Current call | Prelude, depth residuals and the two message banks, one row per input position | Scratch, not committed sequence state. Prefill runs each prompt chunk through all 48 visits; spilling only the residual between visits would lose inputs. |
+
+[`Inkling2::alloc_caches`][graph] allocates **40 window rings and 8 full caches**. A ring has room for up to
+`1024 + rows_ − 1` positions (capped by configured context), so writing a chunk does not overwrite keys its
+first query still needs. With default Q8_0 KV, one full visit stores `2 × (1024 codes + 32 two-byte scales)`
+= 2,176 bytes per position. The eight together hold **17 KiB per stored position** (32 KiB with FP16). These are target KV
+payloads, not total VRAM: they exclude rings, convolution state, scratch, allocation rounding and any drafter.
+Beyond the window only eight attention scans keep getting longer, but all 48 routers still run per token.
+The release config's 1,048,576 positions are a model limit, not a tested RDNA2 memory budget.
+
+## Reading a GGUF and comparing changes
+
+- [`Engine::open` and `Engine::read`](../src/poly/engine.cpp) dispatch the model and chunk the prompt.
+  [`Inkling2::load_geometry` and `load_layer`][graph] distinguish `inkling2_loop` (24 declared layers,
+  per-layer message queries) from legacy `inkling2` (48 declared visits, global message-query tables).
+  Both execute the [same visit-to-layer mapping](../src/poly/inkling2.hpp) with 24 physical weight owners.
+- The release uses NVFP4 expert weights for layers 0–19 and MXFP8 for 20–23. Select weight kernels by GGUF
+  tensor type and scales, not filename. In the [Q4_0 file](../README.md#inkling-2-mini-performance), all 24
+  joined gate/up tensors are Q4_0, but the down tensors for layers 0–2 are Q4_1. The [tested Unsloth XL][xl]
+  instead has NVFP4 experts followed by four Q8_0 expert layers. For NVFP4, gate/up scales apply **before**
+  SiTU; the down scale belongs to the expert contribution. Weight format is independent of `--kv`.
+- Optional paths are not extra target passes. The [vision helper](../tools/vision/INKLING.md) supplies
+  projected image rows, which bypass the text embedding norm. The separate DSpark drafter reads the residuals
+  entering visits 5, 23 and 41 plus the normalized final output; the target verifies its guesses. Test verifier
+  windows separately from serial decode ([state and parity limits](DETAILS.md#using-it)).
+- For attention changes, exercise both a wrapped ring and a long full visit ([`poly_inkling_attend_test`](../src/poly/inkling_attend_test.cu)).
+  For routing or expert changes, compare ordered IDs, weights, CPU/GPU assignment and expert outputs before
+  comparing final logits. For state changes, compare chunked prefill and save/restore against fresh replay.
+- For measurements by phase, see [prefill](goals/2026-11-22-inkling2-prefill-e2e.md#final-measured-account) and
+  [serial decode experiments, including rejected changes](goals/2026-11-24-inkling2-architecture-aware-results.md).
+
+[config]: https://huggingface.co/thinkingmachines/Inkling-2-Mini/blob/c9d028302cd0f035fdf8e7e91f089a4ce94d2195/config.json
+[graph]: ../src/poly/inkling2.cu
+[banks]: goals/arch-decode-recon/loop/loop-dependency-graph.md
+[xl]: goals/2026-11-21-inkling2-mini-rdna2.md#verification
