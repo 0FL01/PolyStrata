@@ -93,6 +93,10 @@ The release config's 1,048,576 positions are a model limit, not a tested RDNA2 m
   comparing final logits. For state changes, compare chunked prefill and save/restore against fresh replay.
 - For measurements by phase, see [prefill](goals/2026-11-22-inkling2-prefill-e2e.md#final-measured-account) and
   [serial decode experiments, including rejected changes](goals/2026-11-24-inkling2-architecture-aware-results.md).
+- On the RX 6700 XT, [exact SWA compaction](goals/2026-11-25-exact-swa-memory-compaction.md) reclaimed VRAM without
+  changing expert placement. The [global attention and KV study](goals/2026-11-25-adaptive-global-kv/README.md)
+  separates fewer KV reads from lower KV residency and measures both against time to a correct tool-assisted answer.
+  These are prototype results, not shipped settings.
 
 [config]: https://huggingface.co/thinkingmachines/Inkling-2-Mini/blob/c9d028302cd0f035fdf8e7e91f089a4ce94d2195/config.json
 [graph]: ../src/poly/inkling2.cu
