@@ -23,6 +23,9 @@ offers the same steps as tools.
 - Run guarded RDNA2 benchmarks with `rdna2-rnd/scripts/run_guarded.py --warn-amdgpu-faults`.
   An AMDGPU memory/page fault alone, earlier in the boot or during a run, is a warning, not an error or blocker.
   Continue using the GPU; resets, hangs, timeouts, OOM, failed commands and the free-VRAM limit still stop the run.
+- On the Btrfs profiling host, keep each A/B series in `~/.cache/opencode-tmp/opencode/polystrata-runs/<run>/`.
+  Reuse read-only inputs or copy with `cp --reflink=always`. Keep SAVE outputs independent until validated;
+  once writers and benchmarks stop, run `~/.local/bin/polystrata-dedupe <run>` without sudo.
 - How the engine works, every measured number, the API and all settings: [docs/DETAILS.md](docs/DETAILS.md) and
   the [paper](docs/paper/Strata-Paper.pdf).
 - Build the affected HIP target and run the closest relevant checks on RDNA2; report the GPU tested. See
