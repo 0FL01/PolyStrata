@@ -16,10 +16,32 @@ using one Radeon GPU. Frequently used expert weights stay in VRAM; the CPU runs 
 
 ## Inkling-2-Mini performance
 
-**Current RDNA2 baseline: Bartowski's `Q4_0` on engine `6d7e00d3`.** Medians of three interleaved, untraced
+**Deployed RDNA2 engine: `35c899cb` with [MECHUK's Tideglass v2.1](https://huggingface.co/MECHUK/Tideglass-Inkling-2-Mini-Unbound-v2.1-GGUF).**
+The table compares the deployed weights with Bartowski's original Q4_0 on the same RX 6700 XT (12 GiB,
+`gfx1031`), Ryzen 7 5700X and 32 GiB RAM. Rates are engine tokens/s, not HTTP latency.
+
+| GGUF | 2K prefill | 2K decode | 16K prefill | 16K decode |
+| --- | ---: | ---: | ---: | ---: |
+| **Tideglass v2.1 (deployed)** | **685.2** | **43.24** | **934.7** | **44.35** |
+| Bartowski Q4_0 | 638.3 | 49.30 | 898.7 | 44.44 |
+
+Each cell is the median of three untraced runs. Each run started a fresh process with a copy of that model's
+expert profile, dense Q8_0 KV, the settings below and no DSpark. Both models read the first 2,048 or 16,384
+tokens of `src/poly/main.cpp` from `35c899cb` (no chat template), then decoded the next 256 or 128 IDs as a
+forced continuation. The 2K prefill rates varied widely: 537.3–952.0 tokens/s on Tideglass and 280.2–904.8
+on Bartowski. At 16K, Tideglass decode ranged from 43.92 to 44.49 tokens/s. This measures throughput on the
+same code, not answer quality or an engine speedup.
+
+For a different workload, the [197K agent measurements](docs/goals/2026-11-25-adaptive-global-kv/production.md#service-selection-and-deployment)
+record **22.20–24.54 decode tokens/s** across four freely generated Tideglass coding and reasoning runs after
+session restore. Those are deployed dense-mode rates, not experimental sparse-attention results.
+
+### Earlier quant comparison
+
+**Bartowski Q4_0, Q4_1 and Unsloth UD-IQ4_XS on `6d7e00d3`.** Medians of three interleaved, untraced
 runs per model on an RX 6700 XT (`gfx1031`), Ryzen 7 5700X, and 32 GiB RAM. Each model read the same prompt
 and decoded the same forced continuation (2,048 + 256 or 16,384 + 128 tokens), with Q8_0 KV, the 2 GiB
-VRAM reserve, and the settings below. Each run started from a copy of the same expert profile; no DSpark.
+VRAM reserve, and the [settings at the time](https://github.com/0FL01/PolyStrata/blob/d0b8082e/README.md#run-inkling-2-mini). Each run started from a copy of the same expert profile; no DSpark.
 
 | GGUF | Size (GiB) | 2K prefill | 2K decode | 16K prefill | 16K decode |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -66,9 +88,10 @@ with the live expert cache. [Measurements and limits](docs/goals/2026-11-24-inkl
 ## Run Inkling-2-Mini
 
 Inkling is not in the interactive installer yet. On Linux, set up the [HIP build prerequisites](docs/AMD_HIP.md#build)
-and [download Bartowski's `Q4_0` GGUF weights](https://huggingface.co/bartowski/Inkling-2-Mini-GGUF/resolve/ad66863fd3b7f3236c0b7a0862412c9e00f78a6e/Inkling-2-Mini-Q4_0.gguf?download=true)
-(14.03 GiB). This example targets the tested RX 6700 XT (`gfx1031`). `Q4_1` and the older `UD-IQ4_XS` layout
-remain supported.
+and download either [Tideglass v2.1](https://huggingface.co/MECHUK/Tideglass-Inkling-2-Mini-Unbound-v2.1-GGUF/resolve/0c20059bb4a345278e73cf1f9fdc320617f46cc1/Tideglass-Inkling-2-Mini-Unbound-v2.1.gguf?download=true)
+(14.47 GiB, deployed) or [Bartowski's original `Q4_0`](https://huggingface.co/bartowski/Inkling-2-Mini-GGUF/resolve/ad66863fd3b7f3236c0b7a0862412c9e00f78a6e/Inkling-2-Mini-Q4_0.gguf?download=true)
+(14.03 GiB). Use the path to your chosen file in both steps below. The example uses Bartowski's file on the
+tested RX 6700 XT (`gfx1031`). `Q4_1` and the older `UD-IQ4_XS` layout remain supported.
 
 <details>
 <summary>Build and run on the RX 6700 XT</summary>
@@ -113,7 +136,12 @@ The `env` block includes the speed options used in the measurements; they are no
     "STRATA_INKLING_FLASH_LEAN": "1",
     "STRATA_INKLING_FLASH_H2": "1",
     "STRATA_INKLING_KCOPY": "1",
-    "STRATA_INKLING_DECODE_CHUNKS": "160"
+    "STRATA_INKLING_DECODE_CHUNKS": "160",
+    "STRATA_INKLING_Q4_0_SLOTS": "1",
+    "STRATA_INKLING_Q4_0_DENSE": "1",
+    "STRATA_POLY_AVX2_SAMPLE": "1",
+    "STRATA_INKLING_COMPACT_SWA": "1",
+    "STRATA_INKLING_FUND_EXPERTS": "1"
   }
 }
 ```
