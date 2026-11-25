@@ -270,6 +270,8 @@ public:
     /// Feed n tokens from position pos().  With want_logits, logits() then holds the scores of the token after the
     /// last one.
     void eval(const int32_t* tokens, int n, bool want_logits);
+    /// A serial generation step, as distinct from reading the final row of a prompt.
+    void eval_decode(int32_t token);
     const float* logits() const { return next_ ? next_->logits() : h_logits_; }
     /// Feed n tokens of a prompt, none of them a picture's row, as eval() without logits would in calls of
     /// max_rows(): the same tokens a call.  With experts outside the cache it is faster than those calls, the
@@ -459,11 +461,24 @@ protected:
     // VRAM saved by smaller fixed buffers and by compact mapped rows, respectively.
     // Until funding is requested the expert cache sizes itself as if these bytes were still in use.
     virtual size_t kv_headroom_bytes() const { return 0; }
-    virtual size_t kv_codec_saved_bytes() const { return 0; }
+    virtual size_t kv_fixed_bytes() const { return 0; }   // hot global KV not in a growing map
+    virtual size_t kv_codec_saved_bytes(int64_t) const { return 0; }
     /// What row_bytes(), save_rows() and load_rows() are for the layers this engine runs.
     virtual size_t card_row_bytes() const = 0;
     virtual void save_card_rows(int64_t first, int64_t n, uint8_t* dst) = 0;
     virtual void load_card_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n) = 0;
+    // DiskSessions can explicitly import the native format into a different live codec. Neither the native
+    // layout nor its identity is changed by enabling a derived index.
+    virtual int card_session_layout() const { return 0; }
+    virtual size_t native_session_state_bytes() const { return card_state_bytes(); }
+    virtual size_t native_session_row_bytes() const { return card_row_bytes(); }
+    virtual size_t session_transfer_scratch() const { return 0; }
+    virtual void import_native_rows(const uint8_t*, int64_t, int64_t, int64_t) {
+        throw std::logic_error("this engine has no native session importer");
+    }
+    virtual void import_native_state(const uint8_t*, int64_t) {
+        throw std::logic_error("this engine has no native session importer");
+    }
     /// The scratch of the architecture's own kernels, a fbuf() each.  Called twice: the first time only counts.
     virtual void assign_scratch() = 0;
     /// The widest input lin() gets, beside the model's width and the FFNs'.
@@ -633,7 +648,7 @@ protected:
     /// A buffer of the sequence's own that does not grow with it, such as a window layer's ring of rows.
     void* seq_alloc(size_t bytes, const char* what);
     /// VRAM in every attention cache for the rows below `end`, before a call writes them.
-    void cover(int64_t end);
+    void cover(int64_t end, bool admission = false);
 
     // VRAM mapped onto addresses reserved for the most it can be, a piece at a time (CUDA's virtual memory
     // management): it grows and shrinks at its end and keeps its address, which recorded launches hold.
@@ -733,6 +748,7 @@ protected:
     int n_embd_ = 0, n_layer_ = 0, n_vocab_ = 0;
     int padded_vocab_ = 0;   ///< zero unless the token table and LM head have extra non-token rows
     bool looped_ = false;    ///< the model owns its visit order; reads go through all visits for each chunk
+    bool serial_decode_ = false;   ///< eval_decode(), never a prompt predictor or a verifier window
     bool prefetch_early_ = false;   ///< Inkling opt-in: enqueue prompt weights before the router's readback
     bool kcopy_ = false;            ///< Inkling opt-in: the prompt router's readback and tables copied by a kernel
     int n_ff_ = 0;            ///< a dense FFN's width, in the architectures that have one
@@ -840,7 +856,7 @@ protected:
     void hold(int s);   ///< bind() on this card alone
     size_t other_rows() const;
     size_t charged_rows() const;
-    size_t placement_free(size_t free) const;
+    size_t placement_free(size_t free, int64_t cover_rows = -1) const;
     size_t expert_kv_cap_ = 0;   ///< optional combined mapped rows + whole-slot arena limit
     bool fund_experts_ = false;
     size_t budget_ = 0;          ///< their VRAM and the expert cache's together, as the cache was filled

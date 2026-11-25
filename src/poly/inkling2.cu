@@ -4,6 +4,8 @@
 
 #include "inkling_attend.hpp"
 #include "inkling_dspark.hpp"
+#include "inkling_kv_policy.hpp"
+#include "inkling_v4_refit.hpp"
 #include "runtime.hpp"
 #include "strata/kernels/gfx_arch.hpp"
 #include "strata/kernels/iq_kernels.hpp"
@@ -45,6 +47,16 @@ __global__ void swa_tail_copy(SwaCopyPlanes p, int ring, int ring_head, int stag
     const int in_ring = slot * stride + i - row * stride, in_stage = stage_head * stride + i;
     if constexpr (Gather) p.stage[j][in_stage] = p.ring[j][in_ring];
     else p.ring[j][in_ring] = p.stage[j][in_stage];
+}
+
+constexpr int kCaptureRows = 128, kImportRows = 1024;
+constexpr size_t kScaleBytes = inkling::kKvScales * sizeof(uint16_t);
+
+bool kv_switch(const char* name) {
+    const char* p = std::getenv(name);
+    if (!p || std::strcmp(p, "0") == 0) return false;
+    if (std::strcmp(p, "1") == 0) return true;
+    throw std::invalid_argument(std::string(name) + " expects 0 or 1");
 }
 
 template <bool Maximum> __device__ float wave_reduce(float x) {
@@ -329,8 +341,10 @@ __global__ void head_norms_kernel(HeadNorms h, float eps, int64_t pos, float alp
 struct KvStore {
     int8_t *kc, *vc;
     __half *ks, *vs;
-    int64_t at;   // the row's place in the cache
+    int64_t at;     // the row's place in the K cache and in an ordinary V cache
+    int64_t vat = -1;   // a separate Q8 V hot ring, when set
 };
+template <bool V4 = false>
 __global__ void heads_kv_kernel(Conv k, Conv v, HeadNorms h, KvStore c, float eps, int64_t pos, float alpha,
                                 size_t stride) {
     __shared__ float waves[kThreads / 32];
@@ -352,10 +366,11 @@ __global__ void heads_kv_kernel(Conv k, Conv v, HeadNorms h, KvStore c, float ep
     const float d = amax / 127.0f;
     const float id = d > 0.f ? 1.0f / d : 0.0f;
     constexpr int nb = kKvWidth / 32;
-    if (threadIdx.x % 32 == 0) (j == 2 ? c.vs : c.ks)[(size_t) c.at * nb + i / 32] = __float2half(d);
+    const size_t at = V4 && j == 2 ? c.vat : c.at;
+    if (threadIdx.x % 32 == 0) (j == 2 ? c.vs : c.ks)[at * nb + i / 32] = __float2half(d);
     float q = rintf(x * id);
     q = fminf(fmaxf(q, -127.0f), 127.0f);
-    (j == 2 ? c.vc : c.kc)[(size_t) c.at * kKvWidth + i] = (int8_t) q;
+    (j == 2 ? c.vc : c.kc)[at * kKvWidth + i] = (int8_t) q;
 }
 
 // K and V into their Q8_0 caches in one launch, as store_q8_kernel writes them, a row at (pos + row) % ring (or
@@ -575,6 +590,18 @@ void Inkling2::load_geometry() {
                    stderr);
     if (!q8() && opt_.kv_format != KvFmt::kFp16)
         throw std::runtime_error("Inkling-2-Mini supports Q8_0 or FP16 KV");
+    k256_ = kv_switch("STRATA_INKLING_K256");
+    v4_ = kv_switch("STRATA_INKLING_V4");
+    v4_scalar_ = v4_ && kv_switch("STRATA_INKLING_V4_SCALAR");
+#if !defined(STRATA_POLY_V4_REFIT_HOST)
+    if (v4_) throw std::runtime_error("Inkling V4 needs a build with the host refit codec");
+#endif
+    if (k256_ || v4_) {
+        if (!q8() || !decode_ || drafter || opt_.max_context > inkling::kKvPage * inkling::kKvMaxPages)
+            throw std::runtime_error("Inkling K256/V4 needs Q8_0 KV, STRATA_INKLING_DECODE=1, no DSpark and at most 262144 rows");
+        if (v4_ && (!opt_.kv_grow || opt_.vram_pool))
+            throw std::runtime_error("Inkling V4 needs growing KV without --kv-whole or --vram-pool");
+    }
     const int window = opt_.window;
     opt_.window = 1;
     load_shape();
@@ -843,7 +870,15 @@ size_t Inkling2::recurrent_floats() const { return (size_t) kVisits * kConvFloat
 size_t Inkling2::kv_bytes() const {
     return 2 * (q8() ? kKey + (kKey / 32) * sizeof(uint16_t) : kKey * sizeof(uint16_t));
 }
-size_t Inkling2::card_row_bytes() const { return kVisits / kBlock * kv_bytes() + (draft_ ? ds_row_bytes() : 0); }
+size_t Inkling2::native_session_row_bytes() const { return kVisits / kBlock * kv_bytes() + (draft_ ? ds_row_bytes() : 0); }
+size_t Inkling2::card_row_bytes() const {
+    return native_session_row_bytes() - (v4_ ? (kVisits / kBlock) * inkling::kV4Columns : 0);
+}
+int Inkling2::card_session_layout() const { return v4_ ? inkling::kV4DiskLayout : 0; }
+size_t Inkling2::native_session_state_bytes() const { return state_n_ * sizeof(float) + swa_state_bytes(); }
+size_t Inkling2::session_transfer_scratch() const {
+    return v4_ ? std::max(kCaptureRows * (kKey + kScaleBytes), kImportRows * (inkling::kV4Columns + kScaleBytes)) : 0;
+}
 
 void Inkling2::alloc_caches() {
     constexpr int visits = kVisits - kVisits / kBlock;
@@ -863,17 +898,39 @@ void Inkling2::alloc_caches() {
     auto* rings = (uint8_t*) seq_alloc((size_t) visits * ring * kv_bytes(), "Inkling SWA KV");
     const size_t wide = kKey * (q8() ? 1 : sizeof(uint16_t));
     const size_t scale = q8() ? kKey / 32 * sizeof(uint16_t) : 0;
+    uint8_t* hot = nullptr;
+    if (v4_) {
+        if (!vmm_) throw std::runtime_error("Inkling V4 needs HIP virtual memory management for growing KV");
+        hot_rows_ = inkling::v4_hot_rows(opt_.max_context, rows_);
+        const size_t bytes = (kVisits / kBlock) * (size_t) hot_rows_ * (wide + scale);
+        hot_bytes_ = (bytes + grain_ - 1) / grain_ * grain_;
+        hot = (uint8_t*) seq_alloc(hot_bytes_, "Inkling global Q8 V hot rings");
+        std::fprintf(stderr, "strata-poly: Inkling V4: hot rows per global visit %d, fixed backing %zu bytes, host refit %s\n",
+                     hot_rows_, hot_bytes_, v4_scalar_ ? "scalar" : "auto");
+    }
+    if (k256_)
+        std::fprintf(stderr, "strata-poly: Inkling K256/P128: %s\n",
+                     inkling::k256_worthwhile(opt_.max_context) ? "serial generation only, growing index"
+                                                              : "context too short to skip any pages; dense");
     for (int i = 0; i < kVisits; ++i) {
+        Cache& c = caches_[i];
         for (int j = 0; j < 4; ++j) {
             const size_t stride = j % 2 ? scale : wide;
-            auto& p = caches_[i].planes[j];
+            auto& p = c.planes[j];
             p = {nullptr, stride};
             if (!stride) continue;
             if (local(i)) {
                 p.data = rings;
                 rings += (size_t) ring * stride;
+            } else if (v4_ && j >= 2) {
+                p.data = hot;
+                hot += (size_t) hot_rows_ * stride;
+                const size_t cold_stride = j == 2 ? inkling::kV4Columns : scale;
+                c.cold_v[j - 2] = {(uint8_t*) kv_alloc(cold_stride, 1), cold_stride};
             } else p.data = (uint8_t*) kv_alloc(stride, 1);
         }
+        if (!local(i) && k256_ && inkling::k256_worthwhile(opt_.max_context))
+            c.index = (uint32_t*) kv_alloc(inkling::kKvIndexPageBytes, inkling::kKvPage);
     }
     if (!draft_) return;
     // the drafter's K/V, Q8_0 whatever --kv is: its window layers keep the last kWindow positions, the other every one
@@ -887,10 +944,91 @@ void Inkling2::alloc_caches() {
         }
 }
 
+size_t Inkling2::kv_codec_saved_bytes(int64_t rows) const {
+    if (!v4_ || !rows) return 0;
+    const size_t gran = pool_on_ ? pg_ : grain_;
+    const auto rounded = [gran](size_t n) { return (n + gran - 1) / gran * gran; };
+    size_t native = 0, actual = hot_bytes_;
+    for (int i = 0; i < kVisits; ++i) if (!local(i)) {
+        const Cache& c = caches_[i];
+        for (int v = 0; v < 2; ++v) {
+            const auto at = reinterpret_cast<uintptr_t>(c.cold_v[v].data);
+            const auto map = std::find_if(kv_.begin(), kv_.end(), [at](const Kv& k) { return k.base == at; });
+            if (map == kv_.end()) return 0;
+            actual += std::max(map->mapped, rounded((size_t) rows * map->bytes));
+            native += rounded((size_t) rows * c.planes[2 + v].stride);
+        }
+    }
+    return native > actual ? native - actual : 0;
+}
+
+void Inkling2::seal(Cache& c, int64_t pos) {
+    if (!pos) c.sealed = 0;   // reset() does not have to sweep any KV planes
+    const int64_t stop = inkling::v4_seal(pos);
+    if (stop < c.sealed || pos - c.sealed > hot_rows_)
+        throw std::logic_error("Inkling V4: live hot tail is not resident");
+    inkling::seal_v4({c.planes[2].data, (const uint16_t*) c.planes[3].data}, hot_rows_, c.cold_v[0].data,
+                    (uint16_t*) c.cold_v[1].data, c.sealed, stop, cs(st_));
+    c.sealed = stop;
+}
+
+void Inkling2::hot_transfer(const Plane& p, int64_t first, int64_t n, uint8_t* dst, const uint8_t* src) {
+    for (int64_t done = 0; done < n;) {
+        const int64_t slot = (first + done) % hot_rows_, m = std::min(n - done, hot_rows_ - slot);
+        const size_t bytes = (size_t) m * p.stride, off = (size_t) done * p.stride;
+        uint8_t* card = p.data + slot * p.stride;
+        if (dst) ck(cudaMemcpy(dst + off, card, bytes, cudaMemcpyDeviceToHost), "save Inkling hot V");
+        else ck(cudaMemcpy(card, src + off, bytes, cudaMemcpyHostToDevice), "load Inkling hot V");
+        done += m;
+    }
+}
+
+void Inkling2::save_hybrid_rows(int64_t first, int64_t n, uint8_t* dst) {
+#if defined(STRATA_POLY_V4_REFIT_HOST)
+    if (first > pos_ || n > pos_ - first) throw std::logic_error("save_rows: outside live hybrid rows");
+    std::vector<uint8_t> scratch;
+    const auto pack = v4_scalar_ ? codec::pack_refit_scalar : codec::pack_refit;
+    for (int i = 0; i < kVisits; ++i) if (!local(i)) {
+        const Cache& c = caches_[i];
+        for (int j = 0; j < 2; ++j) {
+            const Plane& p = c.planes[j];
+            const size_t bytes = (size_t) n * p.stride;
+            ck(cudaMemcpy(dst, p.data + first * p.stride, bytes, cudaMemcpyDeviceToHost), "save Inkling Q8 K");
+            dst += bytes;
+        }
+        const int64_t cold = std::clamp(c.sealed - first, int64_t{0}, n);
+        uint8_t* codes = dst;
+        uint8_t* scales = codes + n * inkling::kV4Columns;
+        if (cold) {
+            ck(cudaMemcpy(codes, c.cold_v[0].data + first * inkling::kV4Columns, cold * inkling::kV4Columns,
+                          cudaMemcpyDeviceToHost), "save Inkling V4 codes");
+            ck(cudaMemcpy(scales, c.cold_v[1].data + first * kScaleBytes, cold * kScaleBytes,
+                          cudaMemcpyDeviceToHost), "save Inkling V4 scales");
+        }
+        // A row record is canonical V4, whether this row was still hot or not. The separate checkpoint carries
+        // the exact Q8 hot bytes; the temporary refit does not mutate the hot ring or the live seal.
+        for (int64_t at = cold; at < n; at += kCaptureRows) {
+            const int m = (int) std::min<int64_t>(kCaptureRows, n - at);
+            if (scratch.empty()) scratch.resize(kCaptureRows * (kKey + kScaleBytes));
+            uint8_t* src_scales = scratch.data() + kCaptureRows * kKey;
+            hot_transfer(c.planes[2], first + at, m, scratch.data(), nullptr);
+            hot_transfer(c.planes[3], first + at, m, src_scales, nullptr);
+            pack(scratch.data(), src_scales, m, codes + at * inkling::kV4Columns, scales + at * kScaleBytes);
+        }
+        dst = scales + n * kScaleBytes;
+    }
+#else
+    (void) first; (void) n; (void) dst;
+    throw std::logic_error("Inkling V4 host refit is unavailable");
+#endif
+}
+
 void Inkling2::save_card_rows(int64_t first, int64_t n, uint8_t* dst) {
-    if (first < 0 || n < 0 || first + n > opt_.max_context) throw std::logic_error("save_rows: outside context");
+    if (first < 0 || n < 0 || first > opt_.max_context || n > opt_.max_context - first)
+        throw std::logic_error("save_rows: outside context");
     if (!n) return;
     ck(cudaStreamSynchronize(cs(st_)), "save Inkling rows");
+    if (v4_) return save_hybrid_rows(first, n, dst);
     for (int i = 0; i < kVisits; ++i) if (!local(i)) {
         for (const auto& p : caches_[i].planes) if (p.stride) {
             const size_t bytes = (size_t) n * p.stride;
@@ -907,13 +1045,18 @@ void Inkling2::save_card_rows(int64_t first, int64_t n, uint8_t* dst) {
 }
 
 void Inkling2::load_card_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n) {
-    if (from < 0 || first < from || n < 0 || first + n > from + count || first + n > opt_.max_context)
+    if (from < 0 || first < from || count < 0 || n < 0 || from > opt_.max_context || count > opt_.max_context - from ||
+        first - from > count || n > count - (first - from))
         throw std::logic_error("load_rows: outside saved rows");
     if (!n) return;
     cover(first + n);
     ck(cudaStreamSynchronize(cs(st_)), "load Inkling rows");
     for (int i = 0; i < kVisits; ++i) if (!local(i)) {
-        for (const auto& p : caches_[i].planes) if (p.stride) {
+        Cache& c = caches_[i];
+        c.indexed = std::min(c.indexed, (int) (first / inkling::kKvPage));
+        for (int j = 0; j < 4; ++j) {
+            const auto& p = v4_ && j >= 2 ? c.cold_v[j - 2] : c.planes[j];
+            if (!p.stride) continue;
             ck(cudaMemcpy(p.data + first * p.stride, src + (first - from) * p.stride, (size_t) n * p.stride,
                           cudaMemcpyHostToDevice), "load Inkling rows");
             src += (size_t) count * p.stride;
@@ -927,9 +1070,65 @@ void Inkling2::load_card_rows(const uint8_t* src, int64_t from, int64_t count, i
         }
 }
 
-size_t Inkling2::extra_bytes() const {
+void Inkling2::import_native_rows(const uint8_t* src, int64_t first, int64_t n, int64_t end) {
+#if defined(STRATA_POLY_V4_REFIT_HOST)
+    if (!v4_ || first < 0 || end > opt_.max_context || end < first || n < 1 || n > end - first)
+        throw std::logic_error("invalid native Inkling session row range for V4");
+    cover(end);
+    ck(cudaStreamSynchronize(cs(st_)), "import native Inkling rows");
+    const int64_t cold = std::clamp(inkling::v4_seal(end) - first, int64_t{0}, n);
+    std::vector<uint8_t> scratch(cold ? kImportRows * (inkling::kV4Columns + kScaleBytes) : 0);
+    const auto pack = v4_scalar_ ? codec::pack_refit_scalar : codec::pack_refit;
+    for (int i = 0; i < kVisits; ++i) if (!local(i)) {
+        Cache& c = caches_[i];
+        c.indexed = std::min(c.indexed, (int) (first / inkling::kKvPage));
+        for (int j = 0; j < 2; ++j) {
+            const Plane& p = c.planes[j];
+            const size_t bytes = (size_t) n * p.stride;
+            ck(cudaMemcpy(p.data + first * p.stride, src, bytes, cudaMemcpyHostToDevice), "import Inkling Q8 K");
+            src += bytes;
+        }
+        const uint8_t* scales = src + n * kKey;
+        for (int64_t at = 0; at < cold; at += kImportRows) {
+            const int m = (int) std::min<int64_t>(kImportRows, cold - at);
+            uint8_t* refitted = scratch.data() + kImportRows * inkling::kV4Columns;
+            pack(src + at * kKey, scales + at * kScaleBytes, m, scratch.data(), refitted);
+            ck(cudaMemcpy(c.cold_v[0].data + (first + at) * inkling::kV4Columns, scratch.data(),
+                          m * inkling::kV4Columns, cudaMemcpyHostToDevice), "import Inkling V4 codes");
+            ck(cudaMemcpy(c.cold_v[1].data + (first + at) * kScaleBytes, refitted, m * kScaleBytes,
+                          cudaMemcpyHostToDevice), "import Inkling V4 scales");
+        }
+        hot_transfer(c.planes[2], first + cold, n - cold, nullptr, src + cold * kKey);
+        hot_transfer(c.planes[3], first + cold, n - cold, nullptr, scales + cold * kScaleBytes);
+        src = scales + n * kScaleBytes;
+    }
+#else
+    (void) src; (void) first; (void) n; (void) end;
+    throw std::logic_error("Inkling V4 host refit is unavailable");
+#endif
+}
+
+void Inkling2::import_native_state(const uint8_t* src, int64_t pos) {
+    if (!v4_ || pos < 1 || pos > opt_.max_context) throw std::logic_error("invalid native Inkling state for V4");
+    ck(cudaStreamSynchronize(cs(st_)), "import native Inkling state");
+    ck(cudaMemcpy(state_, src, state_n_ * sizeof(float), cudaMemcpyHostToDevice), "import native Inkling state");
+    load_swa_state(src + state_n_ * sizeof(float), pos);
+    for (int i = 0; i < kVisits; ++i) if (!local(i)) {
+        caches_[i].sealed = inkling::v4_seal(pos);
+        caches_[i].indexed = 0;
+    }
+    pos_ = pos;
+    ahead_pos_ = -1;
+}
+
+size_t Inkling2::swa_state_bytes() const {
     return (kVisits - kVisits / kBlock) * (size_t) std::min(opt_.max_context, kWindow - 1) * kv_bytes() +
            (draft_ ? 2 * (size_t) std::min(opt_.max_context, kWindow) * ds_row_bytes() : 0);
+}
+
+size_t Inkling2::extra_bytes() const {
+    return swa_state_bytes() + (v4_ ? (kVisits / kBlock) * (size_t) inkling::v4_checkpoint_rows(opt_.max_context) *
+                                      (kKey + kScaleBytes) : 0);
 }
 
 void Inkling2::ring_state(int visit, int64_t pos, const uint8_t* src, uint8_t* dst) {
@@ -973,13 +1172,30 @@ void Inkling2::save_card_state(uint8_t* dst) {
         const char* p = std::getenv("STRATA_INKLING_STATE_PACK");
         return p && p[0] == '1' && p[1] == '\0';
     }();
-    if (pack && looped_ && try_pack_state(dst)) {
+    if (pack && !v4_ && looped_ && try_pack_state(dst)) {
         static const bool logged = [] {
             std::fputs("strata-poly: STRATA_INKLING_STATE_PACK=1: packed checkpoints in expert stage\n", stderr);
             return true;
         }();
         (void) logged;
         return;
+    }
+    if (v4_) {
+        // Bring the seal to the committed position, without modifying its exact hot tail. Packed rows below
+        // this checkpoint's seal now exist even if no more inputs are evaluated before a rollback.
+        for (int i = 0; i < kVisits; ++i) if (!local(i)) seal(caches_[i], pos_);
+        ck(cudaStreamSynchronize(cs(st_)), "save hybrid Inkling state");
+        uint8_t* out = dst + native_session_state_bytes();
+        const int64_t first = inkling::v4_seal(pos_), n = pos_ - first;
+        const int64_t keep = inkling::v4_checkpoint_rows(opt_.max_context);
+        for (int i = 0; i < kVisits; ++i) if (!local(i))
+            for (int v = 2; v < 4; ++v) {
+                const Plane& p = caches_[i].planes[v];
+                const size_t valid = (size_t) n * p.stride;
+                std::memset(out + valid, 0, (size_t) (keep - n) * p.stride);
+                hot_transfer(p, first, n, out, nullptr);
+                out += keep * p.stride;
+            }
     }
     Engine::save_card_state(dst);
 }
@@ -1068,7 +1284,7 @@ void Inkling2::save_layer(int il, int64_t pos, uint8_t* dst) {
     }
 }
 
-void Inkling2::load_extra(const uint8_t* src, int64_t pos) {
+void Inkling2::load_swa_state(const uint8_t* src, int64_t pos) {
     const size_t one = (size_t) std::min(opt_.max_context, kWindow - 1) * kv_bytes();
     for (int i = 0; i < kVisits; ++i) if (local(i)) {
         ring_state(i, pos, src, nullptr);
@@ -1080,6 +1296,24 @@ void Inkling2::load_extra(const uint8_t* src, int64_t pos) {
                 ds_ring(l, pos, src, nullptr);
                 src += (size_t) std::min(opt_.max_context, kWindow) * ds_row_bytes();
             }
+}
+
+void Inkling2::load_extra(const uint8_t* src, int64_t pos) {
+    load_swa_state(src, pos);
+    src += swa_state_bytes();
+    const int keep = inkling::v4_checkpoint_rows(opt_.max_context);
+    for (int i = 0; i < kVisits; ++i) if (!local(i)) {
+        Cache& c = caches_[i];
+        c.indexed = std::min(c.indexed, (int) (pos / inkling::kKvPage));
+        if (!v4_) continue;
+        const int64_t first = inkling::v4_seal(pos), n = pos - first;
+        for (int v = 2; v < 4; ++v) {
+            const Plane& p = c.planes[v];
+            hot_transfer(p, first, n, nullptr, src);
+            src += keep * p.stride;
+        }
+        c.sealed = first;
+    }
 }
 
 void Inkling2::assign_scratch() {
@@ -1101,7 +1335,8 @@ void Inkling2::assign_scratch() {
     scores_ = fbuf(inkling::plain_score_floats(attend_tiles_));
     partial_ = fbuf(inkling::plain_partial_floats(attend_tiles_));
     if (decode_) {
-        chunks_ = fbuf(inkling::decode_floats());
+        chunks_ = fbuf(inkling::decode_floats() + (k256_ && inkling::k256_worthwhile(opt_.max_context)
+                                                ? inkling::k256_scratch_floats() : 0));
         taps2_ = fbuf(n * kKv * kTaps);
         attq_ = fbuf((size_t) kStageRows * (kQuery / 32) * 36 / sizeof(float));   // Q8_1: 36 bytes a block of 32
         kq8_ = fbuf((size_t) (kWidth / 32) * 36 / sizeof(float));
@@ -1217,6 +1452,7 @@ void Inkling2::store(const float* x, Cache& c, int side, int64_t pos, int ring, 
 
 void Inkling2::attention(const Block& b, int n) {
     const bool swa = local(visit_);
+    const bool hybrid = v4_ && !swa;
     Cache& live = caches_[visit_];
     const int live_ring = swa ? swa_plan_.ring_rows : 0;
     const auto layout = swa && swa_plan_.stage_rows ? inkling::swa_stage_layout(pos_, kWindow)
@@ -1228,16 +1464,16 @@ void Inkling2::attention(const Block& b, int n) {
     // capped decode span are identical, and the shift is a multiple of the Flash key tile.
     const int64_t pos = staged ? layout.append() : pos_;
     if (staged) copy_swa(live, (int) (layout.first % live_ring), layout.head, layout.history, true);
-    if (fused(n) && q8()) {
-        const int blocks = 2 * (kKey / 32) * n;
-        if (!kv_stored_)
-            store2_q8_kernel<<<div_up(blocks, 256), 256, 0, cs(st_)>>>(
-                k_, v_, (int8_t*) c.planes[0].data, (__half*) c.planes[1].data, (int8_t*) c.planes[2].data,
-                (__half*) c.planes[3].data, pos, ring, n);
+    if (kv_stored_) {
         kv_stored_ = false;
+    } else if (fused(n) && q8() && !hybrid) {
+        const int blocks = 2 * (kKey / 32) * n;
+        store2_q8_kernel<<<div_up(blocks, 256), 256, 0, cs(st_)>>>(
+            k_, v_, (int8_t*) c.planes[0].data, (__half*) c.planes[1].data, (int8_t*) c.planes[2].data,
+            (__half*) c.planes[3].data, pos, ring, n);
     } else {
         store(k_, c, 0, pos, ring, n);
-        store(v_, c, 1, pos, ring, n);
+        store(v_, c, 1, pos, hybrid ? hot_rows_ : ring, n);
     }
     inkling::Attend a;
     a.q = q_;
@@ -1252,6 +1488,23 @@ void Inkling2::attention(const Block& b, int n) {
     a.window = swa ? kWindow : 0;
     a.ring = ring;
     a.out = att_;
+    const inkling::V4View mixed = hybrid ? inkling::V4View{
+        {c.cold_v[0].data, (const uint16_t*) c.cold_v[1].data}, c.sealed, hot_rows_} : inkling::V4View{};
+    if (c.index) {
+        // A rewind can leave a partial last page that is about to be overwritten. No entry at or after that
+        // page survives, even when the current run is interrupted before its Engine position advances.
+        const int first = std::min(c.indexed, (int) (pos_ / inkling::kKvPage));
+        const int stop = (int) ((pos_ + n) / inkling::kKvPage);
+        inkling::k256_build(a.k, c.index, first, stop, cs(st_));
+        c.indexed = stop;
+        if (serial_decode_ && n == 1 && !windowed_ && inkling::attend_k256(a, mixed, c.index, chunks_, cs(st_), attq_))
+            return;
+    }
+    // The original readers remain valid while the hot ring is unwrapped and no V4 row can be visible yet.
+    if (hybrid && c.sealed) {
+        inkling::attend_v4(a, mixed, chunks_, cs(st_), fused(n) ? attq_ : nullptr);
+        return;
+    }
     // Prompt batches only: a token's answer and short calls keep the plain kernels and their sums.
     if (flash_ && n >= kStageRows) inkling::attend_flash(a, cs(st_));
     else if (decode_ && n < kStageRows) inkling::attend_decode(a, chunks_, cs(st_), attq_, ds_attend_group_);
@@ -1411,6 +1664,12 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
     tail_sum_.n = 0;
     tail_record_ = moe_tail_ && fused(n) && L.moe && n == 1;
     const bool swa = local(visit_), loop = messages();
+    kv_stored_ = false;
+    if (v4_ && !swa) {
+        Cache& c = caches_[visit_];
+        seal(c, pos_);    // before the fused heads kernel can write a new hot row
+        if (pos_ + n - c.sealed > hot_rows_) throw std::logic_error("Inkling V4: input does not fit the hot ring");
+    }
     const Dev* norm[3] = {&L.attn_norm, swa ? &L.attn_norm : &b.knorm, swa ? &L.attn_norm : &b.vnorm};
     const int streams = swa && !loop ? 1 : 3;
     const float *xq = input_[0], *xk = xq, *xv = xq;
@@ -1479,9 +1738,12 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
         if (n == 1 && q8()) {   // attention() finds K and V stored
             Cache& c = caches_[visit_];
             const KvStore to{(int8_t*) c.planes[0].data, (int8_t*) c.planes[2].data, (__half*) c.planes[1].data,
-                             (__half*) c.planes[3].data, swa ? pos_ % swa_plan_.ring_rows : pos_};
-            heads_kv_kernel<<<2 * kHeads + 2 * kKv, kThreads, 0, cs(st_)>>>(ck, cv, h, to, rms_eps_, pos_, alpha_,
-                                                                           rec_n_);
+                             (__half*) c.planes[3].data, swa ? pos_ % swa_plan_.ring_rows : pos_,
+                             v4_ && !swa ? pos_ % hot_rows_ : -1};
+            const int blocks = 2 * kHeads + 2 * kKv;
+            if (v4_ && !swa)
+                heads_kv_kernel<true><<<blocks, kThreads, 0, cs(st_)>>>(ck, cv, h, to, rms_eps_, pos_, alpha_, rec_n_);
+            else heads_kv_kernel<><<<blocks, kThreads, 0, cs(st_)>>>(ck, cv, h, to, rms_eps_, pos_, alpha_, rec_n_);
             kv_stored_ = true;
         } else {
             conv2_kernel<<<div_up(2 * kKey, kThreads), kThreads, 0, cs(st_)>>>(ck, cv, kKey, n, rec_n_);

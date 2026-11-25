@@ -82,9 +82,27 @@ leaves that estimated saving free; `STRATA_INKLING_FUND_EXPERTS=1` allows the us
 Changing the CPU/GPU split can change generated tokens; saving VRAM is not itself a speed or quality result.
 The saved window state still contains the same oldest-first tail, not the physical ring or the stage.
 
-For matched-budget runs, `STRATA_INKLING_EXPERT_KV_MIB` limits the expert arena plus charged growing KV on
+For matched-budget runs, `STRATA_INKLING_EXPERT_KV_MIB` limits the expert arena plus charged global KV on
 one card with VMM and no pool. It does **not** limit total process VRAM or replace `--vram-reserve-mib`.
 Do not freeze a full startup arena and then try to grow into the same budget: frozen experts cannot be evicted.
+
+### Optional global attention and storage
+
+Dense Q8 remains the reference. K256 and V4 are independent of each other and of compact SWA. Both need Q8
+KV, the HIP decode reader, a single sequence without DSpark, and a context of at most 262,144 positions.
+
+| Control (off when unset) | What changes |
+|---|---|
+| `STRATA_INKLING_K256=1` | Serial generation only: keep page zero, 256 selected old 128-row pages per KV group and the full recent tail (at least 2,048 rows). If no old page would be skipped, read dense. Prompt and tool-return queries do not share a selection. The growing key index is rebuilt from K, never saved. |
+| `STRATA_INKLING_V4=1` | Keep absolute Q8 K. Before an input batch, seal whole old pages of V to symmetric signed nibbles with one refitted FP16 scale per 32 values. A separate native Q8 ring holds the recent rows and the entire new batch. Needs growing VMM, without `--kv-whole` or `--vram-pool`. |
+| `STRATA_INKLING_FUND_EXPERTS=1` | Allow the cache to use actual savings for ordinary whole-expert slots. A combined budget counts the index, packed planes and fixed hot ring. Without funding, charge saved KV bytes to placement instead. |
+| `STRATA_INKLING_V4_SCALAR=1` | Reference CPU packer for V4. Otherwise use the byte-identical AVX2/F16C refit on eligible CPUs/blocks and scalar elsewhere. This is not a different attention policy. |
+
+A compact checkpoint saves the exact native V tail for its own position. Restoring a branch does not guess
+the missing low bits from V4. Compact disk files have a **different format identity**; the compact reader can
+import a compatible native file directly into packed backing, but the dense binary cannot open a compact file.
+Keep the original native session if you need to roll back to the old binary. With K256 alone, the stored rows
+are still native Q8; a native file describes storage, not which attention policy generated its hidden states.
 
 ## Reading a GGUF and comparing changes
 

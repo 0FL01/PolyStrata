@@ -1172,7 +1172,8 @@ bool session_file_write(const std::string& path, const SavedConversation& image,
 
 namespace {
 bool read_impl(const std::string& path, const SessionFileIdentity& id, SavedConversation& image,
-               size_t& bytes, std::string& error, const SessionReadLimits& limits, SessionStatus& st) {
+               size_t& bytes, std::string& error, const SessionReadLimits& primary, SessionStatus& st,
+               const SessionReadAlternative* alternate) {
     error.clear();
     st = {};
     st.error = SessionError::invalid;   // every refusal below, unless the step says otherwise
@@ -1184,16 +1185,19 @@ bool read_impl(const std::string& path, const SessionFileIdentity& id, SavedConv
         return false;
     }
     if (size < kHeader + kTrailer) { error = "session file: size " + std::to_string(size) + " is below the minimum"; return false; }
-    const uint64_t max_size = session_read_max_file_bytes(limits);
-    if (size > max_size || size > (uint64_t) std::numeric_limits<size_t>::max()) {
+    const auto too_big = [&](uint64_t max_size) {
+        if (size <= max_size && size <= (uint64_t) std::numeric_limits<size_t>::max()) return false;
         error = "session file: size " + std::to_string(size) + " exceeds this engine's limit" +
-                (max_size == UINT64_MAX ? std::string() : " of " + std::to_string(max_size));
-        return false;
-    }
+                 (max_size == UINT64_MAX ? std::string() : " of " + std::to_string(max_size));
+        return true;
+    };
+    const uint64_t primary_max = session_read_max_file_bytes(primary);
+    const uint64_t alternate_max = alternate ? session_read_max_file_bytes(alternate->limits) : 0;
+    if (too_big(std::max(primary_max, alternate_max))) return false;
     FileSource f(raw);
     if (!f.ok()) { st.error = SessionError::memory; error = "session file: " + f.error(); return false; }
     // installed before the first block (the header's) is read: every block reports, the first one included
-    if (limits.progress) f.progress.emplace(limits.progress);
+    if (primary.progress) f.progress.emplace(primary.progress);
     f.expected = size;
     uint8_t h[kHeader];
     if (!f.read(h, kHeader)) { st.error = f.kind(); error = "session file: header read error: " + f.error(); return false; }
@@ -1207,7 +1211,13 @@ bool read_impl(const std::string& path, const SessionFileIdentity& id, SavedConv
     if (version != kVersion) { error = "session file: unsupported version " + std::to_string(version); return false; }
     if (hsize != kHeader || r0 || r1) { error = "session file: invalid header fields"; return false; }
     if (model != id.model) { error = "session file: saved with another model (model fingerprint differs)"; return false; }
-    if (config != id.config) { error = "session file: saved with another engine configuration (config fingerprint differs)"; return false; }
+    const bool use_alt = config != id.config && alternate && config == alternate->config;
+    if (config != id.config && !use_alt) {
+        error = "session file: saved with another engine configuration (config fingerprint differs)";
+        return false;
+    }
+    const auto& limits = use_alt ? alternate->limits : primary;
+    if (too_big(use_alt ? alternate_max : primary_max)) return false;
     if (payload > size || size - kHeader - kTrailer != payload) {
         error = "session file: size " + std::to_string(size) + " does not match the header (" +
                 std::to_string(kHeader + payload + kTrailer) + ")";
@@ -1234,16 +1244,18 @@ bool read_impl(const std::string& path, const SessionFileIdentity& id, SavedConv
     image = std::move(parsed);
     bytes = (size_t) size;
     st.error = SessionError::none;
+    st.used_alternate = use_alt;
     return true;
 }
 } // namespace
 
 bool session_file_read(const std::string& path, const SessionFileIdentity& id, SavedConversation& image,
-                       size_t& bytes, std::string& error, const SessionReadLimits& limits, SessionStatus* status) {
+                       size_t& bytes, std::string& error, const SessionReadLimits& limits, SessionStatus* status,
+                       const SessionReadAlternative* alternate) {
     SessionStatus st;
     bool ok = false;
     try {
-        ok = read_impl(path, id, image, bytes, error, limits, st);
+        ok = read_impl(path, id, image, bytes, error, limits, st, alternate);
     } catch (const std::bad_alloc&) {
         error = "session file: out of memory while reading " + path;
         st.error = SessionError::memory;

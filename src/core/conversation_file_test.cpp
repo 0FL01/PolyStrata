@@ -190,6 +190,33 @@ int main() {
         check(read == written, "read reports the file size");
         check(same(original, back), "round trip is identical");
     }
+    // One open, two explicit formats (native import into a different live codec). The matched header must
+    // choose its own geometry, size limit and RAM admission; a mismatch does not get a relaxed retry.
+    {
+        const SessionFileIdentity other{id.model, id.config ^ 1};
+        SessionReadLimits primary, native;
+        primary.max_file_bytes = written - 1;
+        primary.geometry = original.geometry;
+        auto wrong = original.geometry;
+        ++wrong[0];
+        native.geometry = wrong;
+        bool admitted = false;
+        native.admit = [&](uint64_t, std::string&) { admitted = true; return true; };
+        const SessionReadAlternative option{id.config, native};
+        SessionStatus status;
+        SavedConversation back;
+        size_t read = 0;
+        check(!session_file_read(good.string(), other, back, read, error, primary, &status, &option) &&
+              admitted && !status.used_alternate, "alternate identity checks its own geometry");
+        native.geometry = original.geometry;
+        admitted = false;
+        check(session_file_read(good.string(), other, back, read, error, primary, &status, &option) && admitted &&
+              status.used_alternate && same(original, back), "alternate identity uses its own size and admission");
+        check(!session_file_read(good.string(), id, back, read, error, primary, &status, &option) &&
+              !status.used_alternate && same(original, back), "primary format cannot use alternate byte limit");
+        check(!session_file_read(good.string(), {id.model ^ 1, other.config}, back, read, error, primary,
+                                 &status, &option) && !status.used_alternate, "alternate cannot change the model");
+    }
     // writing twice produces the same bytes (deterministic format)
     {
         const fs::path again = dir / "again.bin";

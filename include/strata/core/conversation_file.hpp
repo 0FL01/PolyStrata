@@ -124,6 +124,8 @@ struct SessionStatus {
     bool published = false;
     // write (POSIX): this filesystem cannot flush a folder (fsync EINVAL); the save succeeded without that flush
     bool dir_flush_unsupported = false;
+    // read: the verified file used the caller's alternate configuration and its own geometry/limits.
+    bool used_alternate = false;
 };
 
 // Progress of a file transfer: (bytes done, bytes in the file).  A write reports once when its temporary file is
@@ -228,12 +230,18 @@ uint64_t session_read_max_file_bytes(const SessionReadLimits& limits);
 // What the RAM preflight is asked for a file of `file_bytes`: the parsed image (about the payload), the 16 MiB read
 // buffer, and the per-allocation overhead of its arrays (a page per 16 MiB segment plus the small vectors).
 uint64_t session_read_peak_bytes(uint64_t file_bytes);
+// Optional second format of the same model (e.g. import). Match its identity and use its bounds on the same
+// opened file; progress always uses the main limits' callback. There is no fallback after header selection.
+struct SessionReadAlternative {
+    uint64_t config;
+    const SessionReadLimits& limits;
+};
 // Full validation (a regular file with one link, size, header, identity, bounded parse, payload hash) before `image`
 // is replaced.  The file is opened without following a symbolic link (or a reparse point) at its name, and the checks
 // are made on the opened handle.  On failure `image` is unchanged and `status->error` says what kind of failure.
 bool session_file_read(const std::string& path, const SessionFileIdentity& id, SavedConversation& image,
                        size_t& bytes, std::string& error, const SessionReadLimits& limits = {},
-                       SessionStatus* status = nullptr);
+                       SessionStatus* status = nullptr, const SessionReadAlternative* alternate = nullptr);
 
 // The folder the free-space preflight asks about for `path`, by the rules of Windows or of POSIX (exposed so both can
 // be tested anywhere).  Windows: backslashes and a trailing backslash, as GetDiskFreeSpaceExW requires for a UNC

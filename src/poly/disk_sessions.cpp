@@ -1,6 +1,7 @@
 #include "disk_sessions.hpp"
 
 #include "conversations.hpp"
+#include "inkling_kv_policy.hpp"
 #include "runtime.hpp"
 #include "strata/core/conversation_file.hpp"
 #include "strata/core/conversation_memory.hpp"
@@ -38,9 +39,11 @@ struct Layout {
     int64_t context, vocab, width, layers, kv_format;
     size_t state_bytes, row_bytes;
     bool dspark;
+    int codec;
 
     std::array<int64_t, 18> geometry() const {
-        return {kInklingTag, dspark ? kDsparkLayoutVersion : kLayoutVersion, context, vocab, width, layers, kv_format,
+        return {kInklingTag, codec ? codec : dspark ? kDsparkLayoutVersion : kLayoutVersion,
+                context, vocab, width, layers, kv_format,
                 (int64_t) state_bytes, (int64_t) row_bytes, block_rows()};
     }
     int64_t block_rows() const { return (int64_t) (ConversationBuffer::segment_bytes / row_bytes); }
@@ -116,7 +119,9 @@ bool DiskSessions::run(bool save, const std::string& path, Conversations<Engine>
         std::printf("SESSION %llu %llu\n", (unsigned long long) done, (unsigned long long) total);
         std::fflush(stdout);
     };
+    const uint64_t scratch = engine_.session_transfer_scratch();
     const auto admit = [&](uint64_t need, std::string& why) {
+        need = need > UINT64_MAX - scratch ? UINT64_MAX : need + scratch;
         if (conversation_memory_admit(available_host_bytes(), need, ram_floor_)) return true;
         why = "not enough RAM for the session (" + std::to_string(need >> 20) + " MiB plus a floor of " +
               std::to_string(ram_floor_ >> 20) + " MiB needed)";
@@ -130,8 +135,13 @@ bool DiskSessions::run(bool save, const std::string& path, Conversations<Engine>
     };
 
     Engine& e = engine_;
-    const Layout layout{e.max_context(), e.n_vocab(), e.n_embd(), e.n_layer_, (int) e.opt_.kv_format,
-                        e.state_bytes(), e.row_bytes(), e.uses_dspark()};
+    const int codec = e.card_session_layout();
+    const Layout native{e.max_context(), e.n_vocab(), e.n_embd(), e.n_layer_, (int) e.opt_.kv_format,
+                        e.native_session_state_bytes(), e.native_session_row_bytes(), e.uses_dspark(), 0};
+    const Layout layout = codec == inkling::kV4DiskLayout
+        ? Layout{native.context, native.vocab, native.width, native.layers, inkling::kV4DiskFormat,
+                 e.state_bytes(), e.row_bytes(), false, codec}
+        : native;
     const auto& ids = kept.seq();
     int64_t pos = e.pos();
     if (save && (pos != (int64_t) ids.size() || !layout.valid_tokens(ids)))
@@ -171,12 +181,16 @@ bool DiskSessions::run(bool save, const std::string& path, Conversations<Engine>
             model.u64("DSpark", *dspark_identity_);
         }
         id.model = model.digest();
-        SessionIdentityBuilder config(0);
-        config.str("engine", "strata-poly " STRATA_VERSION " HIP RDNA2");
+        const auto config_for = [&](const Layout& selected) {
+            SessionIdentityBuilder config(0);
+            config.str("engine", "strata-poly " STRATA_VERSION " HIP RDNA2");
+            const auto geometry = selected.geometry();
+            config.bytes("Inkling snapshot geometry", geometry.data(), geometry.size() * sizeof(geometry[0]));
+            config.i64("prompt batch", e.max_rows());
+            return config.digest();
+        };
         const auto geometry = layout.geometry();
-        config.bytes("Inkling snapshot geometry", geometry.data(), geometry.size() * sizeof(geometry[0]));
-        config.i64("prompt batch", e.max_rows());
-        id.config = config.digest();
+        id.config = config_for(layout);
         SessionStatus status;
         if (save) {
             const size_t block_bytes = layout.bytes_at(pos, 0);
@@ -216,27 +230,40 @@ bool DiskSessions::run(bool save, const std::string& path, Conversations<Engine>
             if (status.dir_flush_unsupported)
                 std::fputs("strata-poly: session saved; this filesystem does not flush the new name\n", stderr);
         } else {
+            SavedConversation image;
             auto limits = layout.limits();
             limits.progress = progress;
             limits.admit = admit;
-            SavedConversation image;
-            if (!session_file_read(path, id, image, bytes, why, limits, &status)) return say_error(why, status.error);
-            if (!layout.validate(image)) return say_error("session file: invalid Inkling state, token list or KV rows");
+            auto native_limits = codec ? native.limits() : SessionReadLimits{};
+            if (codec) native_limits.admit = admit;
+            const SessionReadAlternative alternate{codec ? config_for(native) : 0, native_limits};
+            // Both choices check their exact model/config identities, geometry, lengths, checksum and storage
+            // limits on the same opened file. There is no relaxed reader for the one-way Q8 import.
+            if (!session_file_read(path, id, image, bytes, why, limits, &status, codec ? &alternate : nullptr))
+                return say_error(why, status.error);
+            const Layout* source = status.used_alternate ? &native : &layout;
+            if (!source->validate(image)) return say_error("session file: invalid Inkling state, token list or KV rows");
 
             pos = (int64_t) image.live.ids.size();
             phase("transfer", bytes);
+            // Fixed mixed layout: claim the required physical pages before overwriting any old row. A failed
+            // cover can reduce the expert arena but does not change the live conversation. A same/shorter restore
+            // just reuses existing mappings. Neither choice stages native V on the device.
+            e.cover(pos, true);
             transferring = true;
-            // Loading the deepest block first lets the existing KV grow path cover the whole extent in one go.
-            for (int64_t i = layout.blocks(pos); i-- > 0;) {
-                const int64_t first = i * layout.block_rows(), rows = layout.rows_at(pos, i);
+            const bool import = status.used_alternate;
+            for (int64_t i = source->blocks(pos); i-- > 0;) {
+                const int64_t first = i * source->block_rows(), rows = source->rows_at(pos, i);
                 const auto& k = image.kv[(size_t) i].k;
                 k.visit(0, k.size(), [&](const uint8_t* src, size_t n, size_t) {
                     if (n != k.size()) throw std::logic_error("Inkling snapshot block is not contiguous");
-                    e.load_rows(src, first, rows, first, rows);
+                    if (import) e.import_native_rows(src, first, rows, pos);
+                    else e.load_rows(src, first, rows, first, rows);
                     return true;
                 });
             }
-            e.load_state(image.live.gdn.data(), pos);
+            if (import) e.import_native_state(image.live.gdn.data(), pos);
+            else e.load_state(image.live.gdn.data(), pos);
             kept.adopt(std::move(image.live.ids));
         }
     } catch (const std::bad_alloc&) {

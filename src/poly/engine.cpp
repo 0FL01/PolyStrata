@@ -1309,24 +1309,26 @@ void Engine::copy_seq(int from, int to) {
 // on.  The expert cache gives it up (shrink_cache()), as if the rows had been there when it was filled: the
 // reserve stays for what is recorded later.  A quarter of the reserve stays free whatever else took VRAM since
 // (mind_vram()).
-void Engine::cover(int64_t end) {
+void Engine::cover(int64_t end, bool admission) {
 #if defined(STRATA_GPU_METAL)
     if (opt_.metal_balanced && opt_.kv_grow) {
         metal_cover(end);
         return;
     }
 #endif
-    kv_reach_ = std::max(kv_reach_, end);
-    if (kv_.empty() || end <= kv_rows_) return;
+    if (kv_.empty() || end <= kv_rows_) {
+        kv_reach_ = std::max(kv_reach_, end);
+        return;
+    }
     const int64_t rows = kv_rows_for(end);
     const auto size = [rows](const Kv& k) { return (size_t) ((rows + k.per - 1) / k.per) * k.bytes; };
-    size_t more = 0, held = arena_.mapped + other_rows();
+    size_t more = 0, held = arena_.mapped + other_rows() + kv_fixed_bytes();
     for (const Kv& k : kv_) {
         const size_t want = std::min(up_to(size(k), pool_on_ ? pg_ : grain_), k.reserved);
         if (want > k.mapped) more += want - k.mapped;   // trim_card_kv() leaves a piece it cuts through
         held += k.mapped;
     }
-    if (!fund_experts_) held += kv_codec_saved_bytes();
+    if (!fund_experts_) held += kv_codec_saved_bytes(rows);
     if (expert_kv_cap_ && (held - arena_.mapped + more > expert_kv_cap_ ||
             (freeze_experts_ && held + more > expert_kv_cap_)))
         throw std::runtime_error("the attention rows and non-evictable experts exceed STRATA_INKLING_EXPERT_KV_MIB");
@@ -1340,17 +1342,43 @@ void Engine::cover(int64_t end) {
         ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
         const size_t quarter = (size_t(std::max(reserve_mib_, 0)) << 20) / 4;
         size_t cut = held + more > budget_ ? held + more - budget_ : 0;
-        free_b = placement_free(free_b);
+        free_b = placement_free(free_b, rows);
         if (free_b < more + quarter) cut = std::max(cut, more + quarter - free_b);
         if (cut) shrink_cache(cut);
     }
-    // in pieces of kKvGrow rows, so that trim_card_kv() can give back what a long read mapped in one go
-    for (Kv& k : kv_)
-        vmm_map(k, size(k), (size_t) ((kKvGrow + k.per - 1) / k.per) * k.bytes, "the attention cache");
+    // Disk admission is recoverable: do not leave partial backing or a fictitious high water mark on failure.
+    // Unused new pages have not been handed to the model. In the pool, zeroing them may still be in flight.
+    std::vector<size_t> previous;
+    if (admission) {
+        previous.reserve(kv_.size());
+        for (Kv& k : kv_) {
+            previous.push_back(k.mapped);
+            const size_t want = std::min(up_to(size(k), pool_on_ ? pg_ : grain_), k.reserved);
+            if (want <= k.mapped) continue;
+            const size_t unit = (size_t) ((kKvGrow + k.per - 1) / k.per) * k.bytes;
+            const size_t piece = pool_on_ ? pg_ : std::max(grain_, unit / grain_ * grain_);
+            k.pieces.reserve(k.pieces.size() + (want - k.mapped + piece - 1) / piece);
+        }
+    }
+    try {
+        for (Kv& k : kv_)
+            vmm_map(k, size(k), (size_t) ((kKvGrow + k.per - 1) / k.per) * k.bytes, "the attention cache");
+    } catch (...) {
+        if (admission) {
+            // A failed rollback cannot safely return to the old conversation.
+            try {
+                ck(cudaDeviceSynchronize(), "drain attention cache admission");
+                for (size_t i = 0; i < previous.size(); ++i)
+                    if (kv_[i].mapped != previous[i]) vmm_unmap(kv_[i], previous[i], false);
+            } catch (...) { std::terminate(); }
+        }
+        throw;
+    }
+    kv_reach_ = std::max(kv_reach_, end);
     kv_rows_ = rows;
     if (expert_kv_cap_) {
         const size_t charged = charged_rows();
-        const size_t backing = charged - (fund_experts_ ? 0 : kv_codec_saved_bytes());
+        const size_t backing = charged - (fund_experts_ ? 0 : kv_codec_saved_bytes(rows));
         std::fprintf(stderr, "strata-poly: Inkling cover rows=%lld mapped_kv=%zu charged_kv=%zu arena=%zu slots=%d\n",
                      (long long) rows, backing, charged, arena_.mapped, cached_);
     }
@@ -2327,14 +2355,14 @@ size_t Engine::other_rows() const {
 }
 
 size_t Engine::charged_rows() const {
-    size_t b = other_rows();
+    size_t b = other_rows() + kv_fixed_bytes();
     for (const Kv& k : kv_) b += k.mapped;
-    return b + (fund_experts_ ? 0 : kv_codec_saved_bytes());
+    return b + (fund_experts_ ? 0 : kv_codec_saved_bytes(kv_rows_));
 }
 
-size_t Engine::placement_free(size_t free) const {
+size_t Engine::placement_free(size_t free, int64_t cover_rows) const {
     if (fund_experts_) return free;
-    const size_t saved = kv_headroom_bytes() + kv_codec_saved_bytes();
+    const size_t saved = kv_headroom_bytes() + kv_codec_saved_bytes(cover_rows < 0 ? kv_rows_ : cover_rows);
     return free > saved ? free - saved : 0;
 }
 
@@ -5648,6 +5676,15 @@ void Engine::hand_on(int64_t pos, int n, float* h) {
     ck(cudaStreamSynchronize(cs(st_)), "the next card");
     next_->pass_ = h;
     next_->pass_at_ = pos;
+}
+
+void Engine::eval_decode(int32_t token) {
+    struct DecodeScope {
+        bool& active;
+        const bool before;
+        ~DecodeScope() { active = before; }
+    } scope{serial_decode_, std::exchange(serial_decode_, true)};
+    eval(&token, 1, true);
 }
 
 void Engine::eval(const int32_t* tokens, int n, bool want_logits) {

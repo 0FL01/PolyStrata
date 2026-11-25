@@ -16,6 +16,8 @@ public:
     size_t kv_headroom_bytes() const override { return swa_plan_.saved_bytes; }
     void save_card_rows(int64_t first, int64_t n, uint8_t* dst) override;
     void load_card_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n) override;
+    size_t kv_fixed_bytes() const override { return hot_bytes_; }
+    size_t kv_codec_saved_bytes(int64_t rows) const override;
 
 protected:
     void load_geometry() override;
@@ -32,6 +34,12 @@ protected:
     void save_card_state(uint8_t* dst) override;
     void save_layer(int il, int64_t pos, uint8_t* dst) override;
     void load_extra(const uint8_t* src, int64_t pos) override;
+    int card_session_layout() const override;
+    size_t native_session_state_bytes() const override;
+    size_t native_session_row_bytes() const override;
+    size_t session_transfer_scratch() const override;
+    void import_native_rows(const uint8_t* src, int64_t first, int64_t n, int64_t end) override;
+    void import_native_state(const uint8_t* src, int64_t pos) override;
     void layer_head(Layer& L, int il, int n) override;
     void layer_tail(Layer& L, int il, int n) override;
     void output_rows(int first, int rows, float* h) override;
@@ -65,7 +73,13 @@ private:
     };
     /// Split Q8_0 planes (or half values only). Each plane's stride is in bytes.
     struct Plane { uint8_t* data = nullptr; size_t stride = 0; };
-    struct Cache { std::array<Plane, 4> planes; };
+    struct Cache {
+        std::array<Plane, 4> planes;
+        std::array<Plane, 2> cold_v;
+        uint32_t* index = nullptr;
+        int64_t sealed = 0;
+        int indexed = 0;
+    };
     std::array<Block, kPhysical> blocks_;
     std::array<Cache, kVisits> caches_;
     inkling::SwaPlan swa_plan_{};
@@ -76,6 +90,9 @@ private:
     bool loop_layout_ = false;  // inkling2_loop stores physical-layer geometry and per-layer control queries
     bool flash_ = false;    // STRATA_INKLING_FLASH=1 (load_geometry())
     bool decode_ = false;   // STRATA_INKLING_DECODE=1 (load_geometry())
+    bool k256_ = false, v4_ = false, v4_scalar_ = false;
+    int hot_rows_ = 0;
+    size_t hot_bytes_ = 0;
     bool ds_attend_group_ = false;   // STRATA_INKLING_DSPARK_TARGET_GROUP=1: long verifier attention on gfx1031
     bool dense_q4_0_ = false;  // STRATA_INKLING_Q4_0_DENSE=1: group one-token Q4_0 projections on gfx1031
     bool norm_q8_ = false;  // STRATA_INKLING_NORM_Q8=1 (load_geometry()): a visit's stream norms and Q8_1 together
@@ -106,6 +123,11 @@ private:
     bool q8() const { return opt_.kv_format == KvFmt::kQ8_0; }
     bool messages() const { return visit_ >= kStart + kCore && visit_ < kCoda; }
     size_t kv_bytes() const;
+    size_t swa_state_bytes() const;
+    void load_swa_state(const uint8_t* src, int64_t pos);
+    void seal(Cache& c, int64_t pos);
+    void hot_transfer(const Plane& p, int64_t first, int64_t n, uint8_t* dst, const uint8_t* src);
+    void save_hybrid_rows(int64_t first, int64_t n, uint8_t* dst);
     void conv(float* x, float* state, const float* w, const float* dynamic, int width, int n);
     void store(const float* x, Cache& c, int side, int64_t pos, int ring, int n);
     void copy_swa(const Cache& live, int ring_head, int stage_head, int n, bool gather);

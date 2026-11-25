@@ -1,11 +1,26 @@
 // src/poly/inkling_attend.cu - see the header.
 #include "inkling_attend.hpp"
 #include "inkling_attend_lean.hpp"
+#include "inkling_kv_policy.hpp"
 
 #include "strata/kernels/q8_1_finite.hpp"
 #include "strata/kernels/gfx_arch.hpp"
 
 #include <cuda_fp16.h>
+// rocPRIM includes HIP's BF16 shuffle declarations. Parse it without the forced CUDA-compat aliases.
+#pragma push_macro("__shfl_xor_sync")
+#pragma push_macro("__shfl_down_sync")
+#pragma push_macro("__shfl_up_sync")
+#pragma push_macro("__shfl_sync")
+#undef __shfl_xor_sync
+#undef __shfl_down_sync
+#undef __shfl_up_sync
+#undef __shfl_sync
+#include <rocprim/block/block_radix_sort.hpp>
+#pragma pop_macro("__shfl_sync")
+#pragma pop_macro("__shfl_up_sync")
+#pragma pop_macro("__shfl_down_sync")
+#pragma pop_macro("__shfl_xor_sync")
 
 #include <algorithm>
 #include <cfloat>
@@ -609,16 +624,30 @@ template <bool Q8> __global__ void decode_kernel(const float* q, const float* re
 // (decode_combine_kernel reads it), other sums. For a long verifier window the four-wave launch schedules every
 // row's work for the same chunk next to one another. It writes the same partials in the same layout.
 constexpr int kAttWaves = kKv, kAttThreads = 32 * kAttWaves, kAttUnroll = 2;
-template <int Waves = kAttWaves>
+enum class Values { native, mixed, cold, hot };
+template <int Waves = kAttWaves, bool Paged = false, Values Backing = Values::native>
 __global__ void __launch_bounds__(32 * Waves, 2)
 decode_q8_kernel(const float* q, const float* rel, const float* table, KvView k, KvView v, int64_t pos, int window,
-                 int ring, int chunk, float* part) {
+                 int ring, int chunk, float* part, V4View v4 = {}, int c0 = 0, int total = 0,
+                 const int* picked = nullptr, int old = 0) {
     constexpr bool grouped = Waves != kAttWaves;
-    const int c = grouped ? blockIdx.z : blockIdx.x, row = blockIdx.y;
+    constexpr bool split = !Paged && Backing != Values::native;
+    const int c = (split ? c0 : 0) + (grouped ? blockIdx.z : blockIdx.x), row = blockIdx.y;
     const int g = (grouped ? Waves * blockIdx.x : 0) + threadIdx.x / 32, lane = threadIdx.x & 31;
     const int sub = lane & 7, quad = lane >> 3;   // the 16 dimensions of the lane, and which of four keys
     const int64_t end = pos + row + 1, start = oldest(end, window);
-    const int count = (int) (end - start), first = c * chunk, last = min(first + chunk, count);
+    const int count = (int) (end - start);
+    int first = c * chunk;
+    if constexpr (Paged) {
+        // Disjoint ranges in chronological order: anchor, picked old pages, then every recent row.
+        first = k256_page(c, old, picked + g * kKvTop) * kKvPage;
+    }
+    const int last = min(first + chunk, count);
+    const auto packed = [=](int64_t key) {
+        if constexpr (Backing == Values::cold) return true;
+        else if constexpr (Backing == Values::mixed) return (Paged ? first : key) < v4.sealed;
+        else return false;
+    };
     const size_t qh0 = (size_t) row * kHeads + g * kGroup;
     float qr[kGroup][16], rr[kGroup][2];
 #pragma unroll
@@ -658,9 +687,19 @@ decode_q8_kernel(const float* q, const float* rel, const float* table, KvView k,
                 const int64_t key = start + i;
                 const size_t at = ((size_t) (ring ? key % ring : key) * kKv + g) * kHead + 16 * sub;
                 kw[u] = *reinterpret_cast<const int4*>(kd + at);
-                vw[u] = *reinterpret_cast<const int4*>(vd + at);
                 ks[u] = __half2float(ksc[at / 32]);
-                vs[u] = __half2float(vsc[at / 32]);
+                if constexpr (Backing == Values::native) {
+                    vw[u] = *reinterpret_cast<const int4*>(vd + at);
+                    vs[u] = __half2float(vsc[at / 32]);
+                } else if (packed(key)) {
+                    const int2 bytes = *reinterpret_cast<const int2*>(v4.cold.data + at / 2);
+                    vw[u] = make_int4(bytes.x, bytes.y, 0, 0);
+                    vs[u] = __half2float(reinterpret_cast<const __half*>(v4.cold.scales)[at / 32]);
+                } else {
+                    const size_t vat = ((size_t) ((int) key % v4.hot_ring) * kKv + g) * kHead + 16 * sub;
+                    vw[u] = *reinterpret_cast<const int4*>(vd + vat);
+                    vs[u] = __half2float(vsc[vat / 32]);
+                }
             }
         }
 #pragma unroll
@@ -694,7 +733,12 @@ decode_q8_kernel(const float* q, const float* rel, const float* table, KvView k,
 #pragma unroll
             for (int x = 0; x < 4; ++x)
 #pragma unroll
-                for (int y = 0; y < 4; ++y) val[4 * x + y] = (float) (int8_t) (vwords[x] >> (8 * y)) * vs[u];
+                for (int y = 0; y < 4; ++y) {
+                    if (packed(key)) {
+                        const int nibble = (vwords[x / 2] >> (16 * (x % 2) + 4 * y)) & 15;
+                        val[4 * x + y] = (float) ((nibble ^ 8) - 8) * vs[u];
+                    } else val[4 * x + y] = (float) (int8_t) (vwords[x] >> (8 * y)) * vs[u];
+                }
 #pragma unroll
             for (int r = 0; r < kGroup; ++r) {
                 const float next = fmaxf(m[r], sc[r]);
@@ -729,7 +773,7 @@ decode_q8_kernel(const float* q, const float* rel, const float* table, KvView k,
         l[r] = sum;
     }
     if (quad != 0) return;
-    const int chunks = grouped ? gridDim.z : gridDim.x;
+    const int chunks = split ? total : (grouped ? gridDim.z : gridDim.x);
     float* dst = part + (((size_t) row * kKv + g) * chunks + c) * kChunkFloats;
 #pragma unroll
     for (int r = 0; r < kGroup; ++r) {
@@ -739,6 +783,134 @@ decode_q8_kernel(const float* q, const float* rel, const float* table, KvView k,
             dst[r * (kHead + 2)] = m[r];
             dst[r * (kHead + 2) + 1] = l[r];
         }
+    }
+}
+
+// Build two centroids per page and group from native Q8 keys. The rounded means affect only ranking.
+__global__ void k256_build_kernel(KvView k, uint32_t* index, int first) {
+    const int p = first + blockIdx.y, g = blockIdx.x, d = threadIdx.x % kHead, half = threadIdx.x / kHead;
+    const auto* codes = reinterpret_cast<const int8_t*>(k.data);
+    const auto* scales = reinterpret_cast<const __half*>(k.scales);
+    const size_t base = (size_t) (p * kKvPage + half * (kKvPage / 2)) * kKvColumns + g * kHead + d;
+    float mean = 0.f;
+#pragma unroll 4
+    for (int r = 0; r < kKvPage / 2; ++r) {
+        const size_t at = base + r * kKvColumns;
+        mean += (float) codes[at] * __half2float(scales[at / 32]);
+    }
+    mean *= 2.f / kKvPage;
+    __shared__ float other[kHead];
+    if (half) other[d] = mean;
+    __syncthreads();
+    if (!half) {
+        const __half2 mm = __floats2half2_rn(mean, other[d]);
+        *reinterpret_cast<__half2*>(index + (size_t) p * kKvColumns + g * kHead + d) = mm;
+    }
+}
+
+// One wave scores a page against the group's three heads. Old pages are beyond the relative-bias support.
+__global__ void k256_score_kernel(const float* q, const uint32_t* index, float* scores, int candidates) {
+    const int g = blockIdx.y, p = blockIdx.x * 4 + threadIdx.x / 32, lane = threadIdx.x % 32;
+    if (p >= candidates) return;
+    const auto* mm = reinterpret_cast<const __half2*>(index + (size_t) (p + 1) * kKvColumns + g * kHead);
+    float score0[kGroup] = {}, score1[kGroup] = {};
+#pragma unroll
+    for (int d = 0; d < kHead; d += 32) {
+        const float2 means = __half22float2(mm[d + lane]);
+#pragma unroll
+        for (int h = 0; h < kGroup; ++h) {
+            const float x = q[(g * kGroup + h) * kHead + d + lane];
+            score0[h] += x * means.x;
+            score1[h] += x * means.y;
+        }
+    }
+#pragma unroll
+    for (int h = 0; h < kGroup; ++h) {
+        const float best = fmaxf(wave_reduce<false>(score0[h]), wave_reduce<false>(score1[h]));
+        if (lane == 0) scores[(g * kGroup + h) * candidates + p] = isfinite(best) ? best : 0.f;
+    }
+}
+
+template <int Items>
+__global__ void k256_top_kernel(const float* scores, int* pages, int candidates) {
+    constexpr int Threads = 256, Words = Threads * Items / 32;
+    using Sort = rocprim::block_radix_sort<float, Threads, Items, int>;
+    __shared__ typename Sort::storage_type tmp;
+    __shared__ unsigned seen[Words];
+    __shared__ float2 waves[kGroup][Threads / 32];
+    const int t = threadIdx.x, g = blockIdx.x, lane = t % 32, wave = t / 32;
+    float keys[Items];
+    int ids[Items];
+    float data[kGroup][Items], mu[kGroup], inv[kGroup];
+#pragma unroll
+    for (int h = 0; h < kGroup; ++h) {
+        float x = 0.f, y = 0.f;
+#pragma unroll
+        for (int i = 0; i < Items; ++i) {
+            const int p = t * Items + i;
+            const float v = p < candidates ? scores[(g * kGroup + h) * candidates + p] : 0.f;
+            data[h][i] = v;
+            x += v;
+            y += v * v;
+        }
+        x = wave_reduce<false>(x);
+        y = wave_reduce<false>(y);
+        if (lane == 0) waves[h][wave] = {x, y};
+    }
+    if (t < Words) seen[t] = 0;
+    __syncthreads();
+    // Normalize within each head before taking the group maximum.
+#pragma unroll
+    for (int h = 0; h < kGroup; ++h) {
+        float x = 0.f, y = 0.f;
+#pragma unroll
+        for (int w = 0; w < Threads / 32; ++w) {
+            x += waves[h][w].x;
+            y += waves[h][w].y;
+        }
+        mu[h] = x / candidates;
+        inv[h] = rsqrtf(fmaxf(1e-6f, y / candidates - mu[h] * mu[h]));
+    }
+#pragma unroll
+    for (int i = 0; i < Items; ++i) {
+        const int p = t * Items + i;
+        float best = -INFINITY;
+#pragma unroll
+        for (int h = 0; h < kGroup; ++h) best = fmaxf(best, (data[h][i] - mu[h]) * inv[h]);
+        keys[i] = p < candidates ? (isfinite(best) ? best : -FLT_MAX) : -INFINITY;
+        ids[i] = p;
+    }
+    Sort{}.sort_desc(keys, ids, tmp);
+#pragma unroll
+    for (int i = 0; i < Items; ++i)
+        if (t * Items + i < kKvTop) atomicOr(&seen[ids[i] / 32], 1u << (ids[i] % 32));
+    __syncthreads();
+    if (t < Words) {
+        int before = 0;
+        for (int w = 0; w < t; ++w) before += __popc(seen[w]);
+        for (unsigned bits = seen[t]; bits; bits &= bits - 1)
+            pages[g * kKvTop + before++] = 1 + t * 32 + __ffs(bits) - 1;
+    }
+}
+
+__global__ void seal_v4_kernel(KvView hot, int ring, uint8_t* packed, __half* scales, int first, int stop) {
+    // Each wave handles one original block: a native byte and its scale per V dimension.
+    const int64_t block = (int64_t) blockIdx.x * 4 + threadIdx.x / 32;
+    const int row = first + (int) (block / kKvScales), lane = threadIdx.x % 32;
+    if (row >= stop) return;
+    const int64_t at = (int64_t) (row % ring) * kKvScales + block % kKvScales;
+    const int x = reinterpret_cast<const int8_t*>(hot.data)[32 * at + lane];
+    int amax = x < 0 ? -x : x;
+    for (int i = 16; i > 0; i /= 2) amax = max(amax, __shfl_xor(amax, i, 32));
+    const unsigned code = v4_nibble(x, amax);
+    const unsigned other = __shfl_xor(code, 1, 32);
+    const int64_t to = (int64_t) first * kKvScales + block;
+    if (lane % 2 == 0) packed[16 * to + lane / 2] = (uint8_t) (code | other << 4);
+    if (lane == 0) {
+        float refitted = __half2float(reinterpret_cast<const __half*>(hot.scales)[at]) * (amax / 7.f);
+        // The host rounds the product to FP32 before FP16. Do not combine these into v_fma_mixlo_f16.
+        asm volatile("" : "+v"(refitted));
+        scales[to] = __float2half_rn(refitted);
     }
 }
 
@@ -818,6 +990,104 @@ void attend_plain(const Attend& a, float* scores, float* partial, int tiles, cud
 
 size_t decode_floats() { return (size_t) kDecodeBlocks * kChunkFloats; }
 
+namespace {
+int q8_chunk(int span, int most) {
+    // STRATA_INKLING_DECODE_CHUNKS=N: up to N chunks instead of 128. See the native Q8 reader's tuning.
+    static const int preferred = [] {
+        const char* v = std::getenv("STRATA_INKLING_DECODE_CHUNKS");
+        char* end = nullptr;
+        const long n = v ? std::strtol(v, &end, 10) : 0;
+        if (!v || end == v || *end != '\0' || n < 1 || n > 512) return 128;
+        std::fprintf(stderr, "strata-poly: STRATA_INKLING_DECODE_CHUNKS=%ld: decode attention in up to %ld chunks\n",
+                     n, n);
+        return (int) n;
+    }();
+    constexpr int step = 4 * kAttUnroll;
+    return std::max(32, div_up(div_up(span, std::min(most, preferred)), step) * step);
+}
+
+void check_mixed(const Attend& a, V4View v4) {
+    if (a.window || a.ring || !a.k.scales || !a.v.scales || !v4.cold.data || !v4.cold.scales ||
+        v4.hot_ring <= 0 || v4.sealed < 0 || v4.sealed > a.pos || v4.sealed % kKvPage ||
+        a.pos + a.n - v4.sealed > v4.hot_ring)
+        throw std::logic_error("Inkling mixed attention: invalid global KV view");
+}
+}  // namespace
+
+void seal_v4(KvView hot, int ring, uint8_t* packed, uint16_t* scales, int64_t first, int64_t stop, cudaStream_t st) {
+    if (first == stop) return;
+    if (!hot.data || !hot.scales || !packed || !scales || first < 0 || stop < first || stop - first > ring ||
+        stop > kKvPage * kKvMaxPages)
+        throw std::logic_error("Inkling V4: invalid seal range");
+    seal_v4_kernel<<<div_up((int) (stop - first) * kKvScales, 4), 128, 0, st>>>(
+        hot, ring, packed, reinterpret_cast<__half*>(scales), (int) first, (int) stop);
+    check("Inkling V4 seal");
+}
+
+void k256_build(KvView k, uint32_t* index, int first, int stop, cudaStream_t st) {
+    if (first == stop) return;
+    if (!k.data || !k.scales || !index || first < 0 || stop < first || stop > kKvMaxPages)
+        throw std::logic_error("Inkling K256: invalid index range");
+    k256_build_kernel<<<dim3(kKv, stop - first), 2 * kHead, 0, st>>>(k, index, first);
+    check("Inkling K256 index");
+}
+
+constexpr int kK256ScoreFloats = kHeads * kKvMaxPages;
+size_t k256_scratch_floats() { return kK256ScoreFloats + kKv * kKvTop; }
+
+bool attend_k256(const Attend& a, V4View v4, const uint32_t* index, float* scratch, cudaStream_t st, void* q8) {
+    if (a.n != 1 || a.ring || a.window || !a.k.scales || !a.v.scales || !index || !scratch ||
+        a.pos < 0 || a.pos >= kKvPage * kKvMaxPages)
+        throw std::logic_error("Inkling K256: expected a single absolute Q8 query and a built index");
+    const int span = (int) a.pos + 1;
+    if (!k256_worthwhile(span)) return false;
+    if (v4.hot_ring) check_mixed(a, v4);
+    const int old = k256_old_pages(span), candidates = old - 1;
+    const int chunks = 1 + kKvTop + div_up(span, kKvPage) - old;
+    if (chunks > kDecodeBlocks / kKv) throw std::logic_error("Inkling K256: not enough partial scratch");
+    auto* scores = scratch + decode_floats();
+    auto* pages = reinterpret_cast<int*>(scores + kK256ScoreFloats);
+    k256_score_kernel<<<dim3(div_up(candidates, 4), kKv), 128, 0, st>>>(a.q, index, scores, candidates);
+    if (candidates <= 512) k256_top_kernel<2><<<kKv, 256, 0, st>>>(scores, pages, candidates);
+    else if (candidates <= 1024) k256_top_kernel<4><<<kKv, 256, 0, st>>>(scores, pages, candidates);
+    else k256_top_kernel<8><<<kKv, 256, 0, st>>>(scores, pages, candidates);
+    const auto launch = [&]<Values backing>() {
+        decode_q8_kernel<kAttWaves, true, backing><<<chunks, kAttThreads, 0, st>>>(
+            a.q, a.rel, a.table, a.k, a.v, a.pos, 0, 0, kKvPage, scratch, v4, 0, 0, pages, old);
+    };
+    if (v4.hot_ring) launch.template operator()<Values::mixed>();
+    else launch.template operator()<Values::native>();
+    decode_combine_kernel<<<kHeads, kHead, 0, st>>>(scratch, chunks, a.sink, a.gate, a.out, static_cast<Q81*>(q8));
+    check("Inkling K256 attention");
+    return true;
+}
+
+void attend_v4(const Attend& a, V4View v4, float* scratch, cudaStream_t st, void* q8) {
+    if (a.n <= 0) return;
+    check_mixed(a, v4);
+    // Bounded fallback for prompt batches and tool returns. The latest query is not used to select old pages
+    // for other queries, and no padded or future rows become visible to an earlier query.
+    constexpr int max_rows = 8;
+    for (int r = 0; r < a.n; r += max_rows) {
+        const int n = std::min(max_rows, a.n - r), span = (int) a.pos + r + n;
+        const int chunk = q8_chunk(span, kDecodeBlocks / (kKv * n));
+        const int total = div_up(span, chunk), cold = (int) v4.sealed / chunk, hot = div_up((int) v4.sealed, chunk);
+        const size_t qr = (size_t) r * kQuery, hr = (size_t) r * kHeads;
+        const auto launch = [&]<Values backing>(int first, int end) {
+            if (first == end) return;
+            decode_q8_kernel<kAttWaves, false, backing><<<dim3(end - first, n), kAttThreads, 0, st>>>(
+                a.q + qr, a.rel + hr * kRelative, a.table, a.k, a.v, a.pos + r, 0, 0, chunk, scratch, v4, first, total);
+        };
+        launch.template operator()<Values::cold>(0, cold);
+        launch.template operator()<Values::mixed>(cold, hot);
+        launch.template operator()<Values::hot>(hot, total);
+        auto* out_q = q8 ? static_cast<Q81*>(q8) + qr / 32 : nullptr;
+        decode_combine_kernel<<<dim3(kHeads, n), kHead, 0, st>>>(scratch, total, a.sink + hr, a.gate + qr,
+                                                                  a.out + qr, out_q);
+    }
+    check("Inkling dense mixed attention");
+}
+
 void attend_decode(const Attend& a, float* scratch, cudaStream_t st, void* q8, bool group_rows) {
     if (a.n <= 0) return;
     if (kKv * a.n > kDecodeBlocks) throw std::runtime_error("Inkling decode attention: too many rows");
@@ -831,17 +1101,7 @@ void attend_decode(const Attend& a, float* scratch, cudaStream_t st, void* q8, b
         // STRATA_INKLING_DECODE_CHUNKS=N: up to N chunks instead of 128. 128 eight-wave blocks are 3.2 rounds of the
         // 40 that fit on RX 6700 XT at once (two a WGP at 173 VGPRs), the last round a fifth full; 160 (or 80) chunks
         // took a 190K span 1.41 -> 1.24 ms (read-flushed caches), 65K 0.51 -> 0.45 ms. Other sums than 128's.
-        static const int kAttChunks = [] {
-            const char* v = std::getenv("STRATA_INKLING_DECODE_CHUNKS");
-            char* end = nullptr;
-            const long n = v ? std::strtol(v, &end, 10) : 0;
-            if (!v || end == v || *end != '\0' || n < 1 || n > 512) return 128;   // the whole value, 1..512
-            std::fprintf(stderr, "strata-poly: STRATA_INKLING_DECODE_CHUNKS=%ld: decode attention in up to %ld chunks\n",
-                         n, n);
-            return (int) n;
-        }();
-        constexpr int kAttMin = 32, kStep = 4 * kAttUnroll;
-        const int chunk = std::max(kAttMin, div_up(div_up(span, std::min(most, kAttChunks)), kStep) * kStep);
+        const int chunk = q8_chunk(span, most);
         chunks = div_up(span, chunk);
         if (group_rows && !a.window && span >= 32768 && a.n >= 2 && a.n <= 4) {
             constexpr int waves = 4;

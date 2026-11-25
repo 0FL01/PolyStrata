@@ -715,7 +715,7 @@ struct Session {
                     use = policy.choose(1 + n_d, k, match);
                 }
                 if (use.t == 1) {
-                    engine.eval(&t, 1, true);
+                    engine.eval_decode(t);
                     kept.read(&t, 1);
                     t = pick(engine.logits());
                     policy.observe(false, 1, 0, 0, count(1, 1));
@@ -1248,7 +1248,7 @@ int check_batch(Engine& engine, const std::vector<int32_t>& ids, int k, long lon
         int32_t t = read(p);
         for (long long n = 0; n < max_new; ++n) {
             want[(size_t) j].push_back(t);
-            engine.eval(&t, 1, true);
+            engine.eval_decode(t);
             t = (int32_t) strata::poly::most_likely(engine.logits(), engine.n_vocab());
         }
     }
