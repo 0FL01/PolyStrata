@@ -68,6 +68,31 @@ class CleanupTest(unittest.TestCase):
                 self.guard.check()
         self.assertTrue(self.guard.unsafe.is_set())
 
+    def test_only_historical_decoder_timeout_and_its_recovery_notice_are_allowed(self):
+        dev = 'amdgpu 0000:2d:00.0: '
+        timeout = dev + 'ring vcn_dec_0 timeout, signaled seq=688152, emitted seq=688154'
+        recovered = dev + 'Ring vcn_dec_0 reset succeeded'
+        notice = dev + '[drm] device wedged, but no recovery needed'
+        boot = [timeout, dev + 'Starting vcn_dec_0 ring reset', recovered, notice]
+        def journal(messages):
+            return Mock(stdout='\n'.join(json.dumps({'MESSAGE': m}) for m in messages))
+        with patch('run_guarded.subprocess.run', return_value=journal(boot)):
+            with self.assertRaisesRegex(RuntimeError, 'timeout'):
+                self.guard.boot_clean()
+            self.guard.warn_amdgpu_faults = True
+            self.guard.boot_clean()
+            self.assertEqual(len(self.guard.warnings), 2)
+        for lines in ([notice], [recovered.replace('2d:', '2e:'), notice], [dev + 'ring gfx_0.0.0 timeout'],
+                      [timeout, dev + 'Ring vcn_dec_0 reset failed'], [timeout, dev + 'GPU reset begin!']):
+            with self.subTest(lines=lines), patch('run_guarded.subprocess.run', return_value=journal(lines)):
+                with self.assertRaises(RuntimeError):
+                    self.guard.boot_clean()
+        with patch('run_guarded.subprocess.run', return_value=journal([timeout])), patch.object(
+            Path, 'read_text', autospec=True,
+            side_effect=lambda p: str(4 << 30) if p.name == 'mem_info_vram_total' else '0',
+        ), self.assertRaisesRegex(RuntimeError, 'fresh kernel fault'):
+            self.guard.check()
+
 
 if __name__ == "__main__":
     unittest.main()

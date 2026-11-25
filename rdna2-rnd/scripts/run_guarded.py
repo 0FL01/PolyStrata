@@ -36,6 +36,11 @@ AMDGPU_MEMORY_FAULT = re.compile(r"\b(?:(?:page|gpu|permission|protection|more)[
                                  r"vm[ _-]?faults?|mapping[ _]errors?)\b", re.ASCII)
 HARD_FAILURE = re.compile(r"\b(?:resets?|timeouts?|timed?[- ]outs?|wedge[ds]?|hangs?|hanging|hung|"
                           r"recovery failed|out of memory|oom[ -]kill|killed process)\b")
+# A video decoder timeout in the boot history is not a compute-ring timeout. The
+# kernel may report a successful VCN ring reset followed immediately by this DRM
+# notice. Never exempt the otherwise ambiguous notice by its text alone.
+AMDGPU_DEVICE = re.compile(r"amdgpu ([0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]): (.*)")
+VCN_TIMEOUT = re.compile(r"ring vcn_dec_0 timeout(?:, signaled seq=\d+, emitted seq=\d+)?")
 
 
 def is_fault(msg, amdgpu_line):
@@ -64,17 +69,20 @@ class Guard:
         self.proc = None
         self.watcher = None
 
+    def record_warning(self, entry, msg, phase, reason):
+        stamp = entry.get("__REALTIME_TIMESTAMP")
+        key = (phase, entry.get("__CURSOR") or (stamp, msg))
+        if not any(record["phase"] == phase for record in self.warnings.values()):
+            print(f"warning: {phase} {reason}; continuing (see {self.directory / 'warnings.json'})",
+                  file=sys.stderr, flush=True)
+        self.warnings.setdefault(key, dict(phase=phase, realtime_us=stamp, message=msg))
+
     def warn_if_memory_fault(self, entry, msg, phase):
         words = msg.replace("_", " ")
         if (not self.warn_amdgpu_faults or "amdgpu" not in msg or
                 not AMDGPU_MEMORY_FAULT.search(words) or HARD_FAILURE.search(words)):
             return False
-        stamp = entry.get("__REALTIME_TIMESTAMP")
-        key = (phase, entry.get("__CURSOR") or (stamp, msg))
-        if not any(record["phase"] == phase for record in self.warnings.values()):
-            print(f"warning: {phase} AMDGPU memory fault; continuing (see {self.directory / 'warnings.json'})",
-                  file=sys.stderr, flush=True)
-        self.warnings.setdefault(key, dict(phase=phase, realtime_us=stamp, message=msg))
+        self.record_warning(entry, msg, phase, 'AMDGPU memory fault')
         return True
 
     def terminate(self):
@@ -134,11 +142,24 @@ class Guard:
     def boot_clean(self):
         p = subprocess.run(["journalctl", "-k", "-b", "0", "--no-pager", "-o", "json"], capture_output=True,
                            text=True, timeout=8, check=True)
+        previous = None
         for line in p.stdout.splitlines():
             entry = json.loads(line)
             msg = journal_text(entry.get("MESSAGE", "")).lower()
             if self.accept_before is not None and int(entry["__REALTIME_TIMESTAMP"]) < self.accept_before * 1e6:
                 continue
+            if self.warn_amdgpu_faults:
+                device = AMDGPU_DEVICE.fullmatch(msg)
+                prior, previous = previous, device.groups() if device else None
+                if device:
+                    card, text = previous
+                    if (VCN_TIMEOUT.fullmatch(text) or
+                            (text == '[drm] device wedged, but no recovery needed' and
+                             prior == (card, 'ring vcn_dec_0 reset succeeded'))):
+                        self.record_warning(entry, msg, 'boot', 'past VCN decoder incident')
+                        continue
+                    if 'vcn_dec_0' in text and 'reset' in text and 'fail' in text:
+                        raise RuntimeError('VCN decoder reset failed earlier in this boot: ' + msg[:160])
             if self.warn_if_memory_fault(entry, msg, "boot"):
                 continue
             if "amdgpu" in msg and GPU_TROUBLE.search(msg):
@@ -181,7 +202,7 @@ def main():
                     help="ignore this boot's GPU faults logged before this local time (the user accepted them); "
                          "faults after it, and any fresh fault during the run, still stop the run")
     ap.add_argument("--warn-amdgpu-faults", action="store_true",
-                    help="record AMDGPU memory faults as warnings, without masking GPU resets or failed commands")
+                    help="warn on AMDGPU memory faults and past VCN decoder timeouts, never on a fresh timeout")
     ap.add_argument("command", nargs=argparse.REMAINDER)
     a = ap.parse_args()
     command = a.command[1:] if a.command[:1] == ["--"] else a.command

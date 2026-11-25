@@ -21,8 +21,8 @@ offers the same steps as tools.
 
 - During R&D, you may stop the production server at any time, even while people are using it.
 - Run guarded RDNA2 benchmarks with `rdna2-rnd/scripts/run_guarded.py --warn-amdgpu-faults`.
-  An AMDGPU memory/page fault alone, earlier in the boot or during a run, is a warning, not an error or blocker.
-  Continue using the GPU; resets, hangs, timeouts, OOM, failed commands and the free-VRAM limit still stop the run.
+  Continue using the GPU after a memory/page fault alone or a past `ring vcn_dec_0 timeout` (video decode).
+  A fresh timeout, GPU reset or hang, OOM, failed command or free-VRAM limit still stops the run.
 - On the Btrfs profiling host, keep each A/B series in `~/.cache/opencode-tmp/opencode/polystrata-runs/<run>/`.
   Reuse read-only inputs or copy with `cp --reflink=always`. Keep SAVE outputs independent until validated;
   once writers and benchmarks stop, run `~/.local/bin/polystrata-dedupe <run>` without sudo.
