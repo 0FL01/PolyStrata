@@ -105,8 +105,8 @@ private:
     int suffix_h2_first_rows_ = 0, suffix_h2_last_rows_ = 0;
     int hot_rows_ = 0;
     size_t hot_bytes_ = 0;
-    bool ds_attend_group_ = false;   // STRATA_INKLING_DSPARK_TARGET_GROUP=1: long verifier attention on gfx1031
-    bool dense_q4_0_ = false;  // STRATA_INKLING_Q4_0_DENSE=1: group one-token Q4_0 projections on gfx1031
+    bool ds_attend_group_ = false;   // STRATA_INKLING_DSPARK_TARGET_GROUP=1: long verifier attention on RDNA2
+    bool dense_q4_0_ = false;  // STRATA_INKLING_Q4_0_DENSE=1: group one-token Q4_0 projections on RDNA2
     bool norm_q8_ = false;  // STRATA_INKLING_NORM_Q8=1 (load_geometry()): a visit's stream norms and Q8_1 together
     bool moe_tail_ = false; // STRATA_INKLING_TAIL_MOE=1 (load_geometry()): a fused visit's expert sum in the tail
     bool cpu_sum_ = false;  // moe_add() left the CPU experts' sum for layer_tail()

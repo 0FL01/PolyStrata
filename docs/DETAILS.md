@@ -1317,7 +1317,7 @@ again with the desired mode, then save it to a new file.
 For DSpark, `--draft-max 3` is a budget, not a fixed window: the policy asks for zero to three proposals, and
 asks for fewer near the context or generation limit. `--draft-max 0` keeps the drafter's state and disk layout
 without asking it for proposals; use `--lookup 0` as well to disable lookup guesses.
-On `gfx1031`, `STRATA_INKLING_DSPARK_REUSE_V=1` lets each drafter attention lane load a value once for all its
+On RDNA2, `STRATA_INKLING_DSPARK_REUSE_V=1` lets each drafter attention lane load a value once for all its
 queries. For tiles made entirely of contiguous cache rows, it moves the ring and block-boundary checks outside
 the key and value loops. It keeps the same per-query sum order and is off by default. On an RX 6700 XT with Q8_0
 KV, adding the cache-tile path to value reuse raised fixed-window 64K DSpark decode from 27.38 to 28.42 t/s at
@@ -1326,7 +1326,7 @@ faster proposals can change the policy's window choices, and the multi-row targe
 serial decoding with live expert swaps.
 `STRATA_INKLING_DSPARK_TARGET_GROUP=1` groups the target's work for the same chunk across rows, so nearby workgroups
 read the same K/V. It is off by default and takes only full-context Q8_0 attention at 32K and above, for windows of
-two to four rows with a native DSpark drafter on `gfx1031`. The chunks, FP32 reduction order, KV layout and state
+two to four rows with a native DSpark drafter on RDNA2. The chunks, FP32 reduction order, KV layout and state
 format stay the same. On an RX 6700 XT with fixed windows and expert placement, decode at 64K rose from 29.54 to
 31.18 t/s. This changes neither the drafter nor the target verifier's equivalence to serial decoding.
 Inkling uses `--conversation-cache-min-free-mib` and a fixed 4096 MiB disk reserve, and does not use

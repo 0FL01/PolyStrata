@@ -57,9 +57,9 @@ float* fp4_scales(void* xq, int64_t rows, int64_t cols) {
 
 #if STRATA_POLY_HIP_NVFP4
 bool hip_nvfp4_fits(int64_t w_rows, int64_t w_cols, const ggml_cuda_device_info::cuda_device_info& dev) {
-    // gfx1031 in ggml_cuda_info() is RDNA2's base gfx1030 plus one. Limit this experiment to Inkling's
-    // fused gate/up and down shapes; RDNA2 uses wave32 DP4A tiles, with no stream-k.
-    if (dev.cc != GGML_CUDA_CC_RDNA2 + 1 || dev.warp_size != 32 || w_rows != 2304 ||
+    // ggml_cuda_info() gives gfx103N the cc RDNA2 + N. Limit this experiment to Inkling's fused gate/up and down
+    // shapes; RDNA2 uses wave32 DP4A tiles, with no stream-k.
+    if (!GGML_CUDA_CC_IS_RDNA2(dev.cc) || dev.warp_size != 32 || w_rows != 2304 ||
         (w_cols != 2304 && w_cols != 1152)) return false;
     static const bool asked = [] {
         const char* v = std::getenv("STRATA_HIP_NVFP4_MMQ");
@@ -231,7 +231,7 @@ void Mmq::mul(const void* w, int type, int64_t w_rows, int64_t w_cols, size_t st
             if (tail && tail_try(a, s)) {
                 ck("mmq NVFP4 tail product");
                 static const int logged_tail = std::fputs(
-                    "strata-poly: STRATA_HIP_NVFP4_TAIL=1: NVFP4 down skips the padded K128 half on gfx1031\n", stderr);
+                    "strata-poly: STRATA_HIP_NVFP4_TAIL=1: NVFP4 down skips the padded K128 half on RDNA2\n", stderr);
                 (void) logged_tail;
                 return;
             }
@@ -245,7 +245,7 @@ void Mmq::mul(const void* w, int type, int64_t w_rows, int64_t w_cols, size_t st
             else nvfp4_w4a8(ctx, a, s);   // Q8_1 activation scales live in xq, not in a.y_scale
             ck("mmq product");
             static const int logged = std::fputs(
-                "strata-poly: STRATA_HIP_NVFP4_MMQ=1: using NVFP4 W4A8 MMQ on gfx1031\n", stderr);
+                "strata-poly: STRATA_HIP_NVFP4_MMQ=1: using NVFP4 W4A8 MMQ on RDNA2\n", stderr);
             (void) logged;
             return;
         }

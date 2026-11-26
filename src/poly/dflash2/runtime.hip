@@ -9,6 +9,7 @@
 
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/kernels/bf16_gemv.hpp"
+#include "strata/kernels/gfx_arch.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 #include "ggml.h"
 
@@ -40,8 +41,8 @@ void select_device() {
 void check_arch() {
     hipDeviceProp_t props{};
     hip_check(hipGetDeviceProperties(&props, 0), "hipGetDeviceProperties(0)");
-    if (std::string(props.gcnArchName).substr(0, 7) != "gfx1031" || props.warpSize != 32)
-        throw std::runtime_error(std::string("gfx1031 wave32 required, got ") + props.gcnArchName);
+    if (!strata::kernels::gfx_arch_is_rdna2(props.gcnArchName) || props.warpSize != 32)
+        throw std::runtime_error(std::string("RDNA2 wave32 required, got ") + props.gcnArchName);
 }
 
 void check_model(const GgufFile& draft, const GgufFile& target) {

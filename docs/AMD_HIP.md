@@ -745,11 +745,15 @@ whole requests, decode went from 32.58 to 33.39 tok/s for the design review and 
 for the coding request. It does not speed up the cold prompt read. See the
 [comparison and qualification](goals/2026-11-25-tideglass-agent-mode.md).
 
-### Inkling-2-Mini prompt MMQ on gfx1031
+### Inkling-2-Mini prompt MMQ on RDNA2
 
 `STRATA_HIP_NVFP4_MMQ=1` enables the wave32 DP4A expert prompt path for Inkling-2-Mini's NVFP4 matrices on an RX 6700 XT
 build (`gfx1031`). It keeps 8-bit activations (W4A8), does not change the KV format, and does not switch single-token
 decode to MMQ. It is off by default. Batched GPU products and the CPU fallback can differ in rounding.
+The RDNA2-only switches in this section and below take any gfx1030 to gfx1036 card; they were measured on the
+RX 6700 XT only. On that card, run as gfx1030 and gfx1032 (`HSA_OVERRIDE_GFX_VERSION=10.3.0` / `10.3.2` with a
+gfx1030-gfx1036 build), the production Inkling switches turned on and greedy token IDs matched the native
+gfx1031 run. No other RDNA2 card has been run.
 
 With Inkling-2-Mini-UD-Q4_K_XL, Q8_0 KV growing to 200,000 tokens, and a Ryzen 7 5700X, a cold 2,048-token prompt
 read at 48.5 tok/s with the switch off and 159.3 with it on at `--prompt-batch 256`; batch 512 reached 208.7 tok/s.
@@ -765,7 +769,7 @@ This changes the upload order, not the expert products or attention arithmetic; 
 The switch is off by default. These measurements do not cover a filled 200K context. Evidence and subsequent
 experiments: [the end-to-end prefill goal](goals/2026-11-22-inkling2-prefill-e2e.md).
 
-`STRATA_HIP_NVFP4_TAIL=1` (opt-in, gfx1031) omits the wholly padded final 128 activation values of the NVFP4
+`STRATA_HIP_NVFP4_TAIL=1` (opt-in, RDNA2) omits the wholly padded final 128 activation values of the NVFP4
 down product. It keeps the K256 loader and original dot/sum order, applies only to the tested grouped
 `[2304,1152]` J64 calls, and leaves other calls on the existing launcher. With prefetch enabled and the same
 IQ4_XS/Q8_0/batch2048 settings above, unfrozen A/B/B/A measured 8K 900-903 -> 909-915 tok/s, 16K 839-842 ->
@@ -773,7 +777,7 @@ IQ4_XS/Q8_0/batch2048 settings above, unfrozen A/B/B/A measured 8K 900-903 -> 90
 weight/activation formats and the default-off path are unchanged. The K128 full-kernel experiment was not kept:
 it accelerated down but slowed gate/up; this narrower change avoids that regression.
 
-`STRATA_HIP_NVFP4_SCALE_BITS=1` (opt-in, gfx1031) builds the lean NVFP4 MMQ loader's FP32 scales from the
+`STRATA_HIP_NVFP4_SCALE_BITS=1` (opt-in, RDNA2) builds the lean NVFP4 MMQ loader's FP32 scales from the
 UE4M3 bits. It needs `STRATA_HIP_NVFP4_MMQ=1` and `STRATA_HIP_NVFP4_LEAN=1`; tiles of at most eight rows keep
 their previous kernels. With `STRATA_HIP_NVFP4_TAIL=1`, the same scale construction applies to eligible lean
 down-tail calls without changing their tile selection. On the same RX 6700 XT, J64 gate/up (128 experts ×
@@ -787,13 +791,13 @@ inputs in over 1,400 launches during a real 32K prefill. Against `ed88e9ba` (the
 four 32K runs per build averaged 34.91 -> 34.47 s (1.27% less), with all 32 greedy IDs identical in all eight
 runs. Decode stayed within the spread.
 
-`STRATA_HIP_NVFP4_SLOT_SELECT=1` (opt-in, gfx1031) decodes UE4M3 scales with selects in Inkling's
+`STRATA_HIP_NVFP4_SLOT_SELECT=1` (opt-in, RDNA2) decodes UE4M3 scales with selects in Inkling's
 16-lane NVFP4 expert slots for the joined gate/up and down shapes. This is the small-token path enabled by
 `STRATA_INKLING_DECODE=1`, so it can also run on a short prompt tail. It does not change the scales, signed
 dot products or FP32 accumulation order. Single-matrix and grouped-ID paths keep their previous kernels;
 the grouped prefill switch above is independent. See the [decode measurements](goals/2026-11-24-inkling2-decode-implementation.md).
 
-`STRATA_INKLING_Q4_0_SLOTS=1` (opt-in, gfx1031 with `STRATA_INKLING_DECODE=1`) runs four rows per workgroup
+`STRATA_INKLING_Q4_0_SLOTS=1` (opt-in, RDNA2 with `STRATA_INKLING_DECODE=1`) runs four rows per workgroup
 for one-token cached Q4_0 expert products. It keeps the GGUF bytes, Q8_1 inputs, per-lane dot products and
 FP32 sum order. It uses four waves for gate/up and three for down, with the original fourth zero in the down sum.
 Single experts, grouped prefill, device-picked expert IDs and other formats use the old kernels. On an RX 6700 XT
@@ -801,14 +805,14 @@ with Bartowski Q4_0 and Q8_0 KV, four nearest pairs per context, 256 forced deco
 45.70 to 47.66 tok/s at 2K, 44.78 to 46.16 at 4K, and 44.07 to 44.85 at 16K. All 12 pairs were faster with the
 switch on. See the [Q4_0 decode goal](goals/2026-11-24-inkling2-q4-0-decode.md) for controls and parity checks.
 
-`STRATA_INKLING_Q4_0_DENSE=1` (opt-in, gfx1031 with `STRATA_INKLING_DECODE=1`) groups a visit's compatible
+`STRATA_INKLING_Q4_0_DENSE=1` (opt-in, RDNA2 with `STRATA_INKLING_DECODE=1`) groups a visit's compatible
 Q4_0 input projections into one four-row MMVQ launch. Each row keeps its original Q8_1 input, dot product and
 FP32 sum. It does not change the output projection, other formats, or prompt batches. With four-row expert
 slots already on, RX 6700 XT, Bartowski Q4_0 and Q8_0 KV, median decode rose from 48.83 to 50.13 tok/s at
 2K, 47.64 to 48.52 at 4K, and 46.04 to 47.10 at 16K (320 forced tokens per run, eight adjacent pairs in all).
 On a restored 64K prefix, the two 96-token greedy pairs had gains of 3.55% and 1.60%; all token IDs matched.
 
-`STRATA_INKLING_BATCH_KV_RELEASE=1` (opt-in, gfx1031, VRAM pool off) waits for free-memory accounting once
+`STRATA_INKLING_BATCH_KV_RELEASE=1` (opt-in, RDNA2, VRAM pool off) waits for free-memory accounting once
 after a KV trim, instead of once per KV region. The device barrier, release/remap operations, retained
 addresses, KV policy and subsequent expert-cache refill stay on their existing paths. The wait allows at
 most 100 one-millisecond sleeps; scheduler and API time can make it longer than 100 ms. Other releases keep
@@ -824,7 +828,7 @@ on average, within its 0.11% A/A drift. This is a context-shrink improvement, no
 No GPU kernel or format changes: the complete HIP fatbin matches `914336f6`. Checkpoint rewind/full-read
 checks used fixed placement separately; unfrozen placement is not a bitwise numerical control.
 
-`STRATA_HIP_SMALL_GEMM_2X2=1` (opt-in, gfx1031) runs the small FP32 projections with four outputs per thread
+`STRATA_HIP_SMALL_GEMM_2X2=1` (opt-in, RDNA2) runs the small FP32 projections with four outputs per thread
 and the existing K64 prefetch order. It applies only to single-group products with at least 512 rows and
 shapes 2304 -> {24,32,64} or 4608 -> 64. Other calls, including short rows, keep the old selector. Each
 output keeps the same FP32 FMA order; no new buffers or precision changes. All 141 existing GPU kernels
@@ -840,7 +844,7 @@ TTFT, mixed pairs), not a repeatable 8K API speed claim. Kernel tests are bitwis
 fixed-placement 8K plus eight forced steps match the old printed top-10 traces. The 32/77-row kernel
 experiments were slower and are deliberately excluded by the 512-row gate.
 
-`STRATA_INKLING_LANE_PROB=1` (opt-in, gfx1031, requires `STRATA_INKLING_FLASH=1`) gives each lane two
+`STRATA_INKLING_LANE_PROB=1` (opt-in, RDNA2, requires `STRATA_INKLING_FLASH=1`) gives each lane two
 FP32 probabilities and broadcasts them for PV, instead of computing all 16 in every lane. The 16-query,
 16-key geometry, QK reduction order, sequential denominator sum, compensated update and per-key PV FMA
 order stay the same. No extra buffers or lower-precision operands. The false specialization retains the

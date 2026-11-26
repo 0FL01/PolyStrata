@@ -76,8 +76,8 @@ def parse_cli(stdout, stderr, prompt_length, suffix, threads):
             "CLI reported incomplete or speculative work")
     require(int(cpu_threads) == threads and 0 <= int(cached) <= int(total), "unexpected CPU threads or expert capacity")
     dispatch = [line for line in stderr.splitlines()
-                if any(line.startswith(f"strata-poly: {flag}=1:") and line.endswith(" on gfx1031") for flag in Q4_FLAGS)]
-    require(all(any(f"{flag}=1:" in line for line in dispatch) for flag in Q4_FLAGS), "missing gfx1031 Q4_0 enable logs")
+                if any(line.startswith(f"strata-poly: {flag}=1:") and line.endswith(" on RDNA2") for flag in Q4_FLAGS)]
+    require(all(any(f"{flag}=1:" in line for line in dispatch) for flag in Q4_FLAGS), "missing RDNA2 Q4_0 enable logs")
     pp, tg, hit = float(pp), float(tg), float(hit)
     require(math.isfinite(pp) and math.isfinite(tg) and pp > 0 and tg > 0 and 0 <= hit <= 100, "invalid CLI metrics")
     return dict(load_s=float(load), prefill_tokens=int(pp_n), prefill_tok_s=pp, prefill_ms_est=1000 * int(pp_n) / pp,

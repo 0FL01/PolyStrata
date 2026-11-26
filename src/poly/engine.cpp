@@ -20,6 +20,7 @@
 #include "strata/core/conversation_memory.hpp"
 #include "strata/gpu/metal.hpp"
 #endif
+#include "strata/kernels/gfx_arch.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 #include "strata/platform/memory.hpp"
 
@@ -1413,8 +1414,7 @@ size_t Engine::trim_card_kv(int64_t end) {
         if (asked && asked[0] == '1' && asked[1] == '\0') {
             cudaDeviceProp prop = {};
             if (cudaGetDeviceProperties(&prop, device_) == cudaSuccess &&
-                std::strncmp(prop.gcnArchName, "gfx1031", 7) == 0 &&
-                (prop.gcnArchName[7] == '\0' || prop.gcnArchName[7] == ':'))
+                kernels::gfx_arch_is_rdna2(prop.gcnArchName))
                 batch = cudaMemGetInfo(&free_before, &total_b) == cudaSuccess;
         }
     }
@@ -1435,7 +1435,7 @@ size_t Engine::trim_card_kv(int64_t end) {
             (void) cudaMemGetInfo(&free_after, &total_b);
         }
         static const int logged = std::fputs(
-            "strata-poly: STRATA_INKLING_BATCH_KV_RELEASE=1: batch KV release polling on gfx1031; "
+            "strata-poly: STRATA_INKLING_BATCH_KV_RELEASE=1: batch KV release polling on RDNA2; "
             "at most 100 one-millisecond sleeps\n", stderr);
         (void) logged;
     }

@@ -30,7 +30,7 @@ static __global__ void nvfp4_tail_kernel(
         const char* __restrict__ x, const int* __restrict__ y, const int32_t* __restrict__ ids_dst,
         const int32_t* __restrict__ bounds, float* __restrict__ dst, const int nblocks_x,
         const int stride_row_x, const int ncols_y, const int stride_col_dst, const int stride_channel_x) {
-#if defined(__gfx1031__)
+#if defined(RDNA2)
     static_assert(ggml_cuda_get_physical_warp_size() == 32);
     static_assert(ggml_cuda_mmq_get_I(kType, kJ, kFallback) == kI);
     static_assert(ggml_cuda_mmq_get_nthreads(kType, kJ, kFallback) == kThreads);
@@ -124,7 +124,7 @@ bool nvfp4_tail_try(const mmq_args& a, cudaStream_t stream) {
                                (kRows - 1) * a.stride_row_x + ((kCols + 255) / 256) * 256 / QK_NVFP4;
     if (last_block > INT_MAX) return false;
     const auto& dev = ggml_cuda_info().devices[ggml_cuda_get_device()];
-    if (dev.cc != GGML_CUDA_CC_RDNA2 + 1 || dev.warp_size != 32 ||
+    if (!GGML_CUDA_CC_IS_RDNA2(dev.cc) || dev.warp_size != 32 ||
         mmq_get_nbytes_shared(kConfig, dev.cc) != kShared || kShared > dev.smpbo ||
         !selects_j64(a, dev.cc, dev.smpbo)) return false;
 

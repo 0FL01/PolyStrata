@@ -778,7 +778,7 @@ protected:
     bool serial_decode_ = false;   ///< eval_decode(), never a prompt predictor or a verifier window
     int expert_epoch_ = 0;         ///< Inkling decode: 0 = stock follower, -1 = adaptive, otherwise rows per epoch
     int64_t epoch_end_ = -1;       ///< first row allowed to trade again; independent of speculative accept length
-    bool expert_layer_join_ = false;   ///< gfx1031 Inkling fixed epochs in full-RAM host mode
+    bool expert_layer_join_ = false;   ///< RDNA2 Inkling fixed epochs in full-RAM host mode
     uint32_t expert_join_layers_ = 0;  ///< layers with deferred arrivals, owned by the engine thread
     bool exact_window_ = false;    ///< W1-ordered arithmetic and tentative route accounting
     bool prefetch_early_ = false;   ///< Inkling opt-in: enqueue prompt weights before the router's readback
@@ -809,7 +809,7 @@ protected:
     bool head_warps_ = false;  ///< lin(): the output head of one row by native_q6_k_mmvq_warps() (Inkling's decode switch)
     bool situ_q8_ = false;     ///< the cached experts' SiTU and Q8_1 in one launch (Inkling's decode switch)
 #if defined(STRATA_USE_HIP)
-    bool inkling_q4_0_slots_ = false;  ///< opt-in four-row expert MMVQ on gfx1031
+    bool inkling_q4_0_slots_ = false;  ///< opt-in four-row expert MMVQ on RDNA2
 #endif
     bool cols_kernels_ = false;   ///< lin(): Q6_K and Q8_0 for 2 to 8 rows a warp a row, each block read once (a guesser)
     /// per layer: what one use of its experts weighs for the expert cache (the fill and follow()), empty for 1.  A model

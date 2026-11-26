@@ -24,7 +24,7 @@ struct Proposal {
 
 // Native Inkling 2 Mini DFlash2 runtime, ported from rdna2-rnd/dflash2/native
 // at fa000e5c with its opt/attention_exact.cuh overlay. One handle per sequence,
-// on gfx1031 device 0; model paths are local single-file GGUFs. Calls throw on
+// on RDNA2 device 0; model paths are local single-file GGUFs. Calls throw on
 // invalid inputs or device errors. A device failure poisons the handle: destroy it.
 // Not thread-safe. Construction and use select device 0 on the calling thread.
 //

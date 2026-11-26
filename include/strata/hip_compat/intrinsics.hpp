@@ -23,7 +23,8 @@ __device__ __forceinline__ int dp4a(int a, int b, int c) {
     // both packed operands signed to preserve CUDA __dp4a semantics; keep the
     // portable path for other HIP compilers/targets.
     return __builtin_amdgcn_sudot4(true, a, true, b, c, false);
-#elif (defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1032__)) && __has_builtin(__builtin_amdgcn_sdot4)
+#elif (defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1032__) || defined(__gfx1033__) || \
+       defined(__gfx1034__) || defined(__gfx1035__) || defined(__gfx1036__)) && __has_builtin(__builtin_amdgcn_sdot4)
     // RDNA2 has no sudot4 (that is gfx11+), but it has the plain signed v_dot4_i32_i8 (dot1-insts): the same
     // signed x signed byte products accumulated modulo 2^32, no clamp.
     return __builtin_amdgcn_sdot4(a, b, c, false);

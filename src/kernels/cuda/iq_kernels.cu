@@ -3557,7 +3557,7 @@ void slots_of(int t, const S& slots, int count, int n_in, int n_out, void* strea
                 int dev = 0;
                 cudaDeviceProp p;
                 return cudaGetDevice(&dev) == cudaSuccess && cudaGetDeviceProperties(&p, dev) == cudaSuccess &&
-                       strata::kernels::gfx_arch_is(p.gcnArchName, "gfx1031");
+                       strata::kernels::gfx_arch_is_rdna2(p.gcnArchName);
             }();
             // Inkling's joined gate/up and down only. Grouped ID, single-matrix and other shapes keep their kernels.
             if (select && n_out == 2304 && (n_in == 2304 || n_in == 1152))

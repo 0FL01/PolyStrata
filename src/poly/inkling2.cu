@@ -536,9 +536,7 @@ void Inkling2::load_geometry() {
     cudaDeviceProp p{};
     ck(cudaGetDevice(&device), "Inkling device");
     ck(cudaGetDeviceProperties(&p, device), "Inkling device properties");
-    bool rdna2 = false;
-    for (const char* gcn : {"gfx1030", "gfx1031", "gfx1032", "gfx1033", "gfx1034", "gfx1035", "gfx1036"})
-        rdna2 = rdna2 || kernels::gfx_arch_is(p.gcnArchName, gcn);
+    const bool rdna2 = kernels::gfx_arch_is_rdna2(p.gcnArchName);
     if (!rdna2) throw std::runtime_error("Inkling-2-Mini requires a HIP RDNA2 card");
     if (opt_.batch || !opt_.layer_split.empty() || opt_.tail_skip || opt_.skip_weight > 0.f)
         throw std::runtime_error("Inkling-2-Mini requires one sequence and one card, without expert skipping");
@@ -572,15 +570,15 @@ void Inkling2::load_geometry() {
     }
     if (decode_) std::fputs("strata-poly: STRATA_INKLING_DECODE=1: decode kernels for a few tokens at a time\n", stderr);
     const char* q4_slots = std::getenv("STRATA_INKLING_Q4_0_SLOTS");
-    inkling_q4_0_slots_ = decode_ && kernels::gfx_arch_is(p.gcnArchName, "gfx1031") &&
+    inkling_q4_0_slots_ = decode_ && rdna2 &&
                          q4_slots && q4_slots[0] == '1' && q4_slots[1] == '\0';
     if (inkling_q4_0_slots_)
-        std::fputs("strata-poly: STRATA_INKLING_Q4_0_SLOTS=1: four-row expert MMVQ on gfx1031\n", stderr);
+        std::fputs("strata-poly: STRATA_INKLING_Q4_0_SLOTS=1: four-row expert MMVQ on RDNA2\n", stderr);
     const char* q4_dense = std::getenv("STRATA_INKLING_Q4_0_DENSE");
-    dense_q4_0_ = decode_ && kernels::gfx_arch_is(p.gcnArchName, "gfx1031") &&
+    dense_q4_0_ = decode_ && rdna2 &&
                   q4_dense && q4_dense[0] == '1' && q4_dense[1] == '\0';
     if (dense_q4_0_)
-        std::fputs("strata-poly: STRATA_INKLING_Q4_0_DENSE=1: grouped four-row Q4_0 projections on gfx1031\n", stderr);
+        std::fputs("strata-poly: STRATA_INKLING_Q4_0_DENSE=1: grouped four-row Q4_0 projections on RDNA2\n", stderr);
     const char* norm_q8 = std::getenv("STRATA_INKLING_NORM_Q8");
     norm_q8_ = decode_ && norm_q8 && norm_q8[0] == '1' && norm_q8[1] == '\0';
     if (norm_q8_)
@@ -602,7 +600,7 @@ void Inkling2::load_geometry() {
     v4_ = kv_switch("STRATA_INKLING_V4");
     v4_scalar_ = v4_ && kv_switch("STRATA_INKLING_V4_SCALAR");
     suffix_h2_ = v4_ && kv_switch("STRATA_INKLING_SUFFIX_H2") &&
-                 kernels::gfx_arch_is(p.gcnArchName, "gfx1031");
+                 rdna2;
     if (suffix_h2_)
         std::fputs("strata-poly: STRATA_INKLING_SUFFIX_H2=1: approximate Flash16 H2 on wide global V4 calls\n",
                    stderr);
@@ -684,15 +682,15 @@ void Inkling2::load_geometry() {
     }
     if (const char* value = std::getenv("STRATA_EXPERT_LAYER_JOIN"); value && std::strcmp(value, "1") == 0) {
         static_assert(kPhysical <= 32, "the deferred expert mask fits all physical Inkling layers");
-        if (expert_epoch_ <= 0 || !opt_.gpu_experts || !kernels::gfx_arch_is(p.gcnArchName, "gfx1031"))
-            throw std::runtime_error("STRATA_EXPERT_LAYER_JOIN=1 needs gfx1031 Inkling decode with fixed expert epochs");
+        if (expert_epoch_ <= 0 || !opt_.gpu_experts || !rdna2)
+            throw std::runtime_error("STRATA_EXPERT_LAYER_JOIN=1 needs RDNA2 Inkling decode with fixed expert epochs");
         expert_layer_join_ = true;
     }
     clamp_exp_.assign(kPhysical + 1, INFINITY);
     if (uses_dflash2()) {
         if (!decode_ || !q8() || k256_ || v4_ || drafter ||
-            !kernels::gfx_arch_is(p.gcnArchName, "gfx1031") || device != 0)
-            throw std::runtime_error("DFlash2 needs gfx1031 device 0, dense Q8_0 KV and STRATA_INKLING_DECODE=1");
+            !rdna2 || device != 0)
+            throw std::runtime_error("DFlash2 needs RDNA2 device 0, dense Q8_0 KV and STRATA_INKLING_DECODE=1");
         if (window > opt_.prompt_batch)
             throw std::runtime_error("DFlash2 needs --prompt-batch at least --window");
         if (opt_.max_context > dflash2::max_positions)
@@ -702,11 +700,11 @@ void Inkling2::load_geometry() {
     if (uses_lookup_epoch()) {
         const char* compact = std::getenv("STRATA_INKLING_COMPACT_SWA");
         if (expert_epoch_ != 4 || !compact || std::strcmp(compact, "1") || !decode_ || !q8() || k256_ || v4_ ||
-            drafter || !kernels::gfx_arch_is(p.gcnArchName, "gfx1031") || device != 0 ||
+            drafter || !rdna2 || device != 0 ||
             !opt_.gpu_experts || opt_.ram_experts_mib != -1 || opt_.prompt_batch < 4 ||
             (window != 0 && window != 4))
             throw std::runtime_error("--lookup-epoch needs full host experts with GPU caching, dense Q8 compact SWA, "
-                                     "fixed epoch 4 and one gfx1031 Inkling decode worker");
+                                     "fixed epoch 4 and one RDNA2 Inkling decode worker");
         if (expert_layer_join_)
             throw std::runtime_error("--lookup-epoch cannot be combined with STRATA_EXPERT_LAYER_JOIN=1");
         opt_.window = 4;
@@ -714,19 +712,19 @@ void Inkling2::load_geometry() {
     }
     if (drafter) {
         const char* reuse_v = std::getenv("STRATA_INKLING_DSPARK_REUSE_V");
-        ds_reuse_v_ = kernels::gfx_arch_is(p.gcnArchName, "gfx1031") &&
+        ds_reuse_v_ = rdna2 &&
                       reuse_v && reuse_v[0] == '1' && reuse_v[1] == '\0';
         if (ds_reuse_v_)
-            std::fputs("strata-poly: STRATA_INKLING_DSPARK_REUSE_V=1: reuse drafter attention values on gfx1031\n",
+            std::fputs("strata-poly: STRATA_INKLING_DSPARK_REUSE_V=1: reuse drafter attention values on RDNA2\n",
                        stderr);
         // a window's guesses need the short convolutions' state after each of its tokens, which the decode switch's
         // kernels leave (layer_head(), layer_tail())
         if (!decode_) throw std::runtime_error("the DSpark drafter of Inkling-2-Mini needs STRATA_INKLING_DECODE=1");
         const char* group = std::getenv("STRATA_INKLING_DSPARK_TARGET_GROUP");
-        ds_attend_group_ = q8() && kernels::gfx_arch_is(p.gcnArchName, "gfx1031") &&
+        ds_attend_group_ = q8() && rdna2 &&
                            group && group[0] == '1' && group[1] == '\0';
         if (ds_attend_group_)
-            std::fputs("strata-poly: STRATA_INKLING_DSPARK_TARGET_GROUP=1: group long verifier attention rows on gfx1031\n",
+            std::fputs("strata-poly: STRATA_INKLING_DSPARK_TARGET_GROUP=1: group long verifier attention rows on RDNA2\n",
                        stderr);
         // its block of 8 rows goes through the scratch that holds a call's rows
         if (opt_.prompt_batch < kDsBlock)

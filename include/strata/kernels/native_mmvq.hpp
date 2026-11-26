@@ -161,7 +161,7 @@ struct MmvqSlots {
 };
 bool native_mmvq_slots(int ggml_type, const MmvqSlots& slots, int count, int n_in, int n_out, void* stream);
 #if defined(STRATA_USE_HIP)
-// Opt-in gfx1031 Inkling Q4_0, 2..8 experts, 2304 outputs and 2304 or 1152 inputs. Same sums as the regular
+// Opt-in RDNA2 Inkling Q4_0, 2..8 experts, 2304 outputs and 2304 or 1152 inputs. Same sums as the regular
 // slots path. The caller selects the device and format; unsupported shapes return false without launching.
 bool native_inkling_q4_0_slots(const MmvqSlots& slots, int count, int n_in, int n_out, void* stream);
 #endif
@@ -206,7 +206,7 @@ struct MmvqSegments {
 };
 bool native_mmvq_segments(int ggml_type, const MmvqSegments& s, int n_in, void* stream);
 #if defined(STRATA_USE_HIP)
-// Opt-in gfx1031 Inkling Q4_0 projections: 2304 inputs and output rows in groups of four. Same per-row
+// Opt-in RDNA2 Inkling Q4_0 projections: 2304 inputs and output rows in groups of four. Same per-row
 // sums as separate native_mmvq calls. The caller selects the format and device.
 bool native_inkling_q4_0_segments(const MmvqSegments& s, int n_in, void* stream);
 #endif

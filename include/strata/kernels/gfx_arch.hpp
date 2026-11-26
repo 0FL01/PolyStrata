@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <cstring>
+#include <initializer_list>
 
 namespace strata::kernels {
 
@@ -34,5 +35,14 @@ inline bool gfx_arch_is_gfx1151(const char* gcn) { return gfx_arch_is(gcn, "gfx1
 
 /// RDNA4 (Radeon AI PRO R9700 = gfx1201, RX 9070 / 9070 XT = gfx1201, RX 9060 = gfx1200).
 inline bool gfx_arch_is_gfx12(const char* gcn) { return gfx_arch_is(gcn, "gfx1200") || gfx_arch_is(gcn, "gfx1201"); }
+
+/// RDNA2 (gfx1030 RX 6800 / 6900, gfx1031 RX 6700 XT, gfx1032 RX 6600, gfx1033 Van Gogh, gfx1034 RX 6500 / 6400,
+/// gfx1035 / gfx1036 Ryzen 6000 / 7000 iGPUs): one wave32 ISA with 64 KiB LDS, v_dot4_i32_i8 and DPP8. Device code
+/// names the same targets (hip_compat/intrinsics.hpp; ggml's RDNA2 macro).
+inline bool gfx_arch_is_rdna2(const char* gcn) {
+    for (const char* name : {"gfx1030", "gfx1031", "gfx1032", "gfx1033", "gfx1034", "gfx1035", "gfx1036"})
+        if (gfx_arch_is(gcn, name)) return true;
+    return false;
+}
 
 }  // namespace strata::kernels

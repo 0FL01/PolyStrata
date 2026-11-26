@@ -125,6 +125,10 @@ cmake --build build-inkling --target strata-poly -j4
 python tools/strata_tokenizer.py --gguf /path/to/Inkling-2-Mini-Q4_0.gguf --out packs/inkling2
 ```
 
+On another RDNA2 card, set `CMAKE_HIP_ARCHITECTURES` to its target (gfx1030 for the RX 6800 / 6900, gfx1032 for
+the RX 6600, gfx1034 for the RX 6500 / 6400, gfx1035 / gfx1036 for Ryzen iGPUs). The speed options below take any
+of them. Only the RX 6700 XT has been run on real hardware.
+
 Save this as `strata-inkling-2-mini.json` in the repository root, using the same GGUF path as above.
 The `env` block includes the speed options used in the measurements; they are not engine defaults.
 

@@ -1191,7 +1191,7 @@ bool try_attend_compact_suffix_h2(const Attend& a, V4View v4, float* scratch, cu
         if (e == cudaSuccess) e = cudaGetDeviceProperties(&props, device);
         if (e != cudaSuccess)
             throw std::runtime_error(std::string("Inkling compact suffix H2: ") + cudaGetErrorString(e));
-        return kernels::gfx_arch_is(props.gcnArchName, "gfx1031");
+        return kernels::gfx_arch_is_rdna2(props.gcnArchName);
     }();
     if (!supported) return false;
 
@@ -1234,15 +1234,15 @@ void attend_flash(const Attend& a, cudaStream_t st) {
         if (error == cudaSuccess) error = cudaGetDeviceProperties(&prop, device);
         if (error != cudaSuccess)
             throw std::runtime_error(std::string("Inkling lane probabilities: ") + cudaGetErrorString(error));
-        if (!kernels::gfx_arch_is(prop.gcnArchName, "gfx1031")) return false;
-        std::fputs("strata-poly: STRATA_INKLING_LANE_PROB=1: lane-owned FP32 flash probabilities on gfx1031\n", stderr);
+        if (!kernels::gfx_arch_is_rdna2(prop.gcnArchName)) return false;
+        std::fputs("strata-poly: STRATA_INKLING_LANE_PROB=1: lane-owned FP32 flash probabilities on RDNA2\n", stderr);
         return true;
     }();
     static const bool lean = [] {
         const char* value = std::getenv("STRATA_INKLING_FLASH_LEAN");
         if (!value || value[0] != '1' || value[1] != '\0') return false;
         if (!lane_prob) {
-            std::fputs("strata-poly: STRATA_INKLING_FLASH_LEAN=1 needs STRATA_INKLING_LANE_PROB=1 on gfx1031; ignored\n",
+            std::fputs("strata-poly: STRATA_INKLING_FLASH_LEAN=1 needs STRATA_INKLING_LANE_PROB=1 on RDNA2; ignored\n",
                        stderr);
             return false;
         }
@@ -1253,7 +1253,7 @@ void attend_flash(const Attend& a, cudaStream_t st) {
         const char* value = std::getenv("STRATA_INKLING_FLASH_H2");
         if (!value || value[0] != '1' || value[1] != '\0') return false;
         if (!lane_prob) {
-            std::fputs("strata-poly: STRATA_INKLING_FLASH_H2=1 needs STRATA_INKLING_LANE_PROB=1 on gfx1031; ignored\n",
+            std::fputs("strata-poly: STRATA_INKLING_FLASH_H2=1 needs STRATA_INKLING_LANE_PROB=1 on RDNA2; ignored\n",
                        stderr);
             return false;
         }

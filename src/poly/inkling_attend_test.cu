@@ -11,6 +11,7 @@
 // its operands are rounded to 11 bits, so those cases are held to 1e-3 instead.
 #include "inkling_attend.hpp"
 #include "inkling_kv_policy.hpp"
+#include "strata/kernels/gfx_arch.hpp"
 
 #include <cuda_fp16.h>
 #include <cstdlib>
@@ -148,14 +149,14 @@ bool run(const Case& c, float* scores, float* partial, int tiles, bool timed) {
         diff = std::max(diff, (double) std::fabs(hp[i] - hf[i]));
     }
     const double relative = diff / std::max(top, 1e-30);
-    static const bool half = [] {   // as attend_flash() decides it: both switches, on gfx1031
+    static const bool half = [] {   // as attend_flash() decides it: both switches, on RDNA2
         const char* v = std::getenv("STRATA_INKLING_FLASH_H2");
         const char* l = std::getenv("STRATA_INKLING_LANE_PROB");
         cudaDeviceProp prop{};
         int device = 0;
-        const bool gfx1031 = cudaGetDevice(&device) == cudaSuccess && cudaGetDeviceProperties(&prop, device) == cudaSuccess &&
-                             std::string(prop.gcnArchName).rfind("gfx1031", 0) == 0;
-        return v && std::string(v) == "1" && l && std::string(l) == "1" && gfx1031;
+        const bool rdna2 = cudaGetDevice(&device) == cudaSuccess && cudaGetDeviceProperties(&prop, device) == cudaSuccess &&
+                           strata::kernels::gfx_arch_is_rdna2(prop.gcnArchName);
+        return v && std::string(v) == "1" && l && std::string(l) == "1" && rdna2;
     }();
     const double limit = half && !c.dec && a.k.scales ? 1e-3 : 1e-4;
     bool ok = finite && relative <= limit;
@@ -352,7 +353,7 @@ bool run_k256() {
     int dev = 0;
     cudaDeviceProp prop{};
     if (cudaGetDevice(&dev) != cudaSuccess || cudaGetDeviceProperties(&prop, dev) != cudaSuccess) return false;
-    if (std::strncmp(prop.gcnArchName, "gfx1031", 7) != 0) return true;
+    if (!strata::kernels::gfx_arch_is_rdna2(prop.gcnArchName)) return true;
     constexpr int page = 128, top = 256, old = 258, span = old * page + 2048, pos = span - 1;
     constexpr int sealed = (old - 1) * page, ring = 4223, width = 1024, heads = 24, head = 128;
     static_assert(sealed / ring < pos / ring);

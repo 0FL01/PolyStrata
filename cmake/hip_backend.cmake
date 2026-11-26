@@ -12,7 +12,7 @@ endif()
 # same wave32 / 64 KiB LDS / sudot4 family as gfx1100, on a unified-memory APU; experimental.
 set(_strata_hip_validated gfx1100 gfx1201)
 set(_strata_hip_community gfx1101 gfx1200)
-set(_strata_hip_unvalidated gfx1010 gfx1011 gfx1012 gfx1102 gfx1103 gfx1030 gfx1031 gfx1032 gfx1034 gfx1150 gfx1151 gfx1152)   # gfx1103: Radeon 780M iGPU, opt-in, WMMA kernels like gfx1100; gfx1152: Krackan, Radeon 860M / 840M (#1625), builds with the portable kernels, no card report yet
+set(_strata_hip_unvalidated gfx1010 gfx1011 gfx1012 gfx1102 gfx1103 gfx1030 gfx1031 gfx1032 gfx1033 gfx1034 gfx1035 gfx1036 gfx1150 gfx1151 gfx1152)   # gfx1103: Radeon 780M iGPU, opt-in, WMMA kernels like gfx1100; gfx1152: Krackan, Radeon 860M / 840M (#1625), builds with the portable kernels, no card report yet
 # CMake hands HIP a ';' list, but a -DCMAKE_HIP_ARCHITECTURES typed by hand (or ROCm's own Windows tooling) may use
 # spaces, which foreach(IN LISTS) would otherwise treat as one element.
 string(REPLACE " " ";" _strata_hip_norm "${CMAKE_HIP_ARCHITECTURES}")
@@ -38,6 +38,13 @@ list(REMOVE_DUPLICATES STRATA_HIP_ARCH_LIST)
 if(NOT STRATA_HIP_ARCH_LIST)
   message(FATAL_ERROR "Strata HIP: CMAKE_HIP_ARCHITECTURES is empty")
 endif()
+# RDNA2 (gfx1030-gfx1036, kernels::gfx_arch_is_rdna2()): Inkling's RDNA2-only kernels are built when any is listed.
+set(STRATA_HIP_HAS_RDNA2 OFF)
+foreach(_arch IN ITEMS gfx1030 gfx1031 gfx1032 gfx1033 gfx1034 gfx1035 gfx1036)
+  if(_arch IN_LIST STRATA_HIP_ARCH_LIST)
+    set(STRATA_HIP_HAS_RDNA2 ON)
+  endif()
+endforeach()
 # The compiled architectures reach the runtime device check (src/core/device.cu) as "gfx1100,gfx1201": a binary
 # carried to a card it has no code for stops at startup with a clear message instead of "invalid device function".
 string(REPLACE ";" "," STRATA_HIP_ARCHS "${STRATA_HIP_ARCH_LIST}")

@@ -2053,11 +2053,11 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
   # arch-specific target, so on CUDA their instances alone are built with 12x -> 12xa, as Strata's W4A4 unit is.  A
   # Blackwell other than 12.0 has no image of them, and Mmq::fits() leaves MXFP4 out there.  NVFP4 takes this
   # instance only on a 12.0 card with STRATA_PREFILL_NVFP4=w4a4; otherwise its tiles are mmq_nvfp4.cu's int8 ones,
-  # built for the architectures as given.  HIP builds for gfx1031 also take that W4A8 instance, opt-in at run time.
+  # built for the architectures as given.  HIP builds for an RDNA2 target also take that W4A8 instance, opt-in at run time.
   set(_strata_poly_mxfp4 ${_strata_mmq}/template-instances/mmq-instance-mxfp4.cu)
   if(STRATA_ENABLE_HIP)
     list(APPEND _strata_poly_mmq_instances ${_strata_poly_mxfp4})
-    if("gfx1031" IN_LIST STRATA_HIP_ARCH_LIST)
+    if(STRATA_HIP_HAS_RDNA2)
       list(APPEND _strata_poly_mmq_instances src/poly/mmq_nvfp4.cu src/poly/mmq_nvfp4_tail.cu src/poly/mmq_nvfp4_lean.cu
                                             src/poly/mmq_nvfp4_tail_lean.cu src/poly/mmq_nvfp4_scale_bits.cu
                                             src/poly/mmq_nvfp4_tail_scale_bits.cu)
@@ -2160,7 +2160,7 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
       target_sources(poly_draft_race_test PRIVATE src/poly/inkling_v4_refit.cpp)
       set_property(SOURCE src/poly/inkling2.cu APPEND PROPERTY COMPILE_DEFINITIONS STRATA_POLY_V4_REFIT_HOST=1)
     endif()
-    if("gfx1031" IN_LIST STRATA_HIP_ARCH_LIST)
+    if(STRATA_HIP_HAS_RDNA2)
       # Experiment only: explicitly build this separate CLI, never part of a timing/release build.
       get_target_property(_inkling_nll_sources strata-poly SOURCES)
       get_target_property(_inkling_nll_includes strata-poly INCLUDE_DIRECTORIES)
