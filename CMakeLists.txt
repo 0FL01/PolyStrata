@@ -2151,8 +2151,10 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
                                       src/poly/cpu_experts.cpp src/poly/kernels.cu src/poly/kernels_dsv4.cu
                                       src/core/conversation_memory.cpp)
   if(STRATA_ENABLE_HIP)
-    target_sources(strata-poly PRIVATE src/poly/inkling2.cu src/poly/inkling_attend.cu src/poly/inkling_attend_lean.cu src/poly/inkling_attend_h2.cu src/poly/inkling_dspark.cu)
-    target_sources(poly_draft_race_test PRIVATE src/poly/inkling2.cu src/poly/inkling_attend.cu src/poly/inkling_attend_lean.cu src/poly/inkling_attend_h2.cu src/poly/inkling_dspark.cu)
+    set(_strata_poly_inkling_sources src/poly/inkling2.cu src/poly/inkling_attend.cu src/poly/inkling_attend_lean.cu
+                                  src/poly/inkling_attend_h2.cu src/poly/inkling_dspark.cu src/poly/dflash2/runtime.hip)
+    target_sources(strata-poly PRIVATE ${_strata_poly_inkling_sources})
+    target_sources(poly_draft_race_test PRIVATE ${_strata_poly_inkling_sources})
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
       target_sources(strata-poly PRIVATE src/poly/inkling_v4_refit.cpp)
       target_sources(poly_draft_race_test PRIVATE src/poly/inkling_v4_refit.cpp)

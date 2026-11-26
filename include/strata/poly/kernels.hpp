@@ -23,6 +23,9 @@ void gemv_bf16(const uint16_t* w, const float* x, float* y, int n_in, int n_out,
 /// it, Inkling's STRATA_INKLING_DECODE=1): its sums go in another order than gemv_f32's.
 void gemv_f32_waves(const float* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows,
                     void* stream);
+/// Inkling verifier router only: 2-8 rows of the 2304 x 128 F32 router. Each row uses the W1
+/// one-block-per-output reduction, irrespective of the normal multi-row dispatch threshold.
+void inkling_verifier_router(const float* w, const float* x, float* y, int rows, void* stream);
 /// gemv_f32_waves' own one-block-a-row shape (its dispatch condition, the same launch) with the product also
 /// written to y_host and the input row's values to x_host: the same product, and the host's copies the router's
 /// scores and the experts' input ride it (STRATA_INKLING_ROUTE_DUAL).  False, nothing written: not that shape, or

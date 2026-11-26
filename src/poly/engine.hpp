@@ -116,6 +116,7 @@ struct Options {
                                   ///< -1: as many as the architecture's vocabulary has in order of use (guess_vocab())
     std::string draft_model;      ///< a file of the same model to take that block from, when the model's has none;
                                   ///< for an architecture that guesses with a model of its own, that model's file
+    std::string dflash2_model;    ///< native Inkling DFlash2, independent of the DSpark --draft-model
     int tail_skip = 0;            ///< a routed expert outside VRAM that every token of a call ranks this far down or
                                   ///< further (the router's first choice is 0) is left out (--tail-skip,
                                   ///< STRATA_ROUTE_TAIL_SKIP); 0: none is
@@ -318,6 +319,17 @@ public:
     const float* logits_of(int i) const { return next_ ? next_->logits_of(i) : h_wlogits_ + (size_t) i * n_vocab_; }
     void keep(int n);
 
+    bool uses_dflash2() const { return !opt_.dflash2_model.empty(); }
+    virtual bool dflash2_ready() const { return false; }
+    virtual bool dflash2_failed() const { return false; }
+    virtual void dflash2_propose(int32_t, int, int32_t*) { throw std::logic_error("no DFlash2 drafter"); }
+    // The anchor has the ordinary W1 placement. Before sampling a later row, advance its real
+    // W1 placement once. If it changed any route's backend, keep the prefix and eval_decode()
+    // that already-emitted row instead; its placement boundary was already executed.
+    int verified_width(int most) const;
+    void verified_window(const int32_t* tokens, int n);
+    bool verify_next(int row);
+
     /// Some files carry a block that guesses ahead: one layer that takes a token and the model's output for the
     /// token before it, and gives what the model would likely say after the token.  drafts(): it is there and runs.
     /// draft(token, 0, &p) takes the token at pos(), picked and not fed yet, and returns the guess at the one after
@@ -441,6 +453,9 @@ protected:
     /// keep() after a window), at pos() on, and hn_ + n_embd_ still holds their outputs.  Draft_rows() calls it once
     /// it has left hn_'s first row; the guesser may put what it needs of the last of them there instead.
     virtual void drafter_kept(int n) { (void) n; }
+    virtual float* feature_output() { return nullptr; }
+    virtual void features_kept(int) {}
+    virtual void rewind_features(int64_t) {}
     /// The floats of every recurrent layer's state together.  They are state_'s first.
     virtual size_t recurrent_floats() const = 0;
     /// Whether the recurrent layers leave their state after any tokens of a call, and not only after its first
@@ -749,6 +764,7 @@ protected:
     int padded_vocab_ = 0;   ///< zero unless the token table and LM head have extra non-token rows
     bool looped_ = false;    ///< the model owns its visit order; reads go through all visits for each chunk
     bool serial_decode_ = false;   ///< eval_decode(), never a prompt predictor or a verifier window
+    bool exact_window_ = false;    ///< W1-ordered arithmetic and tentative route accounting
     bool prefetch_early_ = false;   ///< Inkling opt-in: enqueue prompt weights before the router's readback
     bool kcopy_ = false;            ///< Inkling opt-in: the prompt router's readback and tables copied by a kernel
     int n_ff_ = 0;            ///< a dense FFN's width, in the architectures that have one
@@ -890,6 +906,11 @@ protected:
     std::vector<int> step_seqs_, step_rows_;   ///< the sequences of the step, and how many rows each had
     std::vector<int32_t> step_tok_;            ///< each sequence's token and guess, two places a sequence
     int win_ = 0;                ///< the tokens of the window that keep() has not settled yet
+    int verified_ = 0;           ///< safe prefix of an outstanding exact window (0 for an ordinary window)
+    int counted_routes_ = 0;
+    int64_t prepared_decode_ = -1;
+    std::array<std::vector<size_t>, 8> verify_routes_;
+    void commit_routes(int row);
     // A window with experts on the CPU goes through the layers whole, or in two halves one behind the other
     // (run()).  Which takes less time depends on the card, on the CPU and on how many of the experts the cache
     // has, so each way's time is kept for each window size (pick_way(), took_way()).

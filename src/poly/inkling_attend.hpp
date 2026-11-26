@@ -57,6 +57,16 @@ size_t decode_floats();
 /// the launch order of long full-context Q8_0 windows of two to four rows, not their chunks or arithmetic.
 void attend_decode(const Attend& a, float* scratch, cudaStream_t st, void* q8 = nullptr, bool group_rows = false);
 
+/// Scratch capacity for the optional four-wave verifier path (includes decode_floats()).
+size_t verifier_group4_floats();
+
+/// Explicit verifier-only reader for 2-8 rows. Preserves the W1 chunk and combine order for each row, including
+/// across chunk-geometry boundaries. `scratch_floats` must be at least decode_floats(); Group4 is used only
+/// when requested and the supplied capacity fits it. FP16 caches use separate W1 launches. Native Q8 or FP16
+/// caches only; mixed V4 and sparse readers have different contracts. No ordinary decode/prefill dispatch changes.
+void attend_verifier(const Attend& a, float* scratch, size_t scratch_floats, cudaStream_t st, void* q8 = nullptr,
+                     bool group4 = false);
+
 /// Dense causal mixed reader, including every prompt row. The caller may substitute a tiled flash reader.
 void attend_v4(const Attend& a, V4View v4, float* scratch, cudaStream_t st, void* q8 = nullptr);
 /// Approximate opt-in for wide global V4-refit calls only. False does not launch or touch the output.

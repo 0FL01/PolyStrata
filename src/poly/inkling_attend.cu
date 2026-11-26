@@ -1123,6 +1123,59 @@ void attend_decode(const Attend& a, float* scratch, cudaStream_t st, void* q8, b
     check("Inkling decode attention");
 }
 
+size_t verifier_group4_floats() { return (size_t) 4 * kKv * 160 * kChunkFloats; }
+
+void attend_verifier(const Attend& a, float* scratch, size_t scratch_floats, cudaStream_t st, void* q8, bool group4) {
+    if (a.n < 2 || a.n > 8 || a.pos < 0 || a.pos > std::numeric_limits<int>::max() - a.n ||
+        a.window < 0 || a.ring < 0 || !scratch || scratch_floats < decode_floats() ||
+        !a.q || !a.rel || !a.table || !a.sink || !a.gate || !a.out || !a.k.data || !a.v.data ||
+        bool(a.k.scales) != bool(a.v.scales))
+        throw std::logic_error("Inkling verifier attention: invalid inputs or scratch capacity");
+
+    constexpr int serial_max = kDecodeBlocks / kKv;
+    const auto span_of = [&](int row) {
+        const int64_t end = a.pos + row + 1;
+        return (int) (a.window ? std::min<int64_t>(a.window, end) : end);
+    };
+    for (int r = 0; r < a.n;) {
+        const size_t qr = (size_t) r * kQuery, hr = (size_t) r * kHeads;
+        auto* out8 = q8 ? static_cast<Q81*>(q8) + qr / 32 : nullptr;
+        if (!a.k.scales) {
+            Attend row = a;
+            row.pos += r;
+            row.n = 1;
+            row.q += qr;
+            row.rel += hr * kRelative;
+            row.sink += hr;
+            row.gate += qr;
+            row.out += qr;
+            attend_decode(row, scratch, st, out8, false);
+            ++r;
+            continue;
+        }
+        const int span = span_of(r), chunk = q8_chunk(span, serial_max), chunks = div_up(span, chunk);
+        const bool grouped = group4 && scratch_floats >= verifier_group4_floats() && !a.window &&
+                             span >= 32768 && chunks <= 160;
+        const int max_rows = grouped ? 4 : serial_max / chunks;
+        int count = 1;
+        while (r + count < a.n && count < max_rows) {
+            const int next = span_of(r + count);
+            if (q8_chunk(next, serial_max) != chunk || div_up(next, chunk) != chunks) break;
+            ++count;
+        }
+        if (grouped && count > 1)
+            decode_q8_kernel<4><<<dim3(kKv / 4, count, chunks), 4 * 32, 0, st>>>(
+                a.q + qr, a.rel + hr * kRelative, a.table, a.k, a.v, a.pos + r, a.window, a.ring, chunk, scratch);
+        else
+            decode_q8_kernel<><<<dim3(chunks, count), kAttThreads, 0, st>>>(
+                a.q + qr, a.rel + hr * kRelative, a.table, a.k, a.v, a.pos + r, a.window, a.ring, chunk, scratch);
+        decode_combine_kernel<<<dim3(kHeads, count), kHead, 0, st>>>(
+            scratch, chunks, a.sink + hr, a.gate + qr, a.out + qr, out8);
+        r += count;
+    }
+    check("Inkling W1-ordered verifier attention");
+}
+
 bool try_attend_compact_suffix_h2(const Attend& a, V4View v4, float* scratch, cudaStream_t st, void* q8) {
     // Only wide global V4-refit continuations. In particular, a.window and a.ring are for SWA,
     // not the separate native V ring. Every live V row at or above the seal must still fit in that ring.

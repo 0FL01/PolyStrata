@@ -2901,6 +2901,13 @@ __global__ void __launch_bounds__(256) gemv_rows_segments_kernel(F32Segments s, 
 
 }  // namespace
 
+void inkling_verifier_router(const float* w, const float* x, float* y, int rows, void* stream) {
+    if (!w || !x || !y || rows < 2 || rows > 8 ||
+        (reinterpret_cast<uintptr_t>(w) | reinterpret_cast<uintptr_t>(x)) % 16)
+        throw std::logic_error("Inkling verifier router: expected aligned 2304 x 128 inputs and 2-8 rows");
+    gemv_rows_kernel<<<dim3(128, rows), 256, 0, (cudaStream_t) stream>>>(w, x, y, 2304, 128, 128);
+}
+
 void gemv_f32_waves(const float* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows,
                     void* stream) {
     // float4 rows: the engine's buffers are aligned and every product of a model that asks for this is whole float4s

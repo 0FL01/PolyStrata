@@ -11,6 +11,16 @@
 #include <mutex>
 #include <numeric>
 
+// The receipt was built with GCC, without fast-math, against Zen 3's ggml AVX2 dots.
+#if defined(__x86_64__) && defined(__GNUC__) && !defined(__clang__) && __GNUC__ == 16 && __GNUC_MINOR__ == 2 && \
+    defined(__OPTIMIZE__) && !defined(__FAST_MATH__) && !defined(__ASSOCIATIVE_MATH__) && \
+    (!defined(__FINITE_MATH_ONLY__) || __FINITE_MATH_ONLY__ == 0) && !defined(__AVX512F__)
+#define STRATA_CPU_REUSE_ZEN3 1
+#include "cpu_experts_q4_multi.hpp"
+#else
+#define STRATA_CPU_REUSE_ZEN3 0
+#endif
+
 namespace strata::poly {
 namespace {
 
@@ -258,6 +268,155 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
             }
         }
     });
+}
+
+void cpu_experts_reuse(Workers& workers, const CpuExpert* experts, int n, int rows, int gu_type, int u_type, int d_type,
+                       int n_embd, int n_ff, const float* x, float limit, bool gelu, float* out,
+                       const std::function<void()>* meanwhile, const uint8_t* late, const std::function<void(int)>* wait,
+                       SiTU situ) {
+#if STRATA_CPU_REUSE_ZEN3
+    // This guard is not a substitute for building ggml with the matching AVX2 arithmetic.
+    if (rows >= 3 && __builtin_cpu_is("znver3") && __builtin_cpu_supports("avx2") &&
+        __builtin_cpu_supports("f16c") && __builtin_cpu_supports("fma")) {
+        init_once();
+        const auto* tg = traits(gu_type);
+        const auto* tu = traits(u_type);
+        const auto* td = traits(d_type);
+        const bool group_gu = gu_type == GGML_TYPE_Q4_0 && u_type == GGML_TYPE_Q4_0 &&
+                              tg->vec_dot_type == GGML_TYPE_Q8_0 && tu->vec_dot_type == GGML_TYPE_Q8_0;
+        const bool group_d = (d_type == GGML_TYPE_Q4_0 && td->vec_dot_type == GGML_TYPE_Q8_0) ||
+                             (d_type == GGML_TYPE_Q4_1 && td->vec_dot_type == GGML_TYPE_Q8_1);
+        // Only the combinations in the receipt are enabled; other formats take the original path in full.
+        if (group_gu && group_d) {
+            const size_t gu_row = ggml_row_size((ggml_type) gu_type, n_embd);
+            const size_t u_row = ggml_row_size((ggml_type) u_type, n_embd);
+            const size_t d_row = ggml_row_size((ggml_type) d_type, n_ff);
+            const size_t a_bytes = ggml_row_size(tg->vec_dot_type, n_embd);
+            const size_t au_bytes = ggml_row_size(tu->vec_dot_type, n_embd);
+            const size_t h_bytes = ggml_row_size(td->vec_dot_type, n_ff);
+            const bool own_act = tu->vec_dot_type != tg->vec_dot_type;
+            static thread_local std::vector<uint8_t> act, act_u, hq;
+            static thread_local std::vector<float> h;
+            static thread_local std::vector<int> by, run, order;
+            act.resize((size_t) rows * a_bytes);
+            if (own_act) act_u.resize((size_t) rows * au_bytes);
+            hq.resize((size_t) n * h_bytes);
+            h.resize((size_t) n * n_ff);
+            uint8_t* actp = act.data();
+            const auto act_from = traits(tg->vec_dot_type)->from_float;
+            workers.run(rows, [&](int t) { act_from(x + (size_t) t * n_embd, actp + (size_t) t * a_bytes, n_embd); });
+            uint8_t* actup = actp;
+            if (own_act) {
+                actup = act_u.data();
+                const auto au_from = traits(tu->vec_dot_type)->from_float;
+                workers.run(rows, [&](int t) { au_from(x + (size_t) t * n_embd, actup + (size_t) t * au_bytes, n_embd); });
+            }
+            const size_t au_step = own_act ? au_bytes : a_bytes;
+            by.resize((size_t) n);
+            std::iota(by.begin(), by.end(), 0);
+            std::stable_sort(by.begin(), by.end(), [&](int a, int b) { return experts[a].gate < experts[b].gate; });
+            run.clear();
+            for (int i = 0; i < n; ++i)
+                if (i == 0 || experts[by[(size_t) i]].gate != experts[by[(size_t) i - 1]].gate) run.push_back(i);
+            const int n_run = (int) run.size();
+            run.push_back(n);
+            order.resize((size_t) n_run);
+            std::iota(order.begin(), order.end(), 0);
+            if (late)
+                std::stable_partition(order.begin(), order.end(), [&](int u) { return !late[by[(size_t) run[(size_t) u]]]; });
+            float* hp = h.data();
+            const int* byp = by.data();
+            const int* runp = run.data();
+            const int* orderp = order.data();
+            const int gu_tasks = (n_ff + kRowsPerTask - 1) / kRowsPerTask;
+            const int first = meanwhile ? 1 : 0;
+            workers.run(first + n_run * gu_tasks, [&](int t) {
+                if (t < first) return (*meanwhile)();
+                t -= first;
+                const int u = orderp[t / gu_tasks], i0 = runp[u], i1 = runp[u + 1];
+                if (late && late[byp[i0]]) (*wait)(byp[i0]);
+                const CpuExpert& e = experts[byp[i0]];
+                const int r0 = (t % gu_tasks) * kRowsPerTask, r1 = std::min(n_ff, r0 + kRowsPerTask);
+                for (int r = r0; r < r1; ++r) {
+                    const uint8_t* gate = e.gate + (size_t) r * gu_row;
+                    const uint8_t* up = e.up + (size_t) r * u_row;
+                    for (int i = i0; i < i1;) {
+                        const int k = group_gu && i1 - i > 1 ? reuse::chunk(i1 - i) : 1;
+                        float gates[4]{}, ups[4]{};
+                        if (k > 1) {
+                            const uint8_t* a[4];
+                            for (int j = 0; j < k; ++j) a[j] = actp + (size_t) experts[byp[i + j]].row * a_bytes;
+                            reuse::dot<false>(n_embd, gate, a, k, gates);
+                            reuse::dot<false>(n_embd, up, a, k, ups);
+                        } else {
+                            const int row = experts[byp[i]].row;
+                            tg->vec_dot(n_embd, gates, 0, gate, 0, actp + (size_t) row * a_bytes, 0, 1);
+                            tu->vec_dot(n_embd, ups, 0, up, 0, actup + (size_t) row * au_step, 0, 1);
+                        }
+                        for (int j0 = 0; j0 < k; ++j0) {
+                            const int j = byp[i++];
+                            float g = gates[j0], u = ups[j0];
+                            g *= e.gate_scale;
+                            u *= e.up_scale;
+                            if (situ.beta > 0.f) {
+                                hp[(size_t) j * n_ff + r] = situ.beta * std::tanh(g / situ.beta) / (1.f + std::exp(-g)) *
+                                                             (situ.linear_beta * std::tanh(u / situ.linear_beta));
+                                continue;
+                            }
+                            if (gelu) {
+                                hp[(size_t) j * n_ff + r] =
+                                    0.5f * g * (1.f + std::tanh(0.7978845608f * g * (1.f + 0.044715f * g * g))) * u;
+                                continue;
+                            }
+                            g = std::min(g, limit);
+                            u = std::clamp(u, -limit, limit);
+                            hp[(size_t) j * n_ff + r] = g / (1.f + std::exp(-g)) * u;
+                        }
+                    }
+                }
+            });
+            uint8_t* hqp = hq.data();
+            const auto hq_from = traits(td->vec_dot_type)->from_float;
+            workers.run(n, [&](int j) { hq_from(hp + (size_t) j * n_ff, hqp + (size_t) j * h_bytes, n_ff); });
+            const int d_tasks = (n_embd + kRowsPerDownTask - 1) / kRowsPerDownTask;
+            workers.run(d_tasks, [&](int t) {
+                static thread_local std::vector<float> one;
+                one.resize((size_t) n);
+                float* s = one.data();
+                const int r0 = t * kRowsPerDownTask, r1 = std::min(n_embd, r0 + kRowsPerDownTask);
+                for (int r = r0; r < r1; ++r) {
+                    for (int u = 0; u < n_run; ++u) {
+                        const uint8_t* down = experts[byp[runp[u]]].down + (size_t) r * d_row;
+                        const int end = runp[u + 1];
+                        for (int i = runp[u]; i < end;) {
+                            if (!group_d || end - i == 1) {
+                                const int j = byp[i++];
+                                td->vec_dot(n_ff, s + j, 0, down, 0, hqp + (size_t) j * h_bytes, 0, 1);
+                            } else {
+                                const int k = reuse::chunk(end - i);
+                                const uint8_t* a[4];
+                                float values[4];
+                                for (int j = 0; j < k; ++j) a[j] = hqp + (size_t) byp[i + j] * h_bytes;
+                                if (d_type == GGML_TYPE_Q4_1) reuse::dot<true>(n_ff, down, a, k, values);
+                                else reuse::dot<false>(n_ff, down, a, k, values);
+                                for (int j = 0; j < k; ++j) s[byp[i++]] = values[j];
+                            }
+                        }
+                    }
+                    int j = 0;
+                    for (int row = 0; row < rows; ++row) {
+                        float acc = 0.f;
+                        for (; j < n && experts[j].row == row; ++j) acc += experts[j].weight * s[j];
+                        out[(size_t) row * n_embd + r] = acc;
+                    }
+                }
+            });
+            return;
+        }
+    }
+#endif
+    cpu_experts(workers, experts, n, rows, gu_type, u_type, d_type, n_embd, n_ff, x, limit, gelu, out,
+                meanwhile, late, wait, situ);
 }
 
 }  // namespace strata::poly

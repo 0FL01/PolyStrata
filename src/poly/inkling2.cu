@@ -669,6 +669,16 @@ void Inkling2::load_geometry() {
     n_layer_ = kPhysical;
     looped_ = true;
     clamp_exp_.assign(kPhysical + 1, INFINITY);
+    if (uses_dflash2()) {
+        if (!decode_ || !q8() || k256_ || v4_ || drafter ||
+            !kernels::gfx_arch_is(p.gcnArchName, "gfx1031") || device != 0)
+            throw std::runtime_error("DFlash2 needs gfx1031 device 0, dense Q8_0 KV and STRATA_INKLING_DECODE=1");
+        if (window > opt_.prompt_batch)
+            throw std::runtime_error("DFlash2 needs --prompt-batch at least --window");
+        if (opt_.max_context > dflash2::max_positions)
+            throw std::runtime_error("--max-context exceeds the DFlash2 position limit");
+        opt_.window = window > 0 ? window : std::min(kDsBlock, opt_.prompt_batch);
+    }
     if (drafter) {
         const char* reuse_v = std::getenv("STRATA_INKLING_DSPARK_REUSE_V");
         ds_reuse_v_ = kernels::gfx_arch_is(p.gcnArchName, "gfx1031") &&
@@ -1390,8 +1400,9 @@ void Inkling2::assign_scratch() {
     scores_ = fbuf(inkling::plain_score_floats(attend_tiles_));
     partial_ = fbuf(inkling::plain_partial_floats(attend_tiles_));
     if (decode_) {
-        chunks_ = fbuf(inkling::decode_floats() + (k256_ && inkling::k256_worthwhile(opt_.max_context)
-                                                ? inkling::k256_scratch_floats() : 0));
+        chunks_ = fbuf((uses_dflash2() ? inkling::verifier_group4_floats() : inkling::decode_floats()) +
+                       (k256_ && inkling::k256_worthwhile(opt_.max_context)
+                                                 ? inkling::k256_scratch_floats() : 0));
         taps2_ = fbuf(n * kKv * kTaps);
         attq_ = fbuf((size_t) kStageRows * (kQuery / 32) * 36 / sizeof(float));   // Q8_1: 36 bytes a block of 32
         kq8_ = fbuf((size_t) (kWidth / 32) * 36 / sizeof(float));
@@ -1437,6 +1448,14 @@ void Inkling2::assign_scratch() {
     rank_ = fbuf(n * kRank);
     gain_ = fbuf(width);
     forget_ = fbuf(width);
+    if (uses_dflash2()) {
+        df_taps_ = fbuf(4 * width);
+        if (df_taps_ && !dflash2_) {
+            if (output_.type != GGML_TYPE_Q6_K) throw std::runtime_error("DFlash2 requires the target Q6_K head");
+            ck(cudaStreamSynchronize(cs(st_)), "share target head with DFlash2");
+            dflash2_ = std::make_unique<dflash2::Runtime>(opt_.dflash2_model.c_str(), opt_.model.c_str(), output_.p);
+        }
+    }
     if (!draft_) return;
     ds_taps_ = fbuf(3 * width);
     const size_t b = kDsBlock;
@@ -1543,6 +1562,8 @@ void Inkling2::attention(const Block& b, int n) {
     a.window = swa ? kWindow : 0;
     a.ring = ring;
     a.out = att_;
+    if (exact_window_ && n > 1 && (c.index || (hybrid && c.sealed)))
+        throw std::logic_error("Inkling exact verifier does not support sparse or mixed V4 attention");
     const inkling::V4View mixed = hybrid ? inkling::V4View{
         {c.cold_v[0].data, (const uint16_t*) c.cold_v[1].data}, c.sealed, hot_rows_} : inkling::V4View{};
     if (c.index) {
@@ -1574,7 +1595,13 @@ void Inkling2::attention(const Block& b, int n) {
     }
     // Prompt batches only: a token's answer and short calls keep the plain kernels and their sums.
     if (flash_ && n >= kStageRows) inkling::attend_flash(a, cs(st_));
-    else if (decode_ && n < kStageRows) inkling::attend_decode(a, chunks_, cs(st_), attq_, ds_attend_group_);
+    else if (decode_ && n < kStageRows) {
+        if (exact_window_ && n > 1)
+            inkling::attend_verifier(a, chunks_, uses_dflash2() ? inkling::verifier_group4_floats()
+                                                                : inkling::decode_floats(),
+                                     cs(st_), attq_, uses_dflash2());
+        else inkling::attend_decode(a, chunks_, cs(st_), attq_, ds_attend_group_);
+    }
     else inkling::attend_plain(a, scores_, partial_, attend_tiles_, cs(st_));
     if (staged) {
         // Only new rows need copying back. Short/verifier calls already wrote into their own ring.
@@ -1714,14 +1741,45 @@ void Inkling2::run_visits(int n) {
             axpy(prelude_, 1.f, r_, n * kWidth, false, st_);
             depth_n_ = 1;
         }
-        if (draft_)   // the drafter's taps: the residual entering visits 5, 23 and 41 (drafter_kept())
+        if (float* taps = df_taps_ ? df_taps_ : ds_taps_)
             for (int j = 0; j < 3; ++j)
                 if (visit_ == kTap[j])
-                    ck(cudaMemcpyAsync(ds_taps_ + (size_t) j * rows_ * kWidth, r_, (size_t) n * kWidth * sizeof(float),
+                    ck(cudaMemcpyAsync(taps + (size_t) j * rows_ * kWidth, r_, (size_t) n * kWidth * sizeof(float),
                                        cudaMemcpyDeviceToDevice, cs(st_)),
-                       "DSpark taps");
+                       "Inkling draft taps");
         layer(physical(visit_), n);
     }
+}
+
+float* Inkling2::feature_output() {
+    return df_taps_ ? df_taps_ + 3 * (size_t) rows_ * kWidth : nullptr;
+}
+
+void Inkling2::features_kept(int n) {
+    if (!dflash2_) return;
+    const size_t plane = (size_t) rows_ * kWidth;
+    ck(cudaStreamSynchronize(cs(st_)), "DFlash2 committed features");
+    dflash2_->append(pos_, n, {df_taps_, df_taps_ + plane, df_taps_ + 2 * plane, df_taps_ + 3 * plane});
+}
+
+void Inkling2::rewind_features(int64_t pos) {
+    if (!dflash2_) return;
+    dflash2_->reset(pos);
+    df_start_ = pos;
+}
+
+bool Inkling2::dflash2_ready() const {
+    return dflash2_ && pos_ <= dflash2::max_positions - dflash2::block &&
+           (!df_start_ || pos_ - df_start_ >= dflash2::window);
+}
+
+bool Inkling2::dflash2_failed() const { return dflash2_ && !dflash2_->usable(); }
+
+void Inkling2::dflash2_propose(int32_t anchor, int k, int32_t* out) {
+    if (!dflash2_ready()) throw std::logic_error("DFlash2 is warming its context");
+    dflash2::Proposal p;
+    dflash2_->propose(pos_, anchor, k, p, false, false);
+    std::copy_n(p.ids.begin(), k, out);
 }
 
 void Inkling2::layer_head(Layer& L, int il, int n) {

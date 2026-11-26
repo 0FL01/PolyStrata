@@ -8,6 +8,7 @@
 #include "conversations.hpp"
 #include "disk_sessions.hpp"
 #include "engine.hpp"
+#include "dflash2/policy.hpp"
 #include "guesses.hpp"
 #include "strata/core/conversation_memory.hpp"
 #include "strata/spec/draft_policy.hpp"
@@ -510,16 +511,18 @@ struct Session {
     // the most tokens of a window whose guesses come from the block one by one (--draft-max: one more than the
     // guesses), and STRATA_DRAFT_LOG's file
     int draft_most = kBlockWindow;
+    int dflash2_most = 4;             // anchor + three guesses, unless --draft-max overrides it
+    double dflash2_budget_ms = 0.;    // positive: choose W1, lookup or DFlash2 under an estimated round budget
     FILE* draft_log = [] {
         const char* p = std::getenv("STRATA_DRAFT_LOG");
         return p && *p ? std::fopen(p, "w") : nullptr;
     }();
 
-    Session(Engine& e, std::vector<int32_t> eos_ids, const CacheFlags& f, int lookup)
+    Session(Engine& e, std::vector<int32_t> eos_ids, const CacheFlags& f, int lookup, double budget_ms = 0.)
         : engine(e), eos(std::move(eos_ids)), flags(f), kept(e, with_floor(f)),
           most(lookup > 0 || e.drafts() ? std::min<int>(e.max_window(), strata::spec::DraftPolicy::kMaxT) : 1),
-          look(lookup > 0 && most > 1),
-          repeats(std::max(lookup, 3), 64, (size_t) e.max_context() + 4096), policy(most) {}
+          look((!e.uses_dflash2() || budget_ms > 0.) && lookup > 0 && most > 1),
+          repeats(std::max(lookup, 3), 64, (size_t) e.max_context() + 4096), policy(most), dflash2_budget_ms(budget_ms) {}
 
     static CacheOptions with_floor(const CacheFlags& f) {
         CacheOptions o = f.o;
@@ -662,6 +665,9 @@ struct Session {
         };
         if (max_new > 0) {
             int32_t w[strata::spec::DraftPolicy::kMaxT], d[strata::spec::DraftPolicy::kMaxT];
+            dflash2::Policy df_policy(dflash2_budget_ms);
+            using DFSource = dflash2::Policy::Source;
+            int df_serial = 0, df_draft = 0, df_lookup = 0, df_replay = 0;
             const bool dspark = engine.uses_dspark();
             const int block_window = engine.guesses_at_once() ? most : draft_most;
             int32_t t = pick(engine.logits());   // picked, and not shown yet
@@ -669,6 +675,60 @@ struct Session {
                 // t goes into the model now, and with it guesses at what follows when there are any that pay
                 const Clock::time_point round = Clock::now();
                 const int64_t ctx_left = engine.max_context() - engine.pos();
+                if (engine.uses_dflash2()) {
+                    const int desired = (int) std::min<int64_t>(dflash2_most, max_new - r.produced);
+                    const bool ready = desired > 1 && engine.dflash2_ready();
+                    const bool adaptive = dflash2_budget_ms > 0.;
+                    const int capacity = (ready || look) ? engine.verified_width(desired) - 1 : 0;
+                    const int lookup_k = look && capacity > 0 ? repeats.propose(capacity, w + 1) : 0;
+                    const int match = lookup_k ? repeats.last_match() : 0;
+                    const auto use = adaptive ? df_policy.choose(capacity, lookup_k, match, ready) :
+                        dflash2::Policy::Pick{capacity ? DFSource::DFlash2 : DFSource::W1, capacity};
+                    if (!use.k) {
+                        engine.eval_decode(t);
+                        kept.read(&t, 1);
+                        t = pick(engine.logits());
+                        if (adaptive) df_policy.observe(use, 0, 0, 0, 0., ms_since(round));
+                        ++df_serial;
+                        continue;
+                    }
+                    const int width = 1 + use.k;
+                    w[0] = t;
+                    double proposal_ms = 0.;
+                    if (use.source == DFSource::DFlash2) {
+                        const auto began = Clock::now();
+                        engine.dflash2_propose(t, use.k, w + 1);
+                        proposal_ms = ms_since(began);
+                        ++df_draft;
+                    } else ++df_lookup;
+                    engine.verified_window(w, width);
+                    int fed = 1;
+                    bool more = true;
+                    bool replay = false;
+                    t = pick(engine.logits_of(0));
+                    while (fed < width && t == w[fed] && (more = show(t))) {
+                        if (!engine.verify_next(fed)) {
+                            replay = true;
+                            break;
+                        }
+                        t = pick(engine.logits_of(fed++));
+                    }
+                    engine.keep(fed);
+                    kept.read(w, fed);
+                    const int accepted = fed - 1 + (!more || replay);
+                    const int compared = accepted + (more && !replay && fed < width);
+                    r.guessed += use.k;
+                    r.guessed_right += accepted;
+                    if (replay) {
+                        ++df_replay;
+                        engine.eval_decode(t);
+                        kept.read(&t, 1);
+                        t = pick(engine.logits());
+                    }
+                    if (adaptive) df_policy.observe(use, accepted, compared, match, proposal_ms, ms_since(round) - proposal_ms);
+                    if (!more) break;
+                    continue;
+                }
                 // There are still max_new - produced picks to make after t.  If all guesses match, the last
                 // pick is shown without feeding it, so verifying more rows cannot save a call.
                 const int width = dspark ? (int) std::min<int64_t>({most, ctx_left, max_new - r.produced})
@@ -737,6 +797,9 @@ struct Session {
                 policy.observe(use.lookup, use.t, right, match, count(use.t, right + 1));
                 if (!more) break;
             }
+            if (engine.uses_dflash2())
+                std::fprintf(stderr, "strata-poly: DFlash2 rounds W1=%d lookup=%d draft=%d placement_replays=%d\n",
+                             df_serial, df_lookup, df_draft, df_replay);
         }
         r.decode_ms = ms_since(t0);
         return r;
@@ -1114,6 +1177,12 @@ int serve(Session& ss, bool want_disk_sessions) {
             }
         } catch (const std::exception& e) {
             if (failed) return 1;   // step() said ERR: the slots' sequences are in no known state
+            if (engine.dflash2_failed()) {
+                std::fprintf(stderr, "strata-poly: DFlash2 device work failed: %s\n", e.what());
+                std::puts("FATAL DFlash2 state may have changed; restart the worker");
+                std::fflush(stdout);
+                return 1;
+            }
             // the engine's state is unknown now: the conversation it was reading is lost
             ss.kept.drop();
             try { engine.reset(); } catch (const std::exception&) {}
@@ -1361,8 +1430,11 @@ void usage() {
                  "  --draft-model FILE     a file of the same model to take that block from, when --model has none;\n"
                  "                         for Gemma 4, its draft model (a gemma4-assistant file); for\n"
                  "                         Inkling-2-Mini, its DSpark drafter (needs STRATA_INKLING_DECODE=1)\n"
+                 "  --dflash2-model FILE   opt-in native Inkling DFlash2 GGUF (dense Q8_0 KV on gfx1031)\n"
                  "  --draft-max N          budget for guesses made one by one (default 3); the policy may use fewer\n"
                  "                         with DSpark, 0 keeps its session state but does not ask for guesses\n"
+                 "                         with DFlash2, sets the block's guess count (default 3, 0 = loaded W1)\n"
+                 "  --dflash2-budget-ms N  adapt W1/lookup/DFlash2 widths to a round cost estimate (not a deadline)\n"
                  "  --draft-vocab N        the block guesses among the vocabulary's first N tokens (default:\n"
                  "                         131072 for Qwen3.6, Ornith and Tiel, all of it for the others; 0 = all)\n"
                  "  --no-graphs            launch a token's kernels one by one (default: a layer's are recorded once\n"
@@ -1466,6 +1538,7 @@ int main(int argc, char** argv) {
     bool want_serve = false, want_disk_sessions = false;
     long long max_new = 32;
     int top_probs = 0, lookup = 3, image_pad = -1, check = 0, draft_max = -1;
+    double dflash2_budget_ms = 0.;
     std::string images;
     std::vector<int32_t> ids, eos, follow;
     for (int i = 1; i < argc; ++i) {
@@ -1526,6 +1599,16 @@ int main(int argc, char** argv) {
         }
         else if (a == "--no-draft") o.draft = false;
         else if (a == "--draft-model") o.draft_model = val();
+        else if (a == "--dflash2-model") o.dflash2_model = val();
+        else if (a == "--dflash2-budget-ms") {
+            const char* start = val();
+            char* end = nullptr;
+            dflash2_budget_ms = std::strtod(start, &end);
+            if (end == start || *end || !std::isfinite(dflash2_budget_ms) || dflash2_budget_ms <= 0.) {
+                std::fputs("strata-poly: --dflash2-budget-ms needs positive finite milliseconds\n", stderr);
+                return 2;
+            }
+        }
         else if (a == "--expert-swaps") o.expert_swaps = std::atoi(val());
         else if (a == "--ram-experts-mib") o.ram_experts_mib = std::atoll(val());
         else if (a == "--tail-skip") o.tail_skip = std::atoi(val());
@@ -1582,6 +1665,14 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (const char* v = std::getenv("STRATA_BATCH_MTP"); v && std::string(v) == "1") o.batch_mtp = true;
+    if (!o.dflash2_model.empty() && (!o.draft || !o.draft_model.empty())) {
+        std::fputs("strata-poly: --dflash2-model cannot be combined with --no-draft or --draft-model\n", stderr);
+        return 2;
+    }
+    if (dflash2_budget_ms > 0. && o.dflash2_model.empty()) {
+        std::fputs("strata-poly: --dflash2-budget-ms requires --dflash2-model\n", stderr);
+        return 2;
+    }
     // --check-batch: K sequences growing together would take VRAM from the expert cache that the single runs had,
     // and an expert moved to the CPU rounds differently (issue 55).  Their attention rows get VRAM at load instead.
     if (check > 0) o.kv_grow = false;
@@ -1649,9 +1740,10 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata-poly: conversation cache off: not enough free RAM to park conversations "
                                      "(--conversation-cache-mib N asks for one anyway)\n");
         }
-        Session ss(engine, eos, cache, lookup);
+        Session ss(engine, eos, cache, lookup, dflash2_budget_ms);
         if (draft_max > 0 || (engine.uses_dspark() && draft_max == 0))
             ss.draft_most = 1 + std::min(draft_max, strata::spec::DraftPolicy::kMaxT - 1);
+        if (draft_max >= 0) ss.dflash2_most = 1 + std::min(draft_max, strata::spec::DraftPolicy::kMaxT - 1);
         int rc = 0;
         if (want_serve) {
             rc = serve(ss, want_disk_sessions);

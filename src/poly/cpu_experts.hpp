@@ -79,4 +79,15 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
                  const std::function<void()>* meanwhile = nullptr, const uint8_t* late = nullptr,
                  const std::function<void(int)>* wait = nullptr, SiTU situ = {});
 
+/// Opt-in Zen 3 AVX2 multi-input variant, with the same arguments and ordering as cpu_experts.
+/// GCC 16.2 optimized, non-fast-math x86-64 build and Zen 3 AVX2/F16C/FMA are required.
+/// The linked ggml-cpu must use the proven Zen 3 AVX2/F16C/FMA Q4_0 x Q8_0 and Q4_1 x Q8_1
+/// dot arithmetic (no fast-math); other ggml builds require a separate bitwise validation. This is a caller
+/// prerequisite: the linked ggml's compiler flags and arithmetic cannot be detected by this translation unit.
+/// Unsupported hosts, builds, and tensor types use cpu_experts/ggml instead. Q4_K tensors are not optimized.
+void cpu_experts_reuse(Workers& workers, const CpuExpert* experts, int n, int rows, int gu_type, int u_type, int d_type,
+                       int n_embd, int n_ff, const float* x, float limit, bool gelu, float* out,
+                       const std::function<void()>* meanwhile, const uint8_t* late,
+                       const std::function<void(int)>* wait, SiTU situ);
+
 }  // namespace strata::poly

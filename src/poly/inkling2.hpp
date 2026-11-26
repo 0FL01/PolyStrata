@@ -3,6 +3,7 @@
 
 #include "engine.hpp"
 #include "inkling_swa_layout.hpp"
+#include "dflash2/runtime.hpp"
 
 #include <array>
 #include <vector>
@@ -13,6 +14,9 @@ class Inkling2 final : public Engine {
 public:
     ~Inkling2() override;
     bool sees() const override { return true; }
+    bool dflash2_ready() const override;
+    bool dflash2_failed() const override;
+    void dflash2_propose(int32_t anchor, int k, int32_t* out) override;
     size_t card_row_bytes() const override;
     size_t kv_headroom_bytes() const override { return swa_plan_.saved_bytes; }
     void save_card_rows(int64_t first, int64_t n, uint8_t* dst) override;
@@ -51,6 +55,9 @@ protected:
     void load_drafter() override;
     void draft_step(int32_t token, int i) override;
     void drafter_kept(int n) override;
+    float* feature_output() override;
+    void features_kept(int n) override;
+    void rewind_features(int64_t pos) override;
 
 private:
     static constexpr int kPhysical = 24, kVisits = 48;
@@ -162,6 +169,9 @@ private:
     float ds_eps_ = 0, ds_cap_ = 0, ds_theta_ = 0;
     bool ds_head_ready_ = false, ds_reuse_v_ = false;
     float* ds_taps_ = nullptr;              // the rows entering visits kTap of the last call, rows_ apart
+    std::unique_ptr<dflash2::Runtime> dflash2_;
+    float* df_taps_ = nullptr;              // the same three visits, followed by the normed output
+    int64_t df_start_ = 0;                 // first contiguous feature row since reset or restore
     float *ds_x_ = nullptr, *ds_xa_ = nullptr, *ds_q_ = nullptr, *ds_qr_ = nullptr, *ds_k_ = nullptr,
           *ds_kr_ = nullptr, *ds_v_ = nullptr, *ds_ao_ = nullptr, *ds_out_ = nullptr, *ds_g_ = nullptr,
           *ds_u_ = nullptr, *ds_h_ = nullptr, *ds_cur_ = nullptr, *ds_base_ = nullptr, *ds_state_ = nullptr,

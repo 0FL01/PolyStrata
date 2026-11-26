@@ -158,9 +158,51 @@ bool run(const Case& c, float* scores, float* partial, int tiles, bool timed) {
         return v && std::string(v) == "1" && l && std::string(l) == "1" && gfx1031;
     }();
     const double limit = half && !c.dec && a.k.scales ? 1e-3 : 1e-4;
-    const bool ok = finite && relative <= limit;
+    bool ok = finite && relative <= limit;
     std::printf("%-26s pos %6lld n %4d: largest %.4g, difference %.3g (%.2e of largest)%s\n", c.name,
-                (long long) c.pos, c.n, top, diff, relative, ok ? "" : finite ? "  FAIL" : "  NaN FAIL");
+                 (long long) c.pos, c.n, top, diff, relative, ok ? "" : finite ? "  FAIL" : "  NaN FAIL");
+
+    if (c.dec && c.n > 1 && c.n <= 8) {
+        // Compare against actual W1 launches, including packed Q8_1 output. Test both the normal
+        // scratch fallback and the larger Group4 capacity without changing any production dispatch.
+        const size_t qbytes = out_n / 32 * 36;
+        uint8_t *serial_q = nullptr, *wide_q = nullptr;
+        float* extra = nullptr;
+        cudaMalloc(&serial_q, qbytes);
+        cudaMalloc(&wide_q, qbytes);
+        cudaMalloc(&extra, verifier_group4_floats() * sizeof(float));
+        for (int r = 0; r < c.n; ++r) {
+            Attend row = a;
+            const size_t qr = (size_t) r * kHeads * kHead, hr = (size_t) r * kHeads;
+            row.pos += r;
+            row.n = 1;
+            row.q += qr;
+            row.rel += hr * kRelative;
+            row.sink += hr;
+            row.gate += qr;
+            row.out = plain + qr;
+            attend_decode(row, chunks, nullptr, serial_q + qr / 32 * 36);
+        }
+        std::vector<float> serial(out_n), wide(out_n);
+        std::vector<uint8_t> sq(qbytes), wq(qbytes);
+        auto err = cudaMemcpy(serial.data(), plain, out_n * sizeof(float), cudaMemcpyDeviceToHost);
+        if (err == cudaSuccess) err = cudaMemcpy(sq.data(), serial_q, qbytes, cudaMemcpyDeviceToHost);
+        for (int arm = 0; arm < 3; ++arm) {
+            a.out = flash;
+            float* work = arm == 2 ? extra : chunks;
+            const size_t capacity = arm == 2 ? verifier_group4_floats() : decode_floats();
+            attend_verifier(a, work, capacity, nullptr, wide_q, arm != 0);
+            if (err == cudaSuccess) err = cudaMemcpy(wide.data(), flash, out_n * sizeof(float), cudaMemcpyDeviceToHost);
+            if (err == cudaSuccess) err = cudaMemcpy(wq.data(), wide_q, qbytes, cudaMemcpyDeviceToHost);
+            const bool same = err == cudaSuccess && std::memcmp(serial.data(), wide.data(), out_n * sizeof(float)) == 0 &&
+                              sq == wq;
+            std::printf("  W1-ordered verifier arm %d: %s\n", arm, same ? "exact" : "FAIL");
+            ok = same && ok;
+        }
+        cudaFree(extra);
+        cudaFree(wide_q);
+        cudaFree(serial_q);
+    }
 
     if (timed) {
         cudaEvent_t t0, t1;
@@ -432,6 +474,9 @@ int main() {
         {"decode: full, 777", 777, 1, false, true, 0.f, false, true},
         {"decode: full, 16K", 16384, 1, false, true, 0.f, false, true},
         {"decode: full, 31 rows", 5003, 31, false, true, 0.f, false, true},
+        {"decode: verifier full, first", 0, 8, false, true, 0.f, false, true},
+        {"decode: verifier chunk boundary", 65726, 4, false, true, 0.f, false, true},
+        {"decode: verifier group4", 32768, 4, false, true, 0.f, false, true},
         {"decode: window, fp16", 3001, 3, true, false, 0.f, false, true},
         {"decode: full, fp16", 1200, 1, false, false, 0.f, false, true},
         {"decode: full, sink above", 60000, 1, false, true, 16.f, false, true},

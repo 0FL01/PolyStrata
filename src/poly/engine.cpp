@@ -1714,6 +1714,8 @@ std::unique_ptr<Engine> Engine::open(const Options& o) {
     // Clover is a qwen35moe model trained to also guess a block of tokens at once (Qwen35)
     const bool qwen35 = name == "qwen35moe" || name == "clover_moe";
     const bool inkling2 = is_inkling2_architecture(name);
+    if (!o.dflash2_model.empty() && !inkling2)
+        throw std::runtime_error("--dflash2-model requires Inkling-2-Mini on HIP");
     if (o.kv_format == KvFmt::kQ8_0 && !qwen35 && name != "kolibri1" && name != "flint" && name != "lfm2moe" &&
         !inkling2)
         throw std::runtime_error("--kv q8_0 is supported for qwen35moe, kolibri1, flint, lfm2moe and Inkling-2-Mini; "
@@ -2756,6 +2758,16 @@ void Engine::load(const Options& o) {
     const char* direct_stage = std::getenv("STRATA_POLY_DIRECT_STAGE");
     direct_stage_ = direct_stage && std::atoi(direct_stage) == 1;
     gg_ = std::make_unique<Shards>(opt_.model);
+    if (!opt_.dflash2_model.empty()) {
+        const auto* arch = gg_->get("general.architecture");
+#if defined(STRATA_USE_HIP)
+        if (!arch || !is_inkling2_architecture(arch->s))
+#endif
+            throw std::runtime_error("--dflash2-model requires Inkling on HIP");
+#if !defined(STRATA_USE_HIP)
+        (void) arch;
+#endif
+    }
     if (!opt_.draft_model.empty() && opt_.draft && opt_.window != 1) dg_ = std::make_unique<Shards>(opt_.draft_model);
 #if defined(STRATA_GPU_METAL)
     if (opt_.kv_format == KvFmt::kAuto) {
@@ -3385,6 +3397,11 @@ void Engine::reset() {
     ck(cudaMemsetAsync(state_, 0, state_n_ * sizeof(float), cs(st_)), "reset");
     pos_ = 0;
     ahead_pos_ = -1;
+    if (uses_dflash2()) {
+        verified_ = win_ = counted_routes_ = 0;
+        prepared_decode_ = -1;
+        rewind_features(0);
+    }
     if (next_) next_->reset();
 }
 
@@ -3433,6 +3450,7 @@ void Engine::load_state(const uint8_t* src, int64_t pos) {
     load_extra(src + state_n_ * sizeof(float), pos);
     pos_ = pos;
     ahead_pos_ = -1;
+    if (uses_dflash2()) rewind_features(pos);
     if (next_) next_->load_state(src + card_state_bytes(), pos);
 }
 
@@ -3809,6 +3827,13 @@ void Engine::lin_raw(const Dev& w, const float* x, float* y, int n, const void* 
     if (head_warps_ && n == 1 && w.type == GGML_TYPE_Q6_K && w.p == output_.p &&
         kernels::native_q6_k_mmvq_warps(w.p, xq, y, w.n_in, w.n_out, st_))
         return;
+    if (exact_window_ && w.type == GGML_TYPE_Q8_0 && n == 8 && w.n_out >= 8192) {
+        const size_t token = kernels::native_q8_1_bytes(w.n_in);
+        for (int i = 0; i < n; ++i)
+            kernels::native_mmvq((int) w.type, w.p, (const uint8_t*) xq + (size_t) i * token,
+                                 y + (size_t) i * w.n_out, w.n_in, w.n_out, 1, st_);
+        return;
+    }
     // A guesser's windows and its own block: a few rows, each weight block read once for all of them.  The Q6_K head
     // for any of them (Inkling's 4-token window: 2.0 ms a round against native_mmvq()'s 3.8, RX 6700 XT); Q8_0 only
     // for eight rows of a tall matrix (the drafter's block: 132 against 185 us at 9216 x 2304; at four rows 84
@@ -3826,6 +3851,14 @@ void Engine::lin_raw(const Dev& w, const float* x, float* y, int n, const void* 
 }
 
 void Engine::router_scores(const Layer& L, int n) {
+#if defined(STRATA_USE_HIP)
+    if (exact_window_ && n > 1 && wave_gemv_ && L.gate_inp.type == kTypeF32 && L.gate_inp.scale == 1.f &&
+        L.gate_inp.n_in == 2304 && L.gate_inp.n_out == 128) {
+        route_dual_done_ = false;
+        inkling_verifier_router(fp(L.gate_inp), xn_, rl_, n, st_);
+        return;
+    }
+#endif
     // STRATA_INKLING_ROUTE_DUAL: one token's scores also land in h_rl_ and the gemv's input row (the normed
     // experts' input) in h_x_, the host's copies, in the gemv's own launch - moe_router() then launches no
     // copy2 for them.  The product's sums are the plain path's own (the copies ride the same kernel).
@@ -4318,8 +4351,13 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
                 const size_t e = (size_t) ids[k];
                 // a block's guesses are not the answer's tokens: the cache is not filled by them
                 if (!block_pass_) {
-                    ++use_[(size_t) il * n_expert_ + e];
-                    if (n_swap_ > 0) recent_[(size_t) il * n_expert_ + e] += use_weight(il);
+                    const size_t id = (size_t) il * n_expert_ + e;
+                    if (exact_window_)
+                        verify_routes_[(size_t) (at + t)].push_back(2 * id + (L.slot[e] != nullptr));
+                    else {
+                        ++use_[id];
+                        if (n_swap_ > 0) recent_[id] += use_weight(il);
+                    }
                 }
                 // NVFP4's down scale goes on the weight (ExpertScales)
                 const float we = L.h_s_down.empty() ? w[k] : w[k] * L.h_s_down[e];
@@ -4358,8 +4396,10 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
             n_host = kept;
         }
         if (pool_) pool_take(L, il, host, n_host);
-        stats_.gpu_experts += n_cached;
-        stats_.cpu_experts += n_host;
+        if (!exact_window_) {
+            stats_.gpu_experts += n_cached;
+            stats_.cpu_experts += n_host;
+        }
         // STRATA_INKLING_TAIL_MOE: the model's layer_tail() sums these rows in its own launch.  One token's
         // experts only (the record carries no rows), all of them or none: a fallback visit writes fo_ as before.
         static_assert(kMaxUsed == TailSum::kMax, "the record is sized for every model's experts");
@@ -4489,7 +4529,12 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
                 if (!pool_help()) std::this_thread::yield();
             }
         };
-        cpu_experts(*workers_, host, n_host, m, (int) L.gu_type, (int) L.u_type, (int) L.d_type, n_embd_, n_ff_exp_,
+        static const bool draft_reuse = [] {
+            const char* v = std::getenv("STRATA_DFLASH2_CPU_REUSE");
+            return v && std::string_view(v) == "1";
+        }();
+        const auto compute = exact_window_ && m >= 3 && draft_reuse ? cpu_experts_reuse : cpu_experts;
+        compute(*workers_, host, n_host, m, (int) L.gu_type, (int) L.u_type, (int) L.d_type, n_embd_, n_ff_exp_,
                     h_x_ + (size_t) at * e_row, limit, gelu_, cpu, meanwhile, any_late ? late : nullptr, &wait, situ_);
         pool_reads_.clear();
         stats_.cpu_ms += ms_since(t0);
@@ -5115,7 +5160,7 @@ void Engine::run(const int32_t* tokens, int n) {
     if (n < 1 || n > rows_) throw std::logic_error("eval takes 1 to max_rows() tokens");
     if (pos_ + n > opt_.max_context)
         throw std::runtime_error("the context is full (" + std::to_string(opt_.max_context) + " tokens)");
-    cover(pos_ + n);
+    cover(pos_ + (exact_window_ ? 1 : n));
 
     // h_r_ and h_cpu_ may still be the source of the previous call's copies
     ck(cudaStreamSynchronize(cs(st_)), "eval");
@@ -5127,9 +5172,13 @@ void Engine::run(const int32_t* tokens, int n) {
     // STRATA_FREEZE_EXPERTS holds the split still for the whole request instead: the request's first token
     // claims the arrivals and asks for the trades, and the tokens after it see the cache as it was then.
     // follow() above takes the arrivals it finds, so the freeze only has to keep the later ones from asking.
-    if (n_swap_ > 0) {
+    if (prepared_decode_ >= 0) {
+        if (prepared_decode_ != pos_ || n != 1 || !serial_decode_)
+            throw std::logic_error("DFlash2 prepared a W1 placement that must be used by the next token");
+        prepared_decode_ = -1;
+    } else if (n_swap_ > 0) {
         settle_swaps();
-        follow(n < kStageRows ? n : 0);
+        follow(exact_window_ ? 1 : n < kStageRows ? n : 0);
     }
     tok_ = tokens;
     const size_t e_row = (size_t) n_embd_, r_row = (size_t) streams() * e_row;
@@ -5698,10 +5747,11 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
         return;
     }
     // The model's output: the last token's for the logits, and every token's for the draft block.
-    if (want_logits || draft_) {
+    float* features = feature_output();
+    if (want_logits || draft_ || features) {
         const bool replay = opt_.graphs && n == 1 && want_logits && !opt_.dump;
-        const int m = draft_ ? n : 1;
-        float* h = draft_ ? hn_ + n_embd_ : xn_;
+        const int m = (draft_ || features) ? n : 1;
+        float* h = features ? features : draft_ ? hn_ + n_embd_ : xn_;
         const auto tail = [&] {
             output_rows(n - m, m, h);
             dbg("out_norm", n_layer_, h, n_embd_);
@@ -5722,6 +5772,7 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
     }
     // behind the logits: the caller has them while the card does this
     if (draft_) draft_rows(tokens, ahead_pos_ == pos_ && tokens[0] == ahead_tok_ ? 1 : 0, n);
+    if (features) features_kept(n);
     pos_ += n;
     stats_.tokens += n;
 }
@@ -5959,6 +6010,60 @@ unsigned Engine::snap_tokens(int t) const {
     return bits;
 }
 
+int Engine::verified_width(int most) const {
+    if (!uses_dflash2() || win_ || pool_ || prepared_decode_ >= 0) return 1;
+    int64_t width = std::min<int64_t>({most, opt_.window, opt_.max_context - pos_});
+    // Do not change the KV high-water mark or give up expert slots for guesses.
+    if (!kv_.empty()) width = std::min(width, kv_rows_ - pos_);
+    return (int) std::max<int64_t>(1, width);
+}
+
+void Engine::commit_routes(int row) {
+    for (size_t entry : verify_routes_[(size_t) row]) {
+        const size_t id = entry / 2;
+        if (n_swap_) recent_[id] += use_weight((int) (id / n_expert_));
+        ++use_[id];
+        if (entry & 1) ++stats_.gpu_experts;
+        else ++stats_.cpu_experts;
+    }
+}
+
+void Engine::verified_window(const int32_t* tokens, int n) {
+    if (n < 2 || n > verified_width(n)) throw std::logic_error("unsafe DFlash2 verifier window");
+    for (auto& row : verify_routes_) row.clear();
+    struct Scope {
+        Engine& e;
+        bool cols;
+        ~Scope() { e.exact_window_ = false; e.cols_kernels_ = cols; }
+    } scope{*this, std::exchange(cols_kernels_, true)};
+    exact_window_ = true;
+    window(tokens, n);
+    counted_routes_ = 0;
+    verified_ = n_swap_ && !freeze_experts_ ? 1 : n;
+}
+
+bool Engine::verify_next(int row) {
+    if (row <= 0 || row >= win_ || !verified_ || prepared_decode_ >= 0)
+        throw std::logic_error("DFlash2 verifier has no next row");
+    if (row < verified_) return true;  // frozen layout or no swaps
+    if (row != verified_ || counted_routes_ != row - 1)
+        throw std::logic_error("DFlash2 verifier rows must be checked in order");
+    // The caller already emitted row's token and will feed it even if we must rerun it.
+    // Publish the preceding row's recency before doing the next real W1 transition.
+    commit_routes(counted_routes_++);
+    settle_swaps();
+    follow(1);
+    for (size_t entry : verify_routes_[(size_t) row]) {
+        const size_t id = entry / 2;
+        if ((layers_[id / n_expert_].slot[id % n_expert_] != nullptr) != bool(entry & 1)) {
+            prepared_decode_ = pos_ + row;
+            return false;
+        }
+    }
+    ++verified_;
+    return true;
+}
+
 // The recurrent layers are the only ones a wrong guess would spoil: every other layer's row of a position is
 // written again when the position gets its real token.  So they leave the state as it was after tokens of the
 // window (snap_, snap_tokens()), and keep() puts back the one after the last token that was right.
@@ -5995,7 +6100,8 @@ void Engine::window(const int32_t* tokens, int t) {
         next_->window(tokens, t);
         return;
     }
-    float* h = draft_ ? hn_ + n_embd_ : xn_;
+    float* features = feature_output();
+    float* h = features ? features : draft_ ? hn_ + n_embd_ : xn_;
     output_rows(0, t, h);
     lin(output_, h, wlogits_, t);
     finish_logits(wlogits_, t);
@@ -6032,6 +6138,7 @@ void Engine::took_way(int t, double ms) {
 
 void Engine::keep(int n) {
     if (n < 1 || n > win_) throw std::logic_error("keep takes 1 to the window's tokens");
+    if (verified_ && n > verified_) throw std::logic_error("cannot keep unverified DFlash2 rows");
     OnCard here(device_, split_);
     // The next card reads the window's rows again for the tokens it puts through its layers again: a right token's
     // row is the same, whatever came after it.
@@ -6041,6 +6148,7 @@ void Engine::keep(int n) {
         // did, and the state with them.
         const unsigned left = snap_tokens(win_) & ((1u << n) - 1u);   // the right tokens that left their state
         const int from = (int) std::bit_width(left);                  // the tokens the state at hand is after
+        if (verified_ && from != n) throw std::logic_error("exact verifier needs every recurrent snapshot");
         ck(cudaMemcpyAsync(state_, snap_ + size_t(std::popcount(left) - 1) * rec_n_, rec_n_ * sizeof(float),
                            cudaMemcpyDeviceToDevice, cs(st_)),
            "keep");
@@ -6054,6 +6162,12 @@ void Engine::keep(int n) {
             }
             pos_ -= from;
         }
+    }
+    if (verified_) {
+        features_kept(n);
+        while (counted_routes_ < n) commit_routes(counted_routes_++);
+        kv_reach_ = std::max(kv_reach_, pos_ + n);
+        verified_ = counted_routes_ = 0;
     }
     if (draft_) draft_rows(win_tok_, ahead_pos_ == pos_ && win_tok_[0] == ahead_tok_ ? 1 : 0, n);
     if (next_) next_->keep(n);
