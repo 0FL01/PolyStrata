@@ -33,7 +33,7 @@ def report(run, control):
                    accepted=t['accepted'], offered=t['offered'], reused=t['reused'],
                    retained=t.get('kept_verified_rows'), verified=t.get('verified_rows'),
                    gpu_routes=t['gpu_routes'], all_routes=t['all_routes'], initial_slots=result['slots'],
-                   peak_worker_rss_mib=result['peak_rss_kib'] / 1024,
+                   peak_command_rss_mib=result['peak_rss_kib'] / 1024,
                    min_device_free_mib=min(free), rounds=result['rounds_w1_lookup_draft_replayed'][i]
                    if result['rounds_w1_lookup_draft_replayed'] else None)
         if control:

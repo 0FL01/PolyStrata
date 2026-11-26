@@ -31,9 +31,13 @@ and unqualified binaries stay in `polystrata-runs/venture-v2/`.
 E4 K3 and E8 K7 charged 24.26 and 24.21 ms per fed speculative row; E8 reduced ask cost but
 verified 741 rows for 549 retained vs 582 for 502. Both matched their own W1; the different
 placements produced different trajectories. Direct stream markers found 357 ms of uncovered
-CPU tail in the short K3 profile. Test pricing by layer and actual bytes, overlap without lost
-GPU routes, and warm RESTORE. Wider alone is not a new default. P4 remains closed while
-qualification runs; the installed W1 executable and inactive-on-entry service are unchanged.
+CPU tail in the short K3 profile. At 128K the highest byte price cut transfers by 39% without
+improving time to correct. `f90a3430` overlaps 44/101 ms of H2D without changing ranking; on the
+matched 64K coding task it trimmed 20.88 to 20.58 s. Natural-reserve SSE took longer on both
+seeds. Keep layer joins opt-in. V4 funded 180 more experts near 199K but the initial native
+V4 K3 verifier lost to dense. The private persisted-draft layout can offer after a short restore;
+it is not a portable image of expert placement. Keep P4 closed and the installed W1 and service
+unchanged; judge further work against **both** installed W1 and synchronous E4, not a kernel alone.
 
 | Required outcome | Primary evidence | State |
 | --- | --- | --- |
