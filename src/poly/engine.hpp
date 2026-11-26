@@ -117,6 +117,7 @@ struct Options {
     std::string draft_model;      ///< a file of the same model to take that block from, when the model's has none;
                                   ///< for an architecture that guesses with a model of its own, that model's file
     std::string dflash2_model;    ///< native Inkling DFlash2, independent of the DSpark --draft-model
+    bool lookup_epoch = false;    ///< allocate the Inkling E4 verifier without a model drafter
     int tail_skip = 0;            ///< a routed expert outside VRAM that every token of a call ranks this far down or
                                   ///< further (the router's first choice is 0) is left out (--tail-skip,
                                   ///< STRATA_ROUTE_TAIL_SKIP); 0: none is
@@ -323,6 +324,8 @@ public:
     void keep(int n);
 
     bool uses_dflash2() const { return !opt_.dflash2_model.empty(); }
+    bool uses_lookup_epoch() const { return opt_.lookup_epoch; }
+    bool uses_exact_verifier() const { return uses_dflash2() || uses_lookup_epoch(); }
     virtual bool dflash2_ready() const { return false; }
     virtual bool dflash2_failed() const { return false; }
     virtual void dflash2_propose(int32_t, int, int32_t*) { throw std::logic_error("no DFlash2 drafter"); }

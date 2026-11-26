@@ -652,7 +652,9 @@ struct Session {
         t0 = Clock::now();
         std::vector<int32_t> history = kept.seq();
         std::replace_if(history.begin(), history.end(), [](int32_t t) { return t < 0; }, pad);
-        if (look) {
+        const bool lookup_epoch = engine.uses_lookup_epoch();
+        const bool use_lookup = look && (!lookup_epoch || !pictures_any);
+        if (use_lookup) {
             repeats.reset();
             repeats.append(history.data(), history.size());
         }
@@ -666,7 +668,7 @@ struct Session {
             on_token(t);
             ++r.produced;
             history.push_back(t);
-            if (look) repeats.append(t);
+            if (use_lookup) repeats.append(t);
             if (is_eos(t)) r.finish = "stop";
             else if (stop.load()) r.finish = "cancel";
             else return r.produced < max_new;
@@ -677,7 +679,7 @@ struct Session {
             int32_t w[strata::spec::DraftPolicy::kMaxT], d[strata::spec::DraftPolicy::kMaxT];
             dflash2::Policy df_policy(dflash2_budget_ms);
             using DFSource = dflash2::Policy::Source;
-            int df_serial = 0, df_draft = 0, df_lookup = 0, df_replay = 0;
+            int df_serial = 0, df_draft = 0, df_lookup = 0, df_replay = 0, lookup_w4 = 0;
             const bool dspark = engine.uses_dspark();
             const int block_window = engine.guesses_at_once() ? most : draft_most;
             int32_t t = pick(engine.logits());   // picked, and not shown yet
@@ -685,15 +687,19 @@ struct Session {
                 // t goes into the model now, and with it guesses at what follows when there are any that pay
                 const Clock::time_point round = Clock::now();
                 const int64_t ctx_left = engine.max_context() - engine.pos();
-                if (engine.uses_dflash2()) {
+                if (engine.uses_exact_verifier()) {
                     const int desired = (int) std::min<int64_t>(dflash2_most, max_new - r.produced);
-                    const bool ready = desired > 1 && engine.dflash2_ready();
+                    const bool ready = !lookup_epoch && desired > 1 && engine.dflash2_ready();
                     const bool adaptive = dflash2_budget_ms > 0.;
-                    const int capacity = (ready || look) ? engine.verified_width(desired) - 1 : 0;
-                    const int lookup_k = look && capacity > 0 ? repeats.propose(capacity, w + 1) : 0;
+                    const int capacity = (ready || use_lookup) ? engine.verified_width(desired) - 1 : 0;
+                    const int lookup_k = use_lookup && capacity > 0 ? repeats.propose(capacity, w + 1) : 0;
                     const int match = lookup_k ? repeats.last_match() : 0;
-                    const auto use = adaptive ? df_policy.choose(capacity, lookup_k, match, ready) :
-                        dflash2::Policy::Pick{capacity ? DFSource::DFlash2 : DFSource::W1, capacity};
+                    dflash2::Policy::Pick use;
+                    if (lookup_epoch) {
+                        // Verify three known suffix tokens when all fit; otherwise try just one. No model ask.
+                        if (match >= 6) use = {DFSource::Lookup, lookup_k == 3 ? 3 : 1};
+                    } else if (adaptive) use = df_policy.choose(capacity, lookup_k, match, ready);
+                    else use = {capacity ? DFSource::DFlash2 : DFSource::W1, capacity};
                     if (!use.k) {
                         engine.eval_decode(t);
                         kept.read(&t, 1);
@@ -710,7 +716,10 @@ struct Session {
                         engine.dflash2_propose(t, use.k, w + 1);
                         proposal_ms = ms_since(began);
                         ++df_draft;
-                    } else ++df_lookup;
+                    } else {
+                        ++df_lookup;
+                        if (lookup_epoch && width == 4) ++lookup_w4;
+                    }
                     engine.verified_window(w, width);
                     int fed = 1;
                     bool more = true;
@@ -810,6 +819,9 @@ struct Session {
             if (engine.uses_dflash2())
                 std::fprintf(stderr, "strata-poly: DFlash2 rounds W1=%d lookup=%d draft=%d placement_replays=%d\n",
                              df_serial, df_lookup, df_draft, df_replay);
+            if (lookup_epoch)
+                std::fprintf(stderr, "strata-poly: lookup-epoch rounds W1=%d W2=%d W4=%d placement_replays=%d\n",
+                             df_serial, df_lookup - lookup_w4, lookup_w4, df_replay);
         }
         r.decode_ms = ms_since(t0);
         return r;
@@ -1436,6 +1448,7 @@ void usage() {
                  "                         the block guesses 3, and 4 for GLM 5.3 Flash)\n"
                  "  --lookup N             guess what followed an earlier repeat of the last N or more tokens\n"
                  "                         (default 3, 0 = never)\n"
+                 "  --lookup-epoch         use the gfx1031 Inkling E4 exact verifier with --no-draft and --lookup 0 or 6\n"
                  "  --no-draft             do not run the block that guesses ahead\n"
                  "  --draft-model FILE     a file of the same model to take that block from, when --model has none;\n"
                  "                         for Gemma 4, its draft model (a gemma4-assistant file); for\n"
@@ -1599,6 +1612,7 @@ int main(int argc, char** argv) {
         }
         else if (a == "--window") o.window = std::atoi(val());
         else if (a == "--lookup") lookup = std::atoi(val());
+        else if (a == "--lookup-epoch") o.lookup_epoch = true;
         else if (a == "--draft-max") {
             const std::string_view v = val();
             const auto [end, ec] = std::from_chars(v.data(), v.data() + v.size(), draft_max);
@@ -1681,6 +1695,11 @@ int main(int argc, char** argv) {
     }
     if (dflash2_budget_ms > 0. && o.dflash2_model.empty()) {
         std::fputs("strata-poly: --dflash2-budget-ms requires --dflash2-model\n", stderr);
+        return 2;
+    }
+    if (o.lookup_epoch && (o.draft || !o.draft_model.empty() || !o.dflash2_model.empty() || draft_max >= 0 ||
+                           (lookup != 0 && lookup != 6))) {
+        std::fputs("strata-poly: --lookup-epoch requires --no-draft and --lookup 0 or 6\n", stderr);
         return 2;
     }
     // --check-batch: K sequences growing together would take VRAM from the expert cache that the single runs had,

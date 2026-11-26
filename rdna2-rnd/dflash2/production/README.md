@@ -11,6 +11,21 @@ Use `STRATA_DFLASH2_CPU_REUSE=1` only on the checked Zen 3 build with matching g
 This mode does not combine DFlash2 with K256/V4 or with a second drafter. SAVE/RESTORE preserves the
 target session; after restore, draft proposals resume after 2,048 newly evaluated rows.
 
+### Verify repeated text without a drafter
+
+For coding continuations with repeated text and short tool returns, `--lookup-epoch` can verify
+a suffix from the target's own history. It loads **no draft weights** and needs **no draft warmup**
+after RESTORE. With at least six matching tokens it verifies up to three guesses inside the
+current expert epoch. With no suitable match it decodes one token. Target sampling is unchanged.
+
+On the dense Q8_0 gfx1031 worker use `STRATA_INKLING_DECODE=1`, `STRATA_INKLING_COMPACT_SWA=1`,
+`STRATA_EXPERT_EPOCH=4`, active expert swaps, and
+`--lookup-epoch --no-draft --ram-experts-mib -1 --window 4 --lookup 6`. Use `--lookup 0`
+with the other options unchanged for a W1 control with the same verifier scratch. Don't combine
+this mode with layer joins, DSpark or DFlash2. Omit `--lookup-epoch` for the normal worker.
+In paired 128K and 197K coding tasks it cut time to correct by 3.7–4.1%; in 128K reasoning it
+took 5.3% longer. [Measured runs and limitations](../venture-v2/README.md).
+
 ## Wire quant screen
 
 `measure.py` exercised native `GEN` and timestamped real `T` lines at the pipe reader. These are ID

@@ -699,6 +699,19 @@ void Inkling2::load_geometry() {
             throw std::runtime_error("--max-context exceeds the DFlash2 position limit");
         opt_.window = window > 0 ? window : std::min(kDsBlock, opt_.prompt_batch);
     }
+    if (uses_lookup_epoch()) {
+        const char* compact = std::getenv("STRATA_INKLING_COMPACT_SWA");
+        if (expert_epoch_ != 4 || !compact || std::strcmp(compact, "1") || !decode_ || !q8() || k256_ || v4_ ||
+            drafter || !kernels::gfx_arch_is(p.gcnArchName, "gfx1031") || device != 0 ||
+            !opt_.gpu_experts || opt_.ram_experts_mib != -1 || opt_.prompt_batch < 4 ||
+            (window != 0 && window != 4))
+            throw std::runtime_error("--lookup-epoch needs full host experts with GPU caching, dense Q8 compact SWA, "
+                                     "fixed epoch 4 and one gfx1031 Inkling decode worker");
+        if (expert_layer_join_)
+            throw std::runtime_error("--lookup-epoch cannot be combined with STRATA_EXPERT_LAYER_JOIN=1");
+        opt_.window = 4;
+        std::fputs("strata-poly: lookup-epoch verifier active (E4, W1/W2/W4, no draft model)\n", stderr);
+    }
     if (drafter) {
         const char* reuse_v = std::getenv("STRATA_INKLING_DSPARK_REUSE_V");
         ds_reuse_v_ = kernels::gfx_arch_is(p.gcnArchName, "gfx1031") &&
@@ -1420,7 +1433,7 @@ void Inkling2::assign_scratch() {
     scores_ = fbuf(inkling::plain_score_floats(attend_tiles_));
     partial_ = fbuf(inkling::plain_partial_floats(attend_tiles_));
     if (decode_) {
-        chunks_ = fbuf((uses_dflash2() ? inkling::verifier_group4_floats() : inkling::decode_floats()) +
+        chunks_ = fbuf((uses_exact_verifier() ? inkling::verifier_group4_floats() : inkling::decode_floats()) +
                        (k256_ && inkling::k256_worthwhile(opt_.max_context)
                                                  ? inkling::k256_scratch_floats() : 0));
         taps2_ = fbuf(n * kKv * kTaps);
@@ -1617,9 +1630,9 @@ void Inkling2::attention(const Block& b, int n) {
     if (flash_ && n >= kStageRows) inkling::attend_flash(a, cs(st_));
     else if (decode_ && n < kStageRows) {
         if (exact_window_ && n > 1)
-            inkling::attend_verifier(a, chunks_, uses_dflash2() ? inkling::verifier_group4_floats()
-                                                                : inkling::decode_floats(),
-                                     cs(st_), attq_, uses_dflash2());
+            inkling::attend_verifier(a, chunks_, uses_exact_verifier() ? inkling::verifier_group4_floats()
+                                                                      : inkling::decode_floats(),
+                                     cs(st_), attq_, uses_exact_verifier());
         else inkling::attend_decode(a, chunks_, cs(st_), attq_, ds_attend_group_);
     }
     else inkling::attend_plain(a, scores_, partial_, attend_tiles_, cs(st_));

@@ -1715,6 +1715,8 @@ void Engine::load_moe(int il, bool shared) {
 
 // The engine for a model file: its general.architecture says which.
 std::unique_ptr<Engine> Engine::open(const Options& o) {
+    if (o.lookup_epoch && (o.draft || !o.draft_model.empty() || !o.dflash2_model.empty()))
+        throw std::runtime_error("--lookup-epoch requires --no-draft and does not load a drafter");
     const Shards file(o.model);
     const MetaValue* arch = file.get("general.architecture");
     const std::string name = arch ? arch->s : std::string();
@@ -1723,6 +1725,8 @@ std::unique_ptr<Engine> Engine::open(const Options& o) {
     const bool inkling2 = is_inkling2_architecture(name);
     if (!o.dflash2_model.empty() && !inkling2)
         throw std::runtime_error("--dflash2-model requires Inkling-2-Mini on HIP");
+    if (o.lookup_epoch && !inkling2)
+        throw std::runtime_error("--lookup-epoch requires Inkling-2-Mini on HIP");
     if (o.kv_format == KvFmt::kQ8_0 && !qwen35 && name != "kolibri1" && name != "flint" && name != "lfm2moe" &&
         !inkling2)
         throw std::runtime_error("--kv q8_0 is supported for qwen35moe, kolibri1, flint, lfm2moe and Inkling-2-Mini; "
@@ -3473,11 +3477,11 @@ void Engine::reset() {
     ck(cudaMemsetAsync(state_, 0, state_n_ * sizeof(float), cs(st_)), "reset");
     pos_ = 0;
     ahead_pos_ = -1;
-    if (uses_dflash2()) {
+    if (uses_exact_verifier()) {
         verified_ = win_ = counted_routes_ = 0;
         prepared_decode_ = -1;
-        rewind_features(0);
     }
+    if (uses_dflash2()) rewind_features(0);
     if (next_) next_->reset();
 }
 
@@ -6108,7 +6112,7 @@ unsigned Engine::snap_tokens(int t) const {
 }
 
 int Engine::verified_width(int most) const {
-    if (!uses_dflash2() || win_ || pool_ || prepared_decode_ >= 0) return 1;
+    if (!uses_exact_verifier() || win_ || pool_ || prepared_decode_ >= 0) return 1;
     int64_t width = std::min<int64_t>({most, opt_.window, opt_.max_context - pos_});
     if (expert_epoch_) {
         // At an adaptive publication the batch size is not known yet. Four rows always fit.
@@ -6131,7 +6135,8 @@ void Engine::commit_routes(int row) {
 }
 
 void Engine::verified_window(const int32_t* tokens, int n) {
-    if (n < 2 || n > verified_width(n)) throw std::logic_error("unsafe DFlash2 verifier window");
+    if (n < 2 || n > verified_width(n))
+        throw std::logic_error(uses_lookup_epoch() ? "unsafe lookup verifier window" : "unsafe DFlash2 verifier window");
     for (auto& row : verify_routes_) row.clear();
     struct Scope {
         Engine& e;
