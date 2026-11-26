@@ -1,14 +1,13 @@
-<h1 align="center">RedStrata</h1>
+<h1 align="center"><img src="docs/media/redstrata-logo.svg" width="56" alt=""> RedStrata</h1>
 
 <p align="center"><b>Hardware-aware LLM inference</b><br>
 RDNA2 · HIP · Hybrid CPU/GPU · Long-context agents</p>
 
-**English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Türkçe](README.tr.md)
-
 <p align="center"><b>Run Inkling-2-Mini on AMD RDNA2</b><br>
 Local inference with HIP and system RAM · free and open source</p>
 
-This PolyStrata fork builds on [Strata](https://github.com/Niko1221/Strata) and targets AMD RDNA2.
+RedStrata is an AMD RDNA2-focused fork of PolyStrata, which builds on
+[Strata](https://github.com/Niko1221/Strata).
 [Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini) runs natively in `strata-poly` on Linux
 using one Radeon GPU. Frequently used expert weights stay in VRAM; the CPU runs the experts that stay in system RAM.
 
@@ -16,6 +15,23 @@ using one Radeon GPU. Frequently used expert weights stay in VRAM; the CPU runs 
   ID. One request runs at a time.
 - **Images:** an [optional CPU encoder](tools/vision/INKLING.md) stays loaded in system RAM instead of using VRAM.
 - **Context:** growing Q8_0 key/value cache with a configured limit of 200,000 tokens on the tested setup.
+
+## What this fork works on
+
+- **Hybrid execution and memory:** Inkling runs across the GPU and CPU, with expert residency adapting to the
+  available VRAM. The deployed configuration uses dense Q8 global attention, exact compact sliding-window attention
+  (SWA) and the freed space for whole experts. [Implementation and deployment evidence](docs/goals/2026-11-25-adaptive-global-kv/production.md).
+- **Long agent sessions:** session SAVE/RESTORE and prefix reuse support tool-return continuations. The project
+  measures coding and reasoning tasks, tool use, time to a correct answer, and streaming latency as well as tokens/s.
+  [Agent-mode measurements](docs/goals/2026-11-25-tideglass-agent-mode.md).
+- **Experimental decode and KV:** native HIP DFlash2, speculative verification, expert-admission policies and
+  compact or sparse global KV have been evaluated as opt-ins, not universal speedups. The DFlash2 candidate did not
+  pass the interactive deployment gate; the installed service remains on ordinary W1 decode. Approximate KV modes
+  are also not selected in that service. [Decode results](docs/goals/2026-11-26-native-dflash2.md) ·
+  [KV results](docs/goals/2026-11-25-adaptive-global-kv/production.md).
+
+These results are specific to the measured RX 6700 XT, Ryzen 7 5700X and Inkling-2-Mini configurations; they do not
+establish a general speed or answer-quality improvement. Inherited models and backends are not the focus of this fork.
 
 ## Inkling-2-Mini performance
 
@@ -497,8 +513,8 @@ Ornith 1.5 is by ornith-ai, in
 [u/Sensitive_Song4219](https://www.reddit.com/r/LocalLLM/comments/1x22inc/comment/pf3r111/) found that it runs on PolyStrata.
 MiniCPM-V 4.7 35B-A3B is by [OpenBMB](https://huggingface.co/openbmb/MiniCPM-V-4.7-35B-A3B-gguf), in their own
 quantization; [iMilnb](https://github.com/iMilnb) brought it to PolyStrata.
-PolyStrata is built on
+RedStrata is a fork of PolyStrata, which is built on
 [Strata](https://github.com/Niko1221/Strata) by Niko1221 and its contributors, and uses parts of
 [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp). All credits:
-[docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#credits). PolyStrata is open source under the [MIT License](LICENSE). A few
+[docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#credits). RedStrata is open source under the [MIT License](LICENSE). A few
 parts and every model have their own licenses ([which ones](docs/HOW_IT_WORKS.md#license)).
