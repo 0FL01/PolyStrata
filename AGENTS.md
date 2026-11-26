@@ -28,6 +28,9 @@ offers the same steps as tools.
   once writers and benchmarks stop, run `~/.local/bin/polystrata-dedupe <run>` without sudo.
 - How the engine works, every measured number, the API and all settings: [docs/DETAILS.md](docs/DETAILS.md) and
   the [paper](docs/paper/Strata-Paper.pdf).
+- An RDNA2 optimization covers all of gfx1030–gfx1036, never one gfx name: gate it with `kernels::gfx_arch_is_rdna2()`
+  on the host, ggml's `RDNA2` / `GGML_CUDA_CC_IS_RDNA2` in device code and `STRATA_HIP_HAS_RDNA2` in CMake.
+  Gate on a single card only for a measured reason, and state it in a comment.
 - Build the affected HIP target and run the closest relevant checks on RDNA2; report the GPU tested. See
   [docs/AMD_HIP.md](docs/AMD_HIP.md) for build and validation.
 - For each inference optimization, compare generated token IDs before and after on the same GPU and model,
