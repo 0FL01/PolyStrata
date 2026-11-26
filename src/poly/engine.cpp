@@ -628,6 +628,7 @@ struct Engine::Swap {
     int il = 0, e = 0;
     uint8_t* slot = nullptr;       // where it goes in VRAM: the slot of the expert it replaces
     bool adds = false;             // the slot was empty (grow_cache()): the cache holds one more
+    bool layer_join = false;       // a deferred epoch batch; the follower sends these in layer order
     cudaEvent_t done = nullptr;    // marks its upload
     int32_t from = -1;             // the pool_ slot it is copied from, held (pool_pin_) until it has arrived
     bool mapped = true;            // else read from the files
@@ -1445,6 +1446,12 @@ size_t Engine::trim_card_kv(int64_t end) {
 // Every expert on its way into the cache arrives and takes its slot.
 void Engine::settle_swaps() {
     if (n_swap_ == 0) return;
+    if (expert_join_layers_) {
+        // An exception while selecting trades may have left a partially queued batch without a wakeup.
+        swap_cv_.notify_one();
+        while (expert_join_layers_) join_expert_layer(std::countr_zero(expert_join_layers_));
+        return;
+    }
     const auto failed = [&] {
         std::lock_guard<std::mutex> l(swap_m_);
         return !swap_error_.empty();
@@ -2197,6 +2204,7 @@ void Engine::resize_card_cache(int mib) {
     if (failed()) throw std::runtime_error("expert upload: " + swap_error_);
     if (swap_st_) ck(cudaStreamSynchronize(cs(swap_st_)), "resize");
     for (int j = 0; j < n_swap_; ++j) swap_[(size_t) j].at.store(Swap::kFree);
+    expert_join_layers_ = 0;
     std::fill(coming_.begin(), coming_.end(), (uint8_t) 0);
     for (Layer& L : layers_) std::fill(L.slot.begin(), L.slot.end(), nullptr);
     refill_.clear();
@@ -2481,8 +2489,12 @@ void Engine::follow_loop() {
     for (int b = 0;; b = (b + 1) % kSwapPins) {
         Swap* s = nullptr;
         swap_cv_.wait(lk, [&] {
-            for (int j = 0; j < n_swap_ && !s; ++j)
-                if (swap_[(size_t) j].at.load() == Swap::kAsked) s = &swap_[(size_t) j];
+            for (int j = 0; j < n_swap_; ++j) {
+                Swap& ask = swap_[(size_t) j];
+                if (ask.at.load() != Swap::kAsked) continue;
+                if (!s || (ask.layer_join && ask.il < s->il)) s = &ask;
+                if (!s->layer_join) break;
+            }
             return swap_quit_ || s;
         });
         if (swap_quit_) return;
@@ -2534,10 +2546,63 @@ void Engine::follow_loop() {
         lk.lock();
         if (err != cudaSuccess) {
             swap_error_ = cudaGetErrorString(err);
+            if (s->layer_join) swap_cv_.notify_all();
             return;
         }
+        const bool layer_join = s->layer_join;
         s->at.store(Swap::kSent);
+        if (layer_join) swap_cv_.notify_all();
     }
+}
+
+void Engine::publish_swap(Swap& s) {
+    const size_t ne = (size_t) n_expert_;
+    layers_[(size_t) s.il].slot[(size_t) s.e] = s.slot;
+    coming_[(size_t) s.il * ne + (size_t) s.e] = 0;
+    if (s.from >= 0) {   // the card has it now: its pool_ slot is free for another
+        const size_t v = (size_t) s.from;
+        --pool_pin_[v];
+        pool_sizes_[pool_size_of_[(size_t) s.il]].nprot -= pool_prot_[v];
+        pool_prot_[v] = 0;
+        pool_of_[(size_t) s.il * ne + (size_t) s.e] = -1;
+        pool_who_[v] = -1;
+        s.from = -1;
+        // the expert the cache gave up for it, if it is still the CPU's and of the slot's size
+        const int64_t g = s.gets;
+        if (g >= 0 && pool_of_[(size_t) g] < 0 && !kept_[(size_t) g] &&
+            !layers_[(size_t) g / ne].slot[(size_t) g % ne] &&
+            pool_size_of_[(size_t) g / ne] == pool_size_of_[(size_t) s.il]) {
+            pool_who_[v] = g;
+            pool_of_[(size_t) g] = (int32_t) v;
+            pool_tick_[v] = pool_now_;
+            pool_queue(layers_[(size_t) g / ne], (size_t) g % ne, (int32_t) v, false);
+        }
+        s.gets = -1;
+    }
+    cached_ += s.adds;
+    s.adds = false;
+    s.at.store(Swap::kFree);
+    ++stats_.swapped_experts;
+    staged_il_ = -1;   // the staging buffer holds what was not cached
+}
+
+void Engine::join_expert_layer(int il) {
+    // The complete batch was queued together. The follower sends it on one stream, in order of layer and
+    // descriptor index. The last descriptor's recorded event covers all preceding uploads for this layer.
+    const auto matches = [il](const Swap& s) { return s.layer_join && s.il == il && s.at.load() != Swap::kFree; };
+    int last = n_swap_ - 1;
+    while (last >= 0 && !matches(swap_[(size_t) last])) --last;
+    if (last < 0) throw std::logic_error("missing deferred expert uploads for Inkling layer");
+    Swap& tail = swap_[(size_t) last];
+    if (tail.at.load() != Swap::kSent) {
+        std::unique_lock<std::mutex> lk(swap_m_);
+        swap_cv_.wait(lk, [&] { return tail.at.load() == Swap::kSent || !swap_error_.empty(); });
+        if (!swap_error_.empty()) throw std::runtime_error("expert upload: " + swap_error_);
+    }
+    ck(cudaEventSynchronize(tail.done), "epoch expert layer upload");
+    for (int j = 0; j <= last; ++j)
+        if (matches(swap_[(size_t) j])) publish_swap(swap_[(size_t) j]);
+    expert_join_layers_ &= ~(uint32_t{1} << il);
 }
 
 // The cache follows what is written.  Called at the start of an eval, where nothing queued reads the cache, with
@@ -2547,7 +2612,7 @@ void Engine::follow_loop() {
 //
 // A prompt batch neither counts nor moves anything.  What a prompt routes to says no more about the answer than
 // the profile does, and moving the cache while the prompt was read cost 3% of the reading speed (measured).
-void Engine::follow(int written) {
+void Engine::follow(int written, bool layer_join) {
     {
         std::lock_guard<std::mutex> l(swap_m_);
         if (!swap_error_.empty()) throw std::runtime_error("expert upload: " + swap_error_);
@@ -2558,42 +2623,33 @@ void Engine::follow(int written) {
     int n_free = 0;
     for (int j = 0; j < n_swap_; ++j) {
         Swap& s = swap_[(size_t) j];
-        if (s.at.load() == Swap::kSent) {
+        if (s.at.load() == Swap::kSent && !s.layer_join) {
             const cudaError_t arrived = cudaEventQuery(s.done);
             if (arrived == cudaErrorNotReady) continue;
             ck(arrived, "expert upload");
-            layers_[(size_t) s.il].slot[(size_t) s.e] = s.slot;
-            coming_[(size_t) s.il * ne + (size_t) s.e] = 0;
-            if (s.from >= 0) {   // the card has it now: its pool_ slot is free for another
-                const size_t v = (size_t) s.from;
-                --pool_pin_[v];
-                pool_sizes_[pool_size_of_[(size_t) s.il]].nprot -= pool_prot_[v];
-                pool_prot_[v] = 0;
-                pool_of_[(size_t) s.il * ne + (size_t) s.e] = -1;
-                pool_who_[v] = -1;
-                s.from = -1;
-                // the expert the cache gave up for it, if it is still the CPU's and of the slot's size
-                const int64_t g = s.gets;
-                if (g >= 0 && pool_of_[(size_t) g] < 0 && !kept_[(size_t) g] &&
-                    !layers_[(size_t) g / ne].slot[(size_t) g % ne] &&
-                    pool_size_of_[(size_t) g / ne] == pool_size_of_[(size_t) s.il]) {
-                    pool_who_[v] = g;
-                    pool_of_[(size_t) g] = (int32_t) v;
-                    pool_tick_[v] = pool_now_;
-                    pool_queue(layers_[(size_t) g / ne], (size_t) g % ne, (int32_t) v, false);
-                }
-                s.gets = -1;
-            }
-            cached_ += s.adds;
-            s.adds = false;
-            s.at.store(Swap::kFree);
-            ++stats_.swapped_experts;
-            staged_il_ = -1;   // the staging buffer holds what was not cached
+            publish_swap(s);
         }
         n_free += s.at.load() == Swap::kFree;
     }
     if (written <= 0) return;
     decay_recent(written);
+    // Let the follower see the complete deferred batch at once. Otherwise it could already start a late
+    // layer while selection is still filling in the first visits. Other uploads keep descriptor order.
+    std::unique_lock<std::mutex> batch(swap_m_, std::defer_lock);
+    if (layer_join) batch.lock();
+    bool asked = false;
+    const auto ask = [&](Swap& s) {
+        s.layer_join = layer_join;
+        if (layer_join) expert_join_layers_ |= uint32_t{1} << s.il;
+        s.at.store(Swap::kAsked);
+        asked = true;
+    };
+    const auto wake = [&] {
+        if (!asked) return;
+        if (layer_join) batch.unlock();
+        else { std::lock_guard<std::mutex> l(swap_m_); }
+        swap_cv_.notify_one();
+    };
     const auto from_pool = [&](Swap& s) {   // the slot follow_loop() copies s from, held until s arrives
         s.from = -1;
         if (!pool_) return;
@@ -2603,7 +2659,6 @@ void Engine::follow(int written) {
         ++pool_pin_[(size_t) v];
     };
     // The empty slots grow_cache() left to the uploads go first.
-    bool asked = false;
     for (int j = 0; j < n_swap_ && !refill_.empty(); ++j) {
         Swap& s = swap_[(size_t) j];
         if (s.at.load() != Swap::kFree) continue;
@@ -2616,15 +2671,11 @@ void Engine::follow(int written) {
         from_pool(s);
         s.mapped = !pool_ || kept_[(size_t) s.il * ne + (size_t) s.e];
         s.takes = -1;
-        s.at.store(Swap::kAsked);
-        asked = true;
+        ask(s);
         --n_free;
     }
     if (n_free == 0) {
-        if (asked) {
-            { std::lock_guard<std::mutex> l(swap_m_); }
-            swap_cv_.notify_one();
-        }
+        wake();
         return;
     }
 
@@ -2710,13 +2761,9 @@ void Engine::follow(int written) {
             kept_[xo] = 1;
             s->takes = (int64_t) xo;
         }
-        s->at.store(Swap::kAsked);
-        asked = true;
+        ask(*s);
     }
-    if (asked) {
-        { std::lock_guard<std::mutex> l(swap_m_); }
-        swap_cv_.notify_one();
-    }
+    wake();
 }
 
 void Engine::decay_recent(int written) {
@@ -2724,14 +2771,16 @@ void Engine::decay_recent(int written) {
     for (float& r : recent_) r *= keep;
 }
 
-void Engine::decode_placement(int64_t at) {
+void Engine::decode_placement(int64_t at, bool layer_join) {
     if (expert_epoch_ && at < epoch_end_) {
         decay_recent(1);  // same clock for committed W1 rows and retained verifier rows
         return;
     }
     settle_swaps();
-    follow(1);
-    if (expert_epoch_) {
+    follow(1, layer_join);
+    if (layer_join) {
+        epoch_end_ = at + expert_epoch_;
+    } else if (expert_epoch_) {
         // follow() unpublishes victims immediately. Join the new batch here so neither
         // holes nor timing-dependent arrivals last through the epoch. No shadow VRAM slots.
         const auto before = stats_.swapped_experts;
@@ -3026,6 +3075,12 @@ void Engine::load(const Options& o) {
                                  "so the ones used most stay in RAM (--ram-experts-mib -1 maps them all)\n",
                          (double) avail / (1 << 30), (double) outside_bytes_ / (1 << 30));
         }
+    }
+    if (expert_layer_join_) {
+        if (opt_.ram_experts_mib != -1)
+            throw std::runtime_error("STRATA_EXPERT_LAYER_JOIN=1 needs full-RAM host experts");
+        std::fputs("strata-poly: STRATA_EXPERT_LAYER_JOIN=1: join epoch expert uploads at each layer's first route\n",
+                   stderr);
     }
     if (opt_.ram_experts_mib >= 0) {
         // each size of slot takes the share of the budget its experts outside VRAM have of all of those
@@ -3414,6 +3469,7 @@ void Engine::save_profile() const {
 
 void Engine::reset() {
     OnCard here(device_, split_);
+    if (expert_join_layers_) settle_swaps();
     ck(cudaMemsetAsync(state_, 0, state_n_ * sizeof(float), cs(st_)), "reset");
     pos_ = 0;
     ahead_pos_ = -1;
@@ -3465,6 +3521,7 @@ void Engine::save_last(uint8_t* dst) {
 void Engine::load_state(const uint8_t* src, int64_t pos) {
     if (pos < 0 || pos > opt_.max_context) throw std::logic_error("load_state: the position is outside the context");
     OnCard here(device_, split_);
+    if (expert_join_layers_) settle_swaps();
     ck(cudaStreamSynchronize(cs(st_)), "load state");
     ck(cudaMemcpy(state_, src, state_n_ * sizeof(float), cudaMemcpyHostToDevice), "load state");
     load_extra(src + state_n_ * sizeof(float), pos);
@@ -3627,6 +3684,7 @@ void Engine::relock() {
 }
 
 void Engine::trim() {
+    if (expert_join_layers_) settle_swaps();
     relock();   // first: under Linux the pages dropped below must not be locked
     struct Held {
         float recent;
@@ -4317,6 +4375,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
     Clock::time_point t0 = Clock::now();
     ck(cudaEventSynchronize((cudaEvent_t) ev_), "router");
     stats_.route_wait_ms += ms_since(t0);
+    if (expert_join_layers_ && (expert_join_layers_ & (uint32_t{1} << il))) join_expert_layer(il);
     if (block_pass_) route_block(il, h_rl_, n);
     if (pool_ && prompt_rows_ >= 4096 && !block_pass_) {
         rekeep();
@@ -5176,7 +5235,8 @@ void* Engine::record(F&& work) {
 }
 
 // n tokens from pos() through every layer.  The sequence is not longer for it: the caller says by how much.
-void Engine::run(const int32_t* tokens, int n) {
+void Engine::run(const int32_t* tokens, int n) try {
+    if (expert_join_layers_) settle_swaps();
     if (n < 1 || n > rows_) throw std::logic_error("eval takes 1 to max_rows() tokens");
     if (pos_ + n > opt_.max_context)
         throw std::runtime_error("the context is full (" + std::to_string(opt_.max_context) + " tokens)");
@@ -5196,7 +5256,8 @@ void Engine::run(const int32_t* tokens, int n) {
             throw std::logic_error("DFlash2 prepared a W1 placement that must be used by the next token");
         prepared_decode_ = -1;
     } else if (n_swap_ > 0 && expert_epoch_ && (serial_decode_ || exact_window_)) {
-        decode_placement(pos_);
+        // Only these small Inkling calls read the epoch layout through moe() on every physical layer.
+        decode_placement(pos_, expert_layer_join_ && n < kStageRows);
     } else if (n_swap_ > 0) {
         settle_swaps();
         follow(exact_window_ ? 1 : n < kStageRows ? n : 0);
@@ -5216,7 +5277,11 @@ void Engine::run(const int32_t* tokens, int n) {
     }
     if (n < kStageRows) copy2(h_r_, r_, n * (int) r_row, nullptr, nullptr, 0, st_);
     else ck(cudaMemcpyAsync(r_, h_r_, (size_t) n * r_row * sizeof(float), cudaMemcpyHostToDevice, cs(st_)), "embed");
-    if (looped_) return run_visits(n);
+    if (looped_) {
+        run_visits(n);
+        if (expert_join_layers_) throw std::logic_error("Inkling call left deferred expert layers unvisited");
+        return;
+    }
 
     // A token alone, or a window of guessed ones, hands the card the same launches every time, some thirty a
     // layer up to the router, and they cost this thread more than the card.  They are recorded once, a graph a
@@ -5390,6 +5455,9 @@ void Engine::run(const int32_t* tokens, int n) {
         else if (!on_card(il, n, (size_t) n - 1) && moe(L, il, n)) moe_add(n);
         tail(il, n, (size_t) n - 1);
     }
+} catch (...) {
+    if (expert_join_layers_) settle_swaps();
+    throw;
 }
 
 // A row a sequence.  A layer's head is the sequence's own: its row of the buffers (shift_rows()) with the sequence

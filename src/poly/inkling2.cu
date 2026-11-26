@@ -682,6 +682,12 @@ void Inkling2::load_geometry() {
         }
         std::fprintf(stderr, "strata-poly: STRATA_EXPERT_EPOCH=%s: publish expert trades at decode boundaries\n", value);
     }
+    if (const char* value = std::getenv("STRATA_EXPERT_LAYER_JOIN"); value && std::strcmp(value, "1") == 0) {
+        static_assert(kPhysical <= 32, "the deferred expert mask fits all physical Inkling layers");
+        if (expert_epoch_ <= 0 || !opt_.gpu_experts || !kernels::gfx_arch_is(p.gcnArchName, "gfx1031"))
+            throw std::runtime_error("STRATA_EXPERT_LAYER_JOIN=1 needs gfx1031 Inkling decode with fixed expert epochs");
+        expert_layer_join_ = true;
+    }
     clamp_exp_.assign(kPhysical + 1, INFINITY);
     if (uses_dflash2()) {
         if (!decode_ || !q8() || k256_ || v4_ || drafter ||

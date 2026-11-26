@@ -643,9 +643,12 @@ protected:
     void moe_rows(Layer& L, int il, int n);
     void stage(const Layer& L, const int32_t* experts, int m, void* stream, bool alone = false);
     void mind_memory();
-    void follow(int written);
+    struct Swap;
+    void follow(int written, bool layer_join = false);
+    void publish_swap(Swap& s);
+    void join_expert_layer(int il);
     void decay_recent(int written);
-    void decode_placement(int64_t at);
+    void decode_placement(int64_t at, bool layer_join = false);
     void follow_loop();
     void embed(int32_t token, float* dst) const;
     void dbg(const char* name, int il, const float* dev, int n);
@@ -770,6 +773,8 @@ protected:
     bool serial_decode_ = false;   ///< eval_decode(), never a prompt predictor or a verifier window
     int expert_epoch_ = 0;         ///< Inkling decode: 0 = stock follower, -1 = adaptive, otherwise rows per epoch
     int64_t epoch_end_ = -1;       ///< first row allowed to trade again; independent of speculative accept length
+    bool expert_layer_join_ = false;   ///< gfx1031 Inkling fixed epochs in full-RAM host mode
+    uint32_t expert_join_layers_ = 0;  ///< layers with deferred arrivals, owned by the engine thread
     bool exact_window_ = false;    ///< W1-ordered arithmetic and tentative route accounting
     bool prefetch_early_ = false;   ///< Inkling opt-in: enqueue prompt weights before the router's readback
     bool kcopy_ = false;            ///< Inkling opt-in: the prompt router's readback and tables copied by a kernel
@@ -1003,7 +1008,6 @@ protected:
     // The cache follows what is written (follow()).  It is filled for the average answer; while one is written,
     // the experts it keeps routing to and the cache lacks are copied over the cached ones it uses least, by a
     // thread and a stream of their own.
-    struct Swap;
     struct Pick {
         int il = -1, e = 0;
         float recent = 0;

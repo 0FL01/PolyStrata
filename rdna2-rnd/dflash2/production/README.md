@@ -334,6 +334,13 @@ it still ages and counts each retained row in W1 order, but cannot change placem
 The estimated round-budget policy can independently choose W1 or restrict width within that room.
 Epoch selection itself never uses draft acceptance: its W1 control does not have a drafter oracle.
 
+`STRATA_EXPERT_LAYER_JOIN=1` can overlap those same transfers with target work. It needs gfx1031,
+a fixed epoch, GPU experts and full-RAM host experts. Instead of waiting for the whole batch before
+the anchor, the follower sends it in physical layer order. The first route at each affected layer
+waits for its last upload. No shadow slots, new stream, or changes to ranking or SAVE. Unset keeps
+the synchronous join. On the [64K coding control](../venture-v2/README.md#admission-by-bytes)
+it changed 41.03 to 42.00 decode IDs/s; it does not remove speculative delivery bursts.
+
 This is **not** `STRATA_FREEZE_EXPERTS`: that switch pins the split across requests and prevents
 ordinary KV-funded shrink/grow. Epochs leave prompt handling, resize and KV funding alone. A window
 also stops at the last mapped KV row; the next real row can grow KV and evict experts even mid-epoch.
