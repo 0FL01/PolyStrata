@@ -1,0 +1,178 @@
+diff --git a/src/poly/inkling2.cu b/src/poly/inkling2.cu
+index 2ce62602..e4e7d892 100644
+--- a/src/poly/inkling2.cu
++++ b/src/poly/inkling2.cu
+@@ -12,6 +12,9 @@
+ #include "strata/kernels/native_mmvq.hpp"
+ 
+ #include <cuda_fp16.h>
++#include <cstdio>
++#include <cstdlib>
++#include <vector>
+ #include "ggml.h"
+ 
+ #include <algorithm>
+@@ -1636,6 +1639,61 @@ void Inkling2::attention(const Block& b, int n) {
+         else inkling::attend_decode(a, chunks_, cs(st_), attq_, ds_attend_group_);
+     }
+     else inkling::attend_plain(a, scores_, partial_, attend_tiles_, cs(st_));
++    // KVQ research capture (STRATA_KVQ_CAPTURE=dir): full-attention visits only. kv.<visit>.f32 gets the normed
++    // FP32 K and V rows ([n][1024] K then [n][1024] V per call) with kv.<visit>.idx "pos n"; q.<visit>.f32 gets,
++    // for rows at a multiple of STRATA_KVQ_QSTRIDE (and every row of calls of at most 8 rows), int64 pos then
++    // q[24][128], rel[24][16], sink[24], gate[24][128], out[24][128] as float32. table.<visit>.f32 once.
++    static const char* kvq_dir = std::getenv("STRATA_KVQ_CAPTURE");
++    if (kvq_dir && !swa) {
++        static const int qstride = std::getenv("STRATA_KVQ_QSTRIDE") ? std::atoi(std::getenv("STRATA_KVQ_QSTRIDE")) : 64;
++        static const long long kv_from = std::getenv("STRATA_KVQ_KV_FROM") ? std::atoll(std::getenv("STRATA_KVQ_KV_FROM")) : 0;
++        static bool tabled[48] = {};
++        ck(cudaStreamSynchronize(cs(st_)), "kvq capture");
++        const auto put = [&](const char* kind, const void* dev, size_t bytes, const char* mode) {
++            std::vector<char> h(bytes);
++            ck(cudaMemcpy(h.data(), dev, bytes, cudaMemcpyDeviceToHost), "kvq copy");
++            char path[1024];
++            std::snprintf(path, sizeof path, "%s/%s.%d.f32", kvq_dir, kind, visit_);
++            FILE* f = std::fopen(path, mode);
++            if (!f) throw std::runtime_error("kvq: cannot open capture file");
++            std::fwrite(h.data(), 1, bytes, f);
++            std::fclose(f);
++        };
++        if (!tabled[visit_]) {
++            put("table", fp(b.table), (size_t) 1024 * 16 * sizeof(float), "wb");
++            tabled[visit_] = true;
++        }
++        if (pos_ + n > kv_from) {
++            put("kv", k_, (size_t) n * kKey * sizeof(float), "ab");
++            put("kv", v_, (size_t) n * kKey * sizeof(float), "ab");
++            char path[1024];
++            std::snprintf(path, sizeof path, "%s/kv.%d.idx", kvq_dir, visit_);
++            FILE* f = std::fopen(path, "a");
++            std::fprintf(f, "%lld %d\n", (long long) pos_, n);
++            std::fclose(f);
++        }
++        const size_t nq = (size_t) n * kQuery, nr = (size_t) n * kHeads * kRelative, ns = (size_t) n * kHeads;
++        std::vector<float> hq(nq), hr(nr), hs(ns), hg(nq), ho(nq);
++        ck(cudaMemcpy(hq.data(), q_, nq * 4, cudaMemcpyDeviceToHost), "kvq q");
++        ck(cudaMemcpy(hr.data(), rel_, nr * 4, cudaMemcpyDeviceToHost), "kvq rel");
++        ck(cudaMemcpy(hs.data(), sink_, ns * 4, cudaMemcpyDeviceToHost), "kvq sink");
++        ck(cudaMemcpy(hg.data(), gate_, nq * 4, cudaMemcpyDeviceToHost), "kvq gate");
++        ck(cudaMemcpy(ho.data(), att_, nq * 4, cudaMemcpyDeviceToHost), "kvq out");
++        char path[1024];
++        std::snprintf(path, sizeof path, "%s/q.%d.f32", kvq_dir, visit_);
++        FILE* f = std::fopen(path, "ab");
++        for (int r = 0; r < n; ++r) {
++            const long long at = (long long) pos_ + r;
++            if (n > 8 && (qstride <= 0 || at % qstride != 0)) continue;
++            std::fwrite(&at, 8, 1, f);
++            std::fwrite(hq.data() + (size_t) r * kQuery, 4, kQuery, f);
++            std::fwrite(hr.data() + (size_t) r * kHeads * kRelative, 4, kHeads * kRelative, f);
++            std::fwrite(hs.data() + (size_t) r * kHeads, 4, kHeads, f);
++            std::fwrite(hg.data() + (size_t) r * kQuery, 4, kQuery, f);
++            std::fwrite(ho.data() + (size_t) r * kQuery, 4, kQuery, f);
++        }
++        std::fclose(f);
++    }
+     if (staged) {
+         // Only new rows need copying back. Short/verifier calls already wrote into their own ring.
+         const int count = std::min(n, live_ring), skip = n - count;
+diff --git a/src/poly/main.cpp b/src/poly/main.cpp
+index 70edb5ed..8eff28a8 100644
+--- a/src/poly/main.cpp
++++ b/src/poly/main.cpp
+@@ -488,6 +488,33 @@ struct CacheFlags {
+     bool park_auto = false;          // --conversation-cache-mib auto: park_mib from the RAM free once loaded
+ };
+ 
++// KVQ research: per-request forced tokens and a logit log (top-K + log-sum-exp per picked step).
++static std::string g_kvq_follow, g_kvq_logits;
++static int g_kvq_top = 256;
++static std::vector<int32_t> g_kvq_ids;
++static FILE* g_kvq_out = nullptr;
++static void kvq_log(const float* logits, int n_vocab, int32_t forced, int64_t step) {
++    if (!g_kvq_out) return;
++    const int k = std::min(g_kvq_top, n_vocab);
++    std::vector<int> order((size_t) n_vocab);
++    for (int i = 0; i < n_vocab; ++i) order[(size_t) i] = i;
++    std::partial_sort(order.begin(), order.begin() + k, order.end(),
++                      [logits](int a, int b) { return logits[a] > logits[b]; });
++    const double top = logits[order[0]];
++    double sum = 0.0;
++    for (int i = 0; i < n_vocab; ++i) sum += std::exp((double) logits[i] - top);
++    const double lse = top + std::log(sum);
++    const int64_t hdr[2] = {step, (int64_t) forced};
++    std::fwrite(hdr, sizeof hdr, 1, g_kvq_out);
++    const float f[2] = {(float) lse, forced >= 0 && forced < n_vocab ? logits[forced] : -1e30f};
++    std::fwrite(f, sizeof f, 1, g_kvq_out);
++    for (int i = 0; i < k; ++i) {
++        const int32_t id = order[(size_t) i];
++        std::fwrite(&id, 4, 1, g_kvq_out);
++        std::fwrite(&logits[id], 4, 1, g_kvq_out);
++    }
++}
++
+ struct Session {
+     Engine& engine;
+     std::vector<int32_t> eos;
+@@ -660,8 +687,14 @@ struct Session {
+         }
+         const auto pick = [&](const float* logits) {
+             picked_from = logits;
+-            if (follow && r.produced < (int64_t) follow->size()) return (*follow)[(size_t) r.produced];
+-            return (int32_t) sampler.pick(logits, engine.n_vocab(), s, history, rng);
++            if (follow && r.produced < (int64_t) follow->size()) {
++                const int32_t f = (*follow)[(size_t) r.produced];
++                kvq_log(logits, engine.n_vocab(), f, r.produced);
++                return f;
++            }
++            const int32_t t = (int32_t) sampler.pick(logits, engine.n_vocab(), s, history, rng);
++            kvq_log(logits, engine.n_vocab(), t, r.produced);
++            return t;
+         };
+         // Shows a token.  False when the answer ends with it.
+         const auto show = [&](int32_t t) {
+@@ -862,6 +895,9 @@ bool parse_gen(const std::string& line, long long& max_new, Sampling& s, int32_t
+         else if (key == "seed") s.seed = std::strtoull(v, nullptr, 10);
+         else if (key == "image_pad") pad = (int32_t) std::atoi(v);
+         else if (key == "turn_at") turn_at = std::strtoll(v, nullptr, 10);
++        else if (key == "kvq_follow") g_kvq_follow = v;
++        else if (key == "kvq_logits") g_kvq_logits = v;
++        else if (key == "kvq_top") g_kvq_top = std::atoi(v);
+         // other keys belong to the other engine and are skipped
+     }
+     pictures.clear();
+@@ -1173,6 +1209,25 @@ int serve(Session& ss, bool want_disk_sessions) {
+                 std::fprintf(stderr, "strata-poly: the expert cache %d -> %d experts (%.2f GiB) for the VRAM free "
+                                      "now, %lld MiB left\n",
+                              had, engine.cached_experts(), engine.cached_gib(), (long long) engine.vram_free_mib());
++            if (!g_kvq_follow.empty()) {
++                std::FILE* ff = std::fopen(g_kvq_follow.c_str(), "r");
++                if (!ff) throw std::runtime_error("kvq_follow: cannot open");
++                std::string text;
++                char buf[65536];
++                size_t got;
++                while ((got = std::fread(buf, 1, sizeof buf, ff)) > 0) text.append(buf, got);
++                std::fclose(ff);
++                while (!text.empty() && (text.back() == '\n' || text.back() == ' ')) text.pop_back();
++                g_kvq_ids.clear();
++                if (!parse_ids(text.c_str(), g_kvq_ids)) throw std::runtime_error("kvq_follow: bad ids");
++                ss.follow = &g_kvq_ids;
++            }
++            if (!g_kvq_logits.empty()) {
++                g_kvq_out = std::fopen(g_kvq_logits.c_str(), "wb");
++                if (!g_kvq_out) throw std::runtime_error("kvq_logits: cannot open");
++                const int32_t k = g_kvq_top;
++                std::fwrite(&k, 4, 1, g_kvq_out);
++            }
+             r = ss.generate(
+                 ids, pictures, pad, turn_at, max_new, s, lines.stop,
+                 [&](int32_t t) {
+@@ -1191,6 +1246,10 @@ int serve(Session& ss, bool want_disk_sessions) {
+                     std::fflush(stdout);
+                 },
+                 slots.empty() ? nullptr : &between);
++            if (g_kvq_out) { std::fclose(g_kvq_out); g_kvq_out = nullptr; }
++            ss.follow = nullptr;
++            g_kvq_follow.clear();
++            g_kvq_logits.clear();
+             if (r.gave_way >= 0) {
+                 engine.copy_seq(0, gives_to + 1);
+                 slots[(size_t) gives_to] = Slot{};
