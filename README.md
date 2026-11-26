@@ -1,4 +1,7 @@
-<h1 align="center">PolyStrata</h1>
+<h1 align="center">RedStrata</h1>
+
+<p align="center"><b>Hardware-aware LLM inference</b><br>
+RDNA2 · HIP · Hybrid CPU/GPU · Long-context agents</p>
 
 **English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Türkçe](README.tr.md)
 
