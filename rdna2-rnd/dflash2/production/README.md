@@ -341,6 +341,14 @@ waits for its last upload. No shadow slots, new stream, or changes to ranking or
 the synchronous join. On the [64K coding control](../venture-v2/README.md#admission-by-bytes)
 it changed 41.03 to 42.00 decode IDs/s; it does not remove speculative delivery bursts.
 
+For long **fresh prompts**, `STRATA_DFLASH2_SKIP_COLD=1` skips draft K/V projection for complete
+text batches older than the drafter's last 2,048 prompt rows. The target still evaluates every row,
+with the same batch boundaries and taps. A ready ring on a prefix hit is left alone. A cancelled
+long read can leave a reusable target prefix but a cold drafter: a shorter follow-up may then use
+W1 until 2,048 new rows have accumulated. This does not extend target SAVE/RESTORE. On a 16,384-row
+fresh prompt with stable staging on gfx1031, TTFT fell from **20.43 to 19.19 s**; all 49 emitted
+IDs, the first proposal, target logits and SAVE matched. Unset leaves prompt handling unchanged.
+
 This is **not** `STRATA_FREEZE_EXPERTS`: that switch pins the split across requests and prevents
 ordinary KV-funded shrink/grow. Epochs leave prompt handling, resize and KV funding alone. A window
 also stops at the last mapped KV row; the next real row can grow KV and evict experts even mid-epoch.

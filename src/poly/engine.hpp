@@ -294,8 +294,9 @@ public:
     /// is its calls one by one, through one more call), with how many of how many that is.  False gives the read
     /// up: read() returns false, and what the engine holds from pos() on is spoiled, its recurrent state and a
     /// window layer's rows among it.  The caller goes back to a state saved before (load_state()) or resets.
+    /// For a cold DFlash2 prompt, calls ending at or before `draft_skip_before` do not project the draft's KV.
     bool read(const int32_t* tokens, int n, const Mark* marks = nullptr, int n_marks = 0,
-              const std::function<bool(int, int)>* turn = nullptr);
+              const std::function<bool(int, int)>* turn = nullptr, int64_t draft_skip_before = 0);
     /// The prompt's reads are done: the expert cache takes back what Options::stage_read_mib lent the staging
     /// buffer.  window() and step() do it too, if the caller has not.
     void end_read() {
@@ -622,6 +623,7 @@ protected:
     void start_swaps();
     void plan_ahead(Layer& L, int il);
     void run(const int32_t* tokens, int n);
+    void eval_rows(const int32_t* tokens, int n, bool want_logits, bool skip_draft);
     bool pick_way(int t);
     void took_way(int t, double ms);
     void layer(int il, int n);

@@ -9,6 +9,7 @@
 #include "disk_sessions.hpp"
 #include "engine.hpp"
 #include "dflash2/policy.hpp"
+#include "dflash2/runtime.hpp"
 #include "guesses.hpp"
 #include "strata/core/conversation_memory.hpp"
 #include "strata/spec/draft_policy.hpp"
@@ -556,6 +557,14 @@ struct Session {
         Clock::time_point t0 = Clock::now(), shown = t0;   // bringing a parked conversation back is prompt time
         engine.images(pictures.at.data(), (int) pictures.at.size());
         r.resume = kept.resume(ids);
+        static const bool skip_cold_draft = [] {
+            const char* flag = std::getenv("STRATA_DFLASH2_SKIP_COLD");
+            return flag && flag[0] == '1' && flag[1] == '\0';
+        }();
+        // resume() may have reset or rewound the draft. Keep a whole window of new rows and
+        // never discard an already-warm ring. The cutoff belongs to this request's prompt reads.
+        const int64_t draft_skip_before = skip_cold_draft && engine.uses_dflash2() && n - r.resume > dflash2::window &&
+            (r.resume == 0 || !engine.dflash2_ready()) ? n - dflash2::window : 0;
         if (const size_t freed = engine.trim_kv(n)) {
             const int had = engine.cached_experts();
             engine.mind_vram();
@@ -613,7 +622,7 @@ struct Session {
                     }
                     return true;
                 };
-                if (!engine.read(ids.data() + i, (int) m, marks.data(), (int) marks.size(), &turn)) {
+                if (!engine.read(ids.data() + i, (int) m, marks.data(), (int) marks.size(), &turn, draft_skip_before)) {
                     kept.rewind();
                     r.finish = "cancel";
                     break;

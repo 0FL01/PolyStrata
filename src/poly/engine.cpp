@@ -5826,6 +5826,10 @@ void Engine::eval_decode(int32_t token) {
 }
 
 void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
+    eval_rows(tokens, n, want_logits, false);
+}
+
+void Engine::eval_rows(const int32_t* tokens, int n, bool want_logits, bool skip_draft) {
     OnCard here(device_, split_);
     run(tokens, n);
     if (next_) {
@@ -5861,7 +5865,10 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
     }
     // behind the logits: the caller has them while the card does this
     if (draft_) draft_rows(tokens, ahead_pos_ == pos_ && tokens[0] == ahead_tok_ ? 1 : 0, n);
-    if (features) features_kept(n);
+    if (features) {
+        if (skip_draft) rewind_features(pos_ + n);
+        else features_kept(n);
+    }
     pos_ += n;
     stats_.tokens += n;
 }
@@ -5898,7 +5905,7 @@ void Engine::layer(int il, int n) {
 // A checkpoint inside the read (a mark) is taken a layer at a time: when a layer has run the tokens before it,
 // the layer's state is what save_state() would find there, and it is copied before the next call changes it.
 bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
-                  const std::function<bool(int, int)>* turn) {
+                  const std::function<bool(int, int)>* turn, int64_t draft_skip_before) {
     if (n < 1 || n > read_rows_) throw std::logic_error("read takes 1 to max_read() tokens");
     for (const Image& im : images_)
         if (im.at < pos_ + n && im.at + im.n > pos_)
@@ -5943,7 +5950,8 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
                 pos_ += call.m;
                 stats_.tokens += call.m;
             } else {
-                eval(tokens + call.at, call.m, false);
+                // Do not split an eval at the cutoff: keep the original target and draft batch shapes.
+                eval_rows(tokens + call.at, call.m, false, pos_ + call.m <= draft_skip_before);
             }
             if (call.mark >= 0 && marks[call.mark].state) {
                 behind.wait();
