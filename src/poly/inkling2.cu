@@ -1798,12 +1798,10 @@ void Inkling2::features_kept(int n) {
 void Inkling2::rewind_features(int64_t pos) {
     if (!dflash2_) return;
     dflash2_->reset(pos);
-    df_start_ = pos;
 }
 
-bool Inkling2::dflash2_ready() const {
-    return dflash2_ && pos_ <= dflash2::max_positions - dflash2::block &&
-           (!df_start_ || pos_ - df_start_ >= dflash2::window);
+bool Inkling2::dflash2_ready(bool full_window) const {
+    return dflash2_ && dflash2_->ready(pos_, full_window);
 }
 
 bool Inkling2::dflash2_failed() const { return dflash2_ && !dflash2_->usable(); }

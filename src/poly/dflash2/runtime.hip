@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <initializer_list>
 
@@ -158,11 +159,17 @@ struct Runtime::Impl {
     std::array<float, hidden> mask_embedding{};
     int64_t next = 0;
     int warmup_rows = window;
+    int proposal_floor = window;
     bool poisoned = false;
 
     Impl(const char* draft_path, const char* target_path, const void* shared_head)
         : draft(need_path(draft_path)), target(need_path(target_path)) {
         check_model(draft, target);
+        const char* partial = std::getenv("STRATA_DFLASH2_PARTIAL");
+        if (partial && std::strcmp(partial, "1") == 0) {
+            proposal_floor = 32;
+            std::fputs("strata-poly: DFlash2 can propose from 32 rebuilt rows after rewind\n", stderr);
+        }
         fusion.load(tensor(draft, "fc.weight", {4 * hidden, hidden}), hidden, stream);
         selector.load(tensor(draft, "selector_hidden.weight", {hidden, rank}), rank, stream);
         load_f32(fusion_norm, tensor(draft, "enc_output_norm.weight", {hidden}), stream);
@@ -303,8 +310,9 @@ struct Runtime::Impl {
 
     void propose(int64_t pos, int anchor, int n, Proposal& out, bool read_hidden, bool details) {
         if (poisoned) throw std::runtime_error("draft handle is unusable after a device failure");
-        if (warmup_rows < window)
-            throw std::invalid_argument("draft requires 2048 committed warmup rows after nonzero reset");
+        if (warmup_rows < proposal_floor)
+            throw std::invalid_argument(proposal_floor == window ? "draft requires 2048 committed warmup rows after nonzero reset" :
+                                                                  "partial draft requires 32 committed warmup rows after nonzero reset");
         if (pos != next || pos + block > max_positions || anchor < 0 || anchor >= vocab || n < 1 || n > proposals)
             throw std::invalid_argument("invalid proposal position, anchor or count");
 
@@ -330,8 +338,15 @@ struct Runtime::Impl {
                                                                    q_rot.get(), q_heads, int(pos), false);
                 norm_rope<<<block * kv_heads, head_dim, 0, stream>>>(k.get(), l.k_norm.get(), freqs.get(),
                                                                     k_rot.get(), kv_heads, int(pos), false);
-                attend_exact(q_rot.get(), l.k_ring.get(), l.v_ring.get(), k_rot.get(), v.get(),
-                             exact_scores.get(), attended.get(), int(pos), stream);
+                if (warmup_rows < window) {
+                    // Earlier circular slots still belong to the previous sequence. Clamp K and V together;
+                    // position, RoPE and the eight ephemeral keys keep their absolute coordinates.
+                    attend<true><<<block * q_heads, head_dim, 0, stream>>>(q_rot.get(), l.k_ring.get(),
+                        l.v_ring.get(), k_rot.get(), v.get(), attended.get(), int(pos), int(pos) - warmup_rows);
+                } else {
+                    attend_exact(q_rot.get(), l.k_ring.get(), l.v_ring.get(), k_rot.get(), v.get(),
+                                 exact_scores.get(), attended.get(), int(pos), stream);
+                }
                 linear(l.o, attended.get(), h.get(), block);
                 conv<<<grid(block * hidden), threads, 0, stream>>>(h.get(), delta.get(), l.attn_base.get(),
                                                                   x.get(), x.get(), 1);
@@ -371,6 +386,10 @@ Runtime::Runtime(const char* draft, const char* target, const void* head) {
 }
 Runtime::~Runtime() { (void)hipSetDevice(0); }
 bool Runtime::usable() const { return !impl_->poisoned; }
+bool Runtime::ready(int64_t pos, bool full_window) const {
+    return pos == impl_->next && pos <= max_positions - block &&
+           impl_->warmup_rows >= (full_window ? window : impl_->proposal_floor);
+}
 
 void Runtime::reset(int64_t next_pos) {
     if (next_pos < 0 || next_pos > max_positions)

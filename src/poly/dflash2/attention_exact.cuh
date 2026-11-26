@@ -110,7 +110,7 @@ inline void attend_exact(const float* q, const float* ctx_k, const float* ctx_v,
                          const float* noise_v, float* scores, float* output, int start, hipStream_t stream) {
     // Retain the original path for short windows, which do not amortize the second launch.
     if (start < 512) {
-        attend<<<block * q_heads, head_dim, 0, stream>>>(q, ctx_k, ctx_v, noise_k, noise_v, output, start);
+        attend<false><<<block * q_heads, head_dim, 0, stream>>>(q, ctx_k, ctx_v, noise_k, noise_v, output, start, 0);
         return;
     }
     const int keys = std::min(start, window - 1) + block;

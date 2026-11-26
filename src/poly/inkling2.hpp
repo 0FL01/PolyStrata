@@ -14,7 +14,7 @@ class Inkling2 final : public Engine {
 public:
     ~Inkling2() override;
     bool sees() const override { return true; }
-    bool dflash2_ready() const override;
+    bool dflash2_ready(bool full_window = false) const override;
     bool dflash2_failed() const override;
     void dflash2_propose(int32_t anchor, int k, int32_t* out) override;
     size_t card_row_bytes() const override;
@@ -171,7 +171,6 @@ private:
     float* ds_taps_ = nullptr;              // the rows entering visits kTap of the last call, rows_ apart
     std::unique_ptr<dflash2::Runtime> dflash2_;
     float* df_taps_ = nullptr;              // the same three visits, followed by the normed output
-    int64_t df_start_ = 0;                 // first contiguous feature row since reset or restore
     float *ds_x_ = nullptr, *ds_xa_ = nullptr, *ds_q_ = nullptr, *ds_qr_ = nullptr, *ds_k_ = nullptr,
           *ds_kr_ = nullptr, *ds_v_ = nullptr, *ds_ao_ = nullptr, *ds_out_ = nullptr, *ds_g_ = nullptr,
           *ds_u_ = nullptr, *ds_h_ = nullptr, *ds_cur_ = nullptr, *ds_base_ = nullptr, *ds_state_ = nullptr,

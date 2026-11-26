@@ -39,10 +39,11 @@ public:
     Runtime& operator=(const Runtime&) = delete;
 
     // Discard committed history and resume collecting at an absolute position.
-    // This does not recover a poisoned handle. A nonzero start requires window
-    // genuine contiguous appended rows before any proposal is permitted.
+    // This does not recover a poisoned handle. A nonzero start normally requires
+    // a full rebuilt window; the optional partial proposer uses only genuine rows.
     void reset(int64_t next_pos = 0);
     bool usable() const;
+    bool ready(int64_t pos, bool full_window) const;
     // Four contiguous device FP32 [rows, hidden] planes, ordered target visits
     // 5, 23, 41, final norm 48. The producer must have finished writing them.
     // Positions must be contiguous from reset's next_pos. For compatibility,

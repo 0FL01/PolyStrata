@@ -326,7 +326,7 @@ public:
     bool uses_dflash2() const { return !opt_.dflash2_model.empty(); }
     bool uses_lookup_epoch() const { return opt_.lookup_epoch; }
     bool uses_exact_verifier() const { return uses_dflash2() || uses_lookup_epoch(); }
-    virtual bool dflash2_ready() const { return false; }
+    virtual bool dflash2_ready(bool /*full_window*/ = false) const { return false; }
     virtual bool dflash2_failed() const { return false; }
     virtual void dflash2_propose(int32_t, int, int32_t*) { throw std::logic_error("no DFlash2 drafter"); }
     // The anchor has the ordinary W1 placement. Before sampling a later row, advance its real

@@ -564,7 +564,7 @@ struct Session {
         // resume() may have reset or rewound the draft. Keep a whole window of new rows and
         // never discard an already-warm ring. The cutoff belongs to this request's prompt reads.
         const int64_t draft_skip_before = skip_cold_draft && engine.uses_dflash2() && n - r.resume > dflash2::window &&
-            (r.resume == 0 || !engine.dflash2_ready()) ? n - dflash2::window : 0;
+            (r.resume == 0 || !engine.dflash2_ready(true)) ? n - dflash2::window : 0;
         if (const size_t freed = engine.trim_kv(n)) {
             const int had = engine.cached_experts();
             engine.mind_vram();

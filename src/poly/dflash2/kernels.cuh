@@ -110,15 +110,16 @@ __device__ inline const float* kv_at(const float* ring, const float* noise, int 
 
 // Four waves split the visible keys of each query/head. Keep scores in shared memory, then do a stable softmax
 // and weighted V sum. Each query uses its own lower SWA bound and all eight ephemeral block keys.
+template<bool clamp_history>
 __global__ void attend(const float* q, const float* ctx_k, const float* ctx_v, const float* noise_k,
-                       const float* noise_v, float* output, int start) {
+                       const float* noise_v, float* output, int start, int first_valid) {
     constexpr int waves = 4;
     __shared__ float scores[window - 1 + block];
     __shared__ float partial[waves][head_dim];
     const int lane = threadIdx.x % 32, wave = threadIdx.x / 32;
     const int query = blockIdx.x / q_heads, q_head = blockIdx.x % q_heads;
     const int kv_head = q_head / (q_heads / kv_heads);
-    const int lo = max(0, start + query - (window - 1));
+    const int lo = max(clamp_history ? first_valid : 0, start + query - (window - 1));
     const int keys = start + block - lo;
     q += blockIdx.x * head_dim;
     float qv[head_dim / 32];

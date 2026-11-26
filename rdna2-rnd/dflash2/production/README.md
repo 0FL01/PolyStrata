@@ -9,7 +9,14 @@ no guesses, or `--draft-max 3` for K3. `--dflash2-budget-ms 65` opts into W1/loo
 with an *estimated* round budget, not a per-token latency guarantee. DSpark remains a separate mode.
 Use `STRATA_DFLASH2_CPU_REUSE=1` only on the checked Zen 3 build with matching ggml AVX2 arithmetic.
 This mode does not combine DFlash2 with K256/V4 or with a second drafter. SAVE/RESTORE preserves the
-target session; after restore, draft proposals resume after 2,048 newly evaluated rows.
+target session; by default after restore, draft proposals resume after 2,048 newly evaluated rows.
+
+For short returns after a long RESTORE, `STRATA_DFLASH2_PARTIAL=1` lets a loaded DFlash2 propose
+from 32 rebuilt rows. Only the **draft** sees the shorter window; the target still verifies against
+its ordinary history and makes every sampling decision. No extra session bytes or expert slots are
+required. The partial path ends once 2,048 rows have been rebuilt. Q4_0, E4 K3 on a 197K coding
+continuation reduced time to correct from 27.99 to 23.66 s vs loaded W1, with identical 424 IDs,
+but native ID-gap p90 grew from 61 to 142 ms. This is an opt-in for throughput, not smoother delivery.
 
 ### Verify repeated text without a drafter
 
@@ -360,7 +367,7 @@ For long **fresh prompts**, `STRATA_DFLASH2_SKIP_COLD=1` skips draft K/V project
 text batches older than the drafter's last 2,048 prompt rows. The target still evaluates every row,
 with the same batch boundaries and taps. A ready ring on a prefix hit is left alone. A cancelled
 long read can leave a reusable target prefix but a cold drafter: a shorter follow-up may then use
-W1 until 2,048 new rows have accumulated. This does not extend target SAVE/RESTORE. On a 16,384-row
+W1 until 2,048 new rows have accumulated unless partial proposals are enabled. This does not extend target SAVE/RESTORE. On a 16,384-row
 fresh prompt with stable staging on gfx1031, TTFT fell from **20.43 to 19.19 s**; all 49 emitted
 IDs, the first proposal, target logits and SAVE matched. Unset leaves prompt handling unchanged.
 
