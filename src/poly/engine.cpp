@@ -2552,11 +2552,7 @@ void Engine::follow(int written) {
         std::lock_guard<std::mutex> l(swap_m_);
         if (!swap_error_.empty()) throw std::runtime_error("expert upload: " + swap_error_);
     }
-    // STRATA_FREEZE_EXPERTS: the split between the card's experts and the CPU's is the request's first token's
-    // for the whole answer, so an arrival claims no slot and no trade is asked while one is being written.  A
-    // frozen answer sees a cache that never changes, which makes it a function of the request alone.  The
-    // uploads themselves go on: the followers fill their slots, and unfreeze_experts() lets the next request's
-    // first token claim them.
+    // Process-wide freeze (except an explicit operator resize): neither claim arrivals nor ask for trades.
     if (freeze_experts_) return;
     const size_t ne = (size_t) n_expert_;
     int n_free = 0;
@@ -2597,8 +2593,7 @@ void Engine::follow(int written) {
         n_free += s.at.load() == Swap::kFree;
     }
     if (written <= 0) return;
-    const float keep = std::exp2(-(float) written / (float) kSwapHalf);
-    for (float& r : recent_) r *= keep;
+    decay_recent(written);
     const auto from_pool = [&](Swap& s) {   // the slot follow_loop() copies s from, held until s arrives
         s.from = -1;
         if (!pool_) return;
@@ -2721,6 +2716,31 @@ void Engine::follow(int written) {
     if (asked) {
         { std::lock_guard<std::mutex> l(swap_m_); }
         swap_cv_.notify_one();
+    }
+}
+
+void Engine::decay_recent(int written) {
+    const float keep = std::exp2(-(float) written / (float) kSwapHalf);
+    for (float& r : recent_) r *= keep;
+}
+
+void Engine::decode_placement(int64_t at) {
+    if (expert_epoch_ && at < epoch_end_) {
+        decay_recent(1);  // same clock for committed W1 rows and retained verifier rows
+        return;
+    }
+    settle_swaps();
+    follow(1);
+    if (expert_epoch_) {
+        // follow() unpublishes victims immediately. Join the new batch here so neither
+        // holes nor timing-dependent arrivals last through the epoch. No shadow VRAM slots.
+        const auto before = stats_.swapped_experts;
+        settle_swaps();
+        const auto trades = stats_.swapped_experts - before;
+        // A busy queue means hot candidates may still be waiting. Revisit soon; when
+        // there is little to move, let more windows use the current layout.
+        const int adaptive_rows = 2 * trades >= n_swap_ ? 4 : 8 * trades >= n_swap_ ? 8 : 16;
+        epoch_end_ = at + (expert_epoch_ > 0 ? expert_epoch_ : adaptive_rows);
     }
 }
 
@@ -5169,13 +5189,14 @@ void Engine::run(const int32_t* tokens, int n) {
     // state at the first layer may not depend on whether an upload happened to have finished.  Every expert on
     // its way arrives here, and the followers' arrivals are claimed, before the first token reads the cache.
     // The cost is the upload a window still waits for, a millisecond or so of a token: under 5% of one.
-    // STRATA_FREEZE_EXPERTS holds the split still for the whole request instead: the request's first token
-    // claims the arrivals and asks for the trades, and the tokens after it see the cache as it was then.
-    // follow() above takes the arrivals it finds, so the freeze only has to keep the later ones from asking.
+    // Under an epoch both W1 and the verifier may trade only at the scheduled boundary. This is a
+    // different W1 placement policy; the process-wide freeze instead suppresses all follower trades.
     if (prepared_decode_ >= 0) {
         if (prepared_decode_ != pos_ || n != 1 || !serial_decode_)
             throw std::logic_error("DFlash2 prepared a W1 placement that must be used by the next token");
         prepared_decode_ = -1;
+    } else if (n_swap_ > 0 && expert_epoch_ && (serial_decode_ || exact_window_)) {
+        decode_placement(pos_);
     } else if (n_swap_ > 0) {
         settle_swaps();
         follow(exact_window_ ? 1 : n < kStageRows ? n : 0);
@@ -6013,6 +6034,11 @@ unsigned Engine::snap_tokens(int t) const {
 int Engine::verified_width(int most) const {
     if (!uses_dflash2() || win_ || pool_ || prepared_decode_ >= 0) return 1;
     int64_t width = std::min<int64_t>({most, opt_.window, opt_.max_context - pos_});
+    if (expert_epoch_) {
+        // At an adaptive publication the batch size is not known yet. Four rows always fit.
+        const int64_t left = pos_ < epoch_end_ ? epoch_end_ - pos_ : expert_epoch_ > 0 ? expert_epoch_ : 4;
+        width = std::min(width, left);
+    }
     // Do not change the KV high-water mark or give up expert slots for guesses.
     if (!kv_.empty()) width = std::min(width, kv_rows_ - pos_);
     return (int) std::max<int64_t>(1, width);
@@ -6051,8 +6077,7 @@ bool Engine::verify_next(int row) {
     // The caller already emitted row's token and will feed it even if we must rerun it.
     // Publish the preceding row's recency before doing the next real W1 transition.
     commit_routes(counted_routes_++);
-    settle_swaps();
-    follow(1);
+    decode_placement(pos_ + row);
     for (size_t entry : verify_routes_[(size_t) row]) {
         const size_t id = entry / 2;
         if ((layers_[id / n_expert_].slot[id % n_expert_] != nullptr) != bool(entry & 1)) {

@@ -273,6 +273,8 @@ public:
     void eval(const int32_t* tokens, int n, bool want_logits);
     /// A serial generation step, as distinct from reading the final row of a prompt.
     void eval_decode(int32_t token);
+    /// Start an admission epoch at the first decoded row, including after prefix reuse or RESTORE.
+    void begin_decode_turn() { epoch_end_ = -1; }
     const float* logits() const { return next_ ? next_->logits() : h_logits_; }
     /// Feed n tokens of a prompt, none of them a picture's row, as eval() without logits would in calls of
     /// max_rows(): the same tokens a call.  With experts outside the cache it is faster than those calls, the
@@ -642,6 +644,8 @@ protected:
     void stage(const Layer& L, const int32_t* experts, int m, void* stream, bool alone = false);
     void mind_memory();
     void follow(int written);
+    void decay_recent(int written);
+    void decode_placement(int64_t at);
     void follow_loop();
     void embed(int32_t token, float* dst) const;
     void dbg(const char* name, int il, const float* dev, int n);
@@ -764,6 +768,8 @@ protected:
     int padded_vocab_ = 0;   ///< zero unless the token table and LM head have extra non-token rows
     bool looped_ = false;    ///< the model owns its visit order; reads go through all visits for each chunk
     bool serial_decode_ = false;   ///< eval_decode(), never a prompt predictor or a verifier window
+    int expert_epoch_ = 0;         ///< Inkling decode: 0 = stock follower, -1 = adaptive, otherwise rows per epoch
+    int64_t epoch_end_ = -1;       ///< first row allowed to trade again; independent of speculative accept length
     bool exact_window_ = false;    ///< W1-ordered arithmetic and tentative route accounting
     bool prefetch_early_ = false;   ///< Inkling opt-in: enqueue prompt weights before the router's readback
     bool kcopy_ = false;            ///< Inkling opt-in: the prompt router's readback and tables copied by a kernel

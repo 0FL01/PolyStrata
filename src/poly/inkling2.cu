@@ -668,6 +668,20 @@ void Inkling2::load_geometry() {
     need(std::isfinite(alpha_) && alpha_ >= 0.f && floor_ > 0, "log scale");
     n_layer_ = kPhysical;
     looped_ = true;
+    if (const char* value = std::getenv("STRATA_EXPERT_EPOCH"); value && std::strcmp(value, "0") != 0) {
+        if (!decode_ || drafter || !q8() || k256_ || v4_ || std::getenv("STRATA_FREEZE_EXPERTS") || !opt_.expert_swaps)
+            throw std::runtime_error("STRATA_EXPERT_EPOCH needs dense Inkling decode, swaps and no expert freeze or DSpark");
+        if (std::strcmp(value, "turn") == 0) expert_epoch_ = opt_.max_context;
+        else if (std::strcmp(value, "adaptive") == 0) expert_epoch_ = -1;
+        else {
+            char* end = nullptr;
+            const long rows = std::strtol(value, &end, 10);
+            if (*end || rows < 2 || rows > opt_.max_context)
+                throw std::runtime_error("STRATA_EXPERT_EPOCH expects 0, 2..max_context, turn or adaptive");
+            expert_epoch_ = (int) rows;
+        }
+        std::fprintf(stderr, "strata-poly: STRATA_EXPERT_EPOCH=%s: publish expert trades at decode boundaries\n", value);
+    }
     clamp_exp_.assign(kPhysical + 1, INFINITY);
     if (uses_dflash2()) {
         if (!decode_ || !q8() || k256_ || v4_ || drafter ||

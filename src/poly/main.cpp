@@ -664,6 +664,7 @@ struct Session {
             return false;
         };
         if (max_new > 0) {
+            engine.begin_decode_turn();
             int32_t w[strata::spec::DraftPolicy::kMaxT], d[strata::spec::DraftPolicy::kMaxT];
             dflash2::Policy df_policy(dflash2_budget_ms);
             using DFSource = dflash2::Policy::Source;

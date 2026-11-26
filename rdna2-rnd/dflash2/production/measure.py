@@ -36,6 +36,8 @@ def probe(a):
         env['STRATA_INKLING_PREFETCH'] = '0'
     if a.cpu_reuse:
         env['STRATA_DFLASH2_CPU_REUSE'] = '1'
+    if a.expert_epoch is not None:
+        env['STRATA_EXPERT_EPOCH'] = a.expert_epoch
     if a.tape:
         env['DF2_VERIFY_TAPE'] = str(a.out / 'logits.f32')
     if a.budget:
@@ -121,9 +123,16 @@ def probe(a):
     slots = re.search(r'; (\d+) of \d+ routed experts in VRAM', err)
     rss = re.search(r'PEAK_RSS_KiB (\d+)', err)
     rounds = [list(map(int, m)) for m in re.findall(r'DFlash2 rounds W1=(\d+) lookup=(\d+) draft=(\d+) placement_replays=(\d+)', err)]
+    if rounds:
+        for turn, (w1, lookup, draft, replay) in zip(result, rounds, strict=True):
+            # Every window evaluates an anchor and one row per offered guess. The first
+            # emitted ID used prefill logits and the terminal ID is never fed.
+            turn['verified_rows'] = lookup + draft + turn['offered']
+            turn['kept_verified_rows'] = len(turn['ids']) - 1 - w1 - replay
+            assert 0 <= turn['kept_verified_rows'] <= turn['verified_rows']
     report = dict(turns=result, slots=int(slots[1]) if slots else None, binary_sha256=digest(a.binary),
                   seed_profile_sha256=digest(a.profile), saved_profile_sha256=digest(a.out / 'profile'),
-                  k=a.k, temperature=a.temperature, seed=a.seed, swaps=a.swaps,
+                  k=a.k, temperature=a.temperature, seed=a.seed, swaps=a.swaps, expert_epoch=env.get('STRATA_EXPERT_EPOCH'),
                   quant=a.weights.name if a.weights else None, cap_mib=a.cap, budget_ms=a.budget,
                   peak_rss_kib=int(rss[1]) if rss else None, rounds_w1_lookup_draft_replayed=rounds)
     (a.out / 'result.json').write_text(json.dumps(report, indent=2) + '\n')
@@ -155,6 +164,7 @@ def main():
     p.add_argument('--budget', type=float)
     p.add_argument('--lookup', type=int, default=0)
     p.add_argument('--swaps', type=int, default=64)
+    p.add_argument('--expert-epoch', help='Inkling decode residency: 0 (stock), rows, turn, or adaptive')
     p.add_argument('--temperature', type=float, default=1)
     p.add_argument('--seed', type=int, default=42)
     a = p.parse_args()

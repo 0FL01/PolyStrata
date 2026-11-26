@@ -52,7 +52,7 @@ void Engine::run(const int32_t* tokens, int n) {''')
     if (df2_unprepared && (serial_decode_ || exact_window_))
         df2_boundary(pos_, layers_, use_, recent_, kv_rows_, stats_.swapped_experts);
     tok_''')
-    src = once(src, '    follow(1);\n    for (size_t entry :', '''    follow(1);
+    src = once(src, '    decode_placement(pos_ + row);\n    for (size_t entry :', '''    decode_placement(pos_ + row);
     df2_boundary(pos_ + row, layers_, use_, recent_, kv_rows_, stats_.swapped_experts);
     for (size_t entry :''')
     src = once(src, '    if (row < verified_) return true;  // frozen layout or no swaps', '''    if (row < verified_) {

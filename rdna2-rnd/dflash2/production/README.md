@@ -303,3 +303,159 @@ rows were kept per leg.
 Subtracting the entire proposer time is an optimistic overlap estimate, not another measured
 arm. It still leaves the suffix about 21% slower than W1. This does not justify implementing
 the concurrent suffix path. The private binary and receipt are under `anchor-first-suffix.*/`.
+
+## Residency as a decode policy, not a verifier exception
+
+`fill_expert_cache()` buys whole slots from the profile (usage per byte). During decode `follow()`
+compares only experts in the same slot-size class. Its score already includes frequency, decay and
+hysteresis: the half-life is 128 written rows, a once-visited layer gets twice the weight of a core
+layer, and an incoming expert needs at least `2 * victim_recent + 2`. The prior breaks ties. The
+follower unpublishes the victim **at submit**, packs weights through two pinned host buffers, and
+copies into that same slot. The incoming expert becomes visible when the engine claims the finished
+copy, not when the DMA completes. Without spare funded slots, leaving an old mapping live while its
+replacement overwrites the address would be wrong.
+
+`384251dc` journals the routed ID and CPU/GPU choice per provisional row. After a match, `verify_next()`
+commits the preceding row's observations and runs the ordinary serial transition. Only a change to a
+**used backend**, not a changed slot number or an unrelated trade, requires replay. CPU and GPU expert
+sums need not round identically. In the saved 64K K3 run, 16 of 21 first conflicts were on row 1;
+of 82 evaluated verifier rows, only 27 were retained, plus 21 W1 repairs for the 48 fed rows.
+`f4e0aacf` and the [placement review](../../../docs/goals/arch-decode-recon/review-placement.md)
+do not rule out fewer publications: the earlier cost model priced **serial** misses and copies,
+not discarded verifier rows. Nor do its clairvoyant scores justify replacing the ranker.
+
+The opt-in `STRATA_EXPERT_EPOCH` applies to dense Inkling W1 as well as DFlash2. A positive length
+of at least two counts **fed rows since decode began**, not guesses, accepted windows or absolute
+prompt length. `turn` admits once per generation; `adaptive` revisits after 4 rows when at least
+half of the queue traded, 8 for at least one eighth, otherwise 16 (the main queue is 64).
+`0` or unset uses stock placement. At a boundary the engine settles the preceding transfers, ranks
+using committed recency, submits at most one batch and joins it before the anchor. Inside the epoch
+it still ages and counts each retained row in W1 order, but cannot change placement for a guess.
+The estimated round-budget policy can independently choose W1 or restrict width within that room.
+Epoch selection itself never uses draft acceptance: its W1 control does not have a drafter oracle.
+
+This is **not** `STRATA_FREEZE_EXPERTS`: that switch pins the split across requests and prevents
+ordinary KV-funded shrink/grow. Epochs leave prompt handling, resize and KV funding alone. A window
+also stops at the last mapped KV row; the next real row can grow KV and evict experts even mid-epoch.
+SAVE remains target-only, not a disk image of the machine's current residency. A new turn starts
+its own epoch after prefix reuse/RESTORE. Exactness is relative to W1 **under this policy**, not to
+the stock W1 arithmetic after arbitrary placements diverge.
+
+### Full generation at the installed VRAM reserve
+
+RX 6700 XT / 5700X, Tideglass, dense Q8 + compact SWA, eight workers, 64 swaps, natural 2,048 MiB
+reserve, fixed prefill staging, fresh copy of the same expert profile per worker. Unloaded W1,
+Q4_0-loaded W1 (`--draft-max 0`) and Q4_0 K3 **all generate**. Greedy, seed 42; reasoning ran to
+96 IDs, the tool prompt to EOS at 67. This short screen leaves CPU unpack reuse off. Each cell
+contains **unloaded W1 / loaded W1 / K3** decode tok/s. The stock and freeze controls are medians
+of two workers; the candidate rows are single legs. Do not rank small differences between them.
+
+| Placement | Reasoning | Tool prompt | K3 wire p90, reasoning / tool (ms) | K3 GPU routes, reasoning / tool |
+|---|---|---|---|---|
+| Stock follower | 47.72 / 46.04 / 30.71 | 43.92 / 41.66 / 26.79 | 61.42 / 63.33 | 87.1% / 81.2% |
+| `STRATA_FREEZE_EXPERTS=1` | 33.48 / 32.09 / 47.39 | 38.26 / 37.75 / 53.32 | 72.60 / 71.25 | 61.5% / 69.4% |
+| 4 rows | 46.21 / 44.83 / 55.69 | 42.47 / 40.58 / 51.83 | 63.72 / 69.72 | 86.8% / 81.1% |
+| 16 rows | 42.46 / 41.17 / 52.51 | 42.39 / 38.49 / 55.78 | 60.16 / 61.50 | 78.6% / 76.3% |
+| Adaptive 4/8/16 | 42.39 / 43.84 / 53.52 | 41.65 / 39.98 / 52.82 | 66.07 / 67.10 | 86.1% / 79.8% |
+| One turn | 35.40 / 34.14 / 45.63 | 40.43 / 37.98 / 56.49 | 72.57 / 62.97 | 63.0% / 70.6% |
+
+All four epoch policies had **zero placement replays**. On reasoning the first stock K3 retained
+66/164 verifier rows and ran 28 repairs; epoch 4 retained 92/110 and needed three ordinary W1
+steps but no repair. On tool calls it went from 37/124 plus 29 repairs to 64/73 plus two W1.
+The remaining discarded rows are not placement conflicts. At epoch 4, loaded W1 and K3 had the
+same 1,288 slots, generated identical IDs and finished with equal route counts and profiles on both
+prompts. Relative to **stock unloaded** W1, K3 matched every tool ID but first differed at reasoning
+ID 70 (one-based). Changing placement changes the numerical target, including *without* a drafter.
+Natural VRAM is not a fixed slot count: e.g. the adaptive reasoning pair had 1,286 vs 1,282 slots
+and first differed at ID 70. The controlled state tests below fix the expert+KV arena instead.
+
+Longer epochs can reduce stalls on the tool prompt but lose much of W1's cache locality on reasoning.
+Four rows preserved almost all of the short-run route hit rate **without needing to predict expert
+IDs**. It did not make interactive gaps shorter than stock unloaded W1 (25.03 / 26.76 ms).
+
+### Agent and state checks
+
+* Restored 65,792 rows, 2,048-row fresh suffix, 49 greedy IDs, actual 2,048 MiB reserve, CPU unpack
+  reuse on. Two mirrored legs each: installed ordinary W1 **33.51–34.00**, epoch-4 loaded W1
+  **28.71–30.20**, epoch-4 K3 **41.77–42.47 tok/s**. All six ID sequences matched; every K3 leg
+  kept 48/48 rows with 36/36 matching guesses, so this especially predictable continuation is not an
+  agent benchmark. Wire gap p90 was **34.93–35.67 / 45.05–48.61 / 99.81–99.83 ms** respectively.
+  At 131,328 and 197,021 restored rows (same 2,048-row suffix): single triples measured **26.17 /
+  25.61 / 36.38** and **22.90 / 21.56 / 30.77 tok/s**. All 49 IDs matched within each triple; K3
+  kept 48/51 and 48/48 verifier rows respectively. Its p90 was **109.42 / 136.34 ms** against
+  **48.01 / 52.27 ms** installed. These were warm-drafter continuations, not cold RESTORE gains.
+* On the independent three-turn warmed **64K coding task**, same staging and fixed 5,200 MiB arena,
+  T=1/seed42, epoch-4 loaded W1 and K3 produced identical prompts and **all 517 sampled IDs**, made
+  both tool reads and passed **118/118**. Wall after RESTORE **24.88 → 20.72 s** (16.7% less), decode
+  **31.34 → 41.57 tok/s**, ID p90 **37.10 → 82.39 ms**. This is a live-swapping, same-work win **over
+  W1 under the same epoch policy**, not a head-to-head time to correct against ordinary W1.
+* Diagnostic pairs with the same initial layout and live admissions compared full post-softcap FP32 logits, per-row slot/recency/use
+  hashes, route profile and complete SAVEs. Epoch 4 crossed the 69,632 → 73,728 mapped-row edge
+  (940 → 925 experts); all 25 greedy IDs, 24 boundaries and 1,305,698,560 SAVE bytes matched.
+  Adaptive placement matched two 32-ID sampled turns including a warm append and partial accepts,
+  all 62 boundaries, 51,214,848 bytes of logits and both SAVEs. Epoch-4 `STOP` after delivery 15
+  returned 16 IDs; an equal-length W1 arm matched the 16+48 IDs, logits, boundaries, profiles and
+  both SAVEs after the continuation. No diagnostic times enter the tables.
+
+Actual production prefill, isolated loopback SSE billing task: one free trajectory per arm per seed,
+same natural 2 GiB reserve, two tool reads, **118/118 on every leg**. `budget` is the existing hybrid
+W1/lookup/DFlash2 width chooser, not adaptive epoch length. Kernel and wire intervals are not SSE gaps.
+
+| Arm | Time to correct, s (42 / 79) | Completion IDs (42 / 79) | Decode tok/s (42 / 79) | SSE gap p90, ms (42 / 79) |
+|---|---:|---:|---:|---:|
+| Installed ordinary W1 | 11.10 / 13.53 | 370 / 489 | 45.28 / 46.14 | 25.03 / 24.82 |
+| Epoch 4 loaded W1 | 10.60 / 14.41 | 343 / 475 | 44.73 / 41.95 | 26.57 / 27.88 |
+| Epoch 4 K3 | 11.05 / 10.65 | 463 / 431 | 58.27 / 56.80 | 58.41 / 60.92 |
+| Epoch 4, budget 85 ms | 11.52 / 10.87 | 370 / 396 | 43.54 / 50.18 | 36.60 / 49.21 |
+| DSpark | 10.17 / 10.21 | 400 / 417 | 57.43 / 59.07 | 57.53 / 55.41 |
+
+**Do not switch the service default.** K3 improved native throughput on both seeds and beat installed
+W1 on wall time on seed 79, but tied it on seed 42 and did not beat DSpark on time to correct. The
+sampled trajectories have different lengths; this is not same-work acceleration. Budget 85 bought
+back only part of the delivery latency. For offline throughput, four rows is a measured starting
+point; for responsive streams, ordinary W1 is still the control to beat.
+
+### What to pay at a boundary
+
+At 64K with the 5,200 MiB cap, a separate timing build measured epoch-4 K3 spending **155 ms of
+1,328 ms decode** inside its 12 publications. It installed 567 experts; 154 ms were *after*
+submission waiting for the new batch. This is exposed wall time, not isolated DMA bandwidth. The
+median publication was 15.7 ms. Once replay is gone, making weights available is worth pricing.
+
+In a scratch control, the same async follower filled the victims' slots during decode but the engine
+claimed the arrivals only at the **next** boundary. No extra slots, no waiting for this epoch's new
+batch, no mapping to an address being overwritten. At the same cap in alternating legs:
+
+| Policy (4 rows) | Loaded W1 tok/s | K3 tok/s | K3 ID p90 ms | GPU routes / 18,816 | Kept/evaluated K3 rows |
+|---|---:|---:|---:|---:|---:|
+| Join this batch, up to 64 | 30.05–30.16 | 41.07–42.00 | 95.50–99.49 | 13,318 | 48/51 |
+| Publish a batch late, up to 64 | 27.10–29.46 | 42.94–44.17 | 96.22–101.49 | 12,306 | 48/48 |
+| Join, cap admissions at 32 | 29.68 | 44.64 | 93.56 | 12,519 | 48/48 |
+| Join, cap admissions at 16 | 26.71 | 43.62 | 93.96 | 11,547 | 48/48 |
+
+All arms generated the same 49 greedy IDs; W1 and K3 matched the profile within each policy. The
+caps use the existing `--expert-swaps` and get one leg each. Late publication did **not** save the
+whole measured wait: it also left 1,012 more CPU routes. Its K3 did less target work, so the rate
+difference is not a pure overlap gain. In the natural-reserve short late-publication screen,
+unloaded W1 / loaded W1 / K3 gave **46.79 / 44.72 / 56.29** reasoning and **39.40 / 37.51 / 56.18**
+tool tok/s; K3 p90 was 54.18 / 63.20 ms. Keep this implementation in scratch. A bounded batch paid
+at publication is simpler and remains a competitive control. A useful next experiment is to budget
+**how many bytes to admit**, not just how many rows to freeze: compare the extra CPU misses and
+time waiting at publication on independent, less predictable multi-turn tasks. Fund any proposed
+double-buffer slots from the same physical reserve.
+
+Reproduce a guarded wire pair with `production/measure.py --expert-epoch 4 --stable-prefill
+--swaps 64 --temperature 0 --weights <Q4_0> --k 0` and `--k 3`, using the same `--binary`,
+`--profile`, `--prompt`, `--config` and **different** `--out` directories. Omit `--weights` for
+unloaded W1, and omit `--expert-epoch` for stock placement. Use `--cap` only for a same-layout
+control and verify the slot counts. For SSE use `agent_api.py native-w1|fixed-k|budget` with
+`--expert-epoch 4`. No service setting is needed to run these harnesses.
+
+Host-local receipts: `~/.cache/opencode-tmp/opencode/polystrata-runs/{spec-residency,spec-residency-agent64}/`.
+The first includes `short-report.md`, `async-report.md`, `matched-*`, `capped-*`, `natural-*`, `deep-*`,
+`sse-*`, `price-deep`, and the private build and guard logs. Final Release `epoch-final` SHA-256
+`0f630484bc150cb96750da1bc0ffd261597928129672b400ee49430e7192d699` also matched the previous Release
+with epochs **off**: plain W1, loaded W1 and K3 each matched all 96 greedy Python IDs, route profile
+and complete SAVE (1,092 slots, 64 swaps). The main screen used `epoch-worker`; the last change
+expressed adaptive thresholds as fractions for small swap queues (unchanged at 64). Final fixed-4
+64K W1/K3, KV-edge diagnostics, and adaptive four-entry queue W1/K3 were rechecked.

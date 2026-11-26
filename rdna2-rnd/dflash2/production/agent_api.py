@@ -51,6 +51,8 @@ def make_config(a, out):
     cfg = json.loads(a.config.read_text())
     cfg['args'] = list(cfg['args'])
     args = cfg['args']
+    if a.expert_epoch is not None:
+        cfg.setdefault('env', {})['STRATA_EXPERT_EPOCH'] = a.expert_epoch
     # Ambiguous inherited draft settings would invalidate comparisons.
     for flag in ('--window', '--lookup', '--draft-max', '--draft-model', '--dflash2-model',
                  '--dflash2-budget-ms', '--no-draft', '--serve'):
@@ -266,9 +268,12 @@ def main():
     ap.add_argument('--budget', type=float, default=100, help='budget mode estimated round cost in ms, not a deadline')
     ap.add_argument('--seed', type=int, choices=trajectory.SEEDS, default=42)
     ap.add_argument('--temperature', type=float, default=1, help='sampling temperature (default 1)')
+    ap.add_argument('--expert-epoch', help='decode residency for a native W1/DFlash2 worker')
     a = ap.parse_args()
     if a.mode != 'installed-w1' and not a.binary:
         ap.error('--binary is required for native and DSpark arms')
+    if a.expert_epoch is not None and a.mode not in ('native-w1', 'fixed-k', 'budget'):
+        ap.error('--expert-epoch requires a native W1/DFlash2 arm')
     if a.mode in ('native-w1', 'fixed-k', 'budget') and not a.weights:
         ap.error('--weights is required for native DFlash2 arms')
     if not math.isfinite(a.budget) or a.budget <= 0:
@@ -290,7 +295,7 @@ def main():
         inputs.append(a.dspark_weights)
     trajectory.dump(out / 'plan.json', dict(mode=a.mode, seed=a.seed, temperature=a.temperature,
         top_p=1, top_k=0, min_p=0, lookup=3 if a.mode == 'budget' else 0,
-        k=a.k, budget_ms=a.budget if a.mode == 'budget' else None,
+        k=a.k, expert_epoch=a.expert_epoch, budget_ms=a.budget if a.mode == 'budget' else None,
         inputs_sha256={str(p.resolve()): trajectory.sha(p) for p in inputs},
         note='SSE delivery gaps are not model-token gaps; each arm has its own free-running prompts.'))
     import fcntl
