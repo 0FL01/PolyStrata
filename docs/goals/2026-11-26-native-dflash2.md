@@ -1,6 +1,6 @@
 # Native DFlash2 and adaptive hybrid decode
 
-Status: **active**. Sources: 26 November RECON request starting at `b78503b6`; subsequent **Production DFlash2 & Adaptive Hybrid Verification** implementation request starting at `fa000e5c`.
+Status: **complete for the measured research and deployment decision**. Sources: 26 November RECON starting at `b78503b6`, **Production DFlash2 & Adaptive Hybrid Verification** at `fa000e5c`, and **Venture Decode Architecture & Adaptive Residency V2** at `1798843d`. The interactive deployment gate was tested and did not pass; the installed W1 remains unchanged.
 
 ## Finish line
 
@@ -9,13 +9,13 @@ Status: **active**. Sources: 26 November RECON request starting at `b78503b6`; s
 | R1. Native experimental HIP DFlash2 with the four target visits, five draft layers, selector and shared target head; check the donor math down to proposals. | Build and compare hidden states, candidates, corrections and proposals to BF16 checkpoint on real Tideglass features. | Verified on captured Tideglass rows |
 | R2. Compare **all five** supplied GGUFs to BF16 and DSpark across the seven requested workloads. Distinguish precision, execution cost and placement; probe tensor mixes and host/device codebooks. | Aligned prefix-length replay plus measured draft/round costs and footprints, fixed placement vs fixed physical budget. | Verified on the replay and placement fixtures |
 | R3. Explain and price multi-row target verification, including accepted/rejected state and the oracle ceiling at ~2K/16K/64K/128K/200K. Evaluate reuse of GPU/CPU weights and KV. | W1 against forced W2/4/6/8 on identical inputs/placement, first numerical/ID differences and measured window costs. | Verified on the oracle and zero-swap live fixtures |
-| R4. Evaluate adaptive choices (including no speculation) and interactions with existing decode options. Report live speed, quality, TTFT/p90 and time to solution vs production, DSpark and drafter-loaded W1; recommend an integration path and report failed hypotheses. | Guarded real generation, sampled/greedy sequence and state checks, graded agent controls. No speedup inferred from replay or an oracle. | In progress; no production qualification |
+| R4. Evaluate adaptive choices (including no speculation) and interactions with existing decode options. Report live speed, quality, TTFT/p90 and time to solution vs production, DSpark and drafter-loaded W1; recommend an integration path and report failed hypotheses. | Guarded real generation, sampled/greedy sequence and state checks, graded agent controls. No speedup inferred from replay or an oracle. | Verified on controlled and natural-budget trajectories; no interactive promotion |
 
 Envelope: Inkling only; one RX 6700 XT (gfx1031), Ryzen 7 5700X, Tideglass. The production request extends the RECON envelope to the native engine and server integration, initially opt-in. Keep experimental runners under `rdna2-rnd/dflash2/`, private inputs and receipts outside Git, and dense W1 available. Do not replace the deployed configuration until the candidate clears the production gates. Use the standard guard, serialize GPU legs and retain its failures. [Production control](2026-11-25-adaptive-global-kv/production.md); [previous DSpark results](native-donor-recon/dspark.md).
 
 ## Production finish line
 
-### Venture Decode Architecture & Adaptive Residency V2 (active, 26 November)
+### Venture Decode Architecture & Adaptive Residency V2 (26 November)
 
 The follow-up starts at `1798843d`. Keep both controls: the installed dense W1 at its physical
 reserve and Q4_0 epoch-4 K3. The finish line is measured decode and time to a correct answer, not
@@ -39,11 +39,22 @@ V4 K3 verifier lost to dense. The private persisted-draft layout can offer after
 it is not a portable image of expert placement. Keep P4 closed and the installed W1 and service
 unchanged; judge further work against **both** installed W1 and synchronous E4, not a kernel alone.
 
+**V2 decision.** Keep dense global Q8 and exact SWA. Use Q4_0 E4/K3 as the throughput baseline,
+not a universal setting. Full-history V4 funded experts and its grouped reader beat dense decode at
+199K, but lost on real long prefill and the held-out reasoning grade. No cost-aware admission policy
+won consistently over the stock ranker. Keep the cold-prompt projection skip and layer joins opt-in.
+Use target-only E4 lookup for repetitive short coding returns when the drafter is not loaded; lookup
+lost on held-out reasoning. With a loaded drafter, allowing the first guess after 32 rebuilt rows
+preserves ordinary target SAVEs, improves time to the same correct answer and increases streaming gaps.
+Persisting the full rings remains an experiment: in the three-arm 64K and 128K replays it did not
+pay for its extra bytes versus partial rebuild. Final HIP Release code `f98ad12d`; deployment remains the
+original W1. [Results, integrated switches, Release and controls](../../rdna2-rnd/dflash2/venture-v2/README.md).
+
 | Required outcome | Primary evidence | State |
 | --- | --- | --- |
 | P1. Native, exact DFlash2 with live expert placement and transactional verification on dense Q8 + compact SWA. | Same-initial-layout loaded W1 vs verifier: logits, sampled IDs, routes, placement and committed state across partial accepts, swaps, KV growth, prefix reuse, cancellation and SAVE/RESTORE. | Verified on controlled fixtures; production-prefill parity not qualified |
 | P2. Choose the drafter quant and evaluate adaptive speculation against installed W1, loaded W1, DSpark and the RECON best. | Guarded end-to-end Q4_0, Q4_0-mixed, Q4_K-mixed and Q8_0 runs, BF16 reference; free-running agent scores, time to correct, token counts, tool calls, retries, memory and API delivery timings. Include reused histories at 64K, 128K and near 200K. | Q4_0 with four-row admissions beats epoch W1 on matched 64K agent work; SSE time-to-correct vs installed W1 is seed dependent, p90 worse |
-| P3. Reprofile after improvements; test K256, V4 and LoopCD after dense qualification. | Measured kernel/critical-path changes, plus separate interactions and failures. | In progress; codecs gated on dense qualification |
+| P3. Reprofile after improvements; test K256, V4 and LoopCD after dense qualification. | Measured kernel/critical-path changes, plus separate interactions and failures. | Profiled release paths and tested native full-history V4. K256 would verify the wrong target; LoopCD warm reuse changes saved state. Neither combination was promoted. |
 | P4. Promote reproducible gains with a rollback. | HIP Release build, reviewed commits pushed to `main`, verified running executable, health, streaming, session state and real agent tasks, or a recorded failed promotion gate. | Not qualified; installed configuration unchanged |
 
 Previous production checkpoint (P2/P3): the exact anchor-first suffix did not beat W1 even after subtracting its full proposal cost. Do not build its concurrent counterpart. The residency experiment below instead changes the W1 execution policy.

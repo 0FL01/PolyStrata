@@ -2,7 +2,7 @@
 
 Tideglass Inkling 2 Mini, one RX 6700 XT (`gfx1031`, 12 GiB), Ryzen 7 5700X, 8 expert workers, HIP Release. Starting point: `1798843d`, including the transaction from `384251dc`. The installed W1 and the starting epoch worker are **different binaries**. W1 with a loaded drafter and the same residency policy is the verifier correctness control; W1 without a drafter at the same physical reserve is the product control.
 
-**What to use.** For matched long-history decode throughput, start with dense Q8 global history, exact compact SWA, Q4_0 DFlash2, E4/K3, and compare `STRATA_EXPERT_LAYER_JOIN=1` (`f90a3430`) against the synchronous join. For long *fresh* prompt latency test `STRATA_DFLASH2_SKIP_COLD=1` (`6e8bd737`). Both are off by default. Neither is a recommendation to replace the installed interactive W1. The experiments below distinguish RAM/VRAM savings, faster individual kernels, faster generation of the same IDs and faster answers to a graded task.
+**What to use on this host.** Keep dense Q8 global history and exact compact SWA. For **warm throughput**, Q4_0 DFlash2 with epoch 4, K3 and live expert trades is the reference. `STRATA_EXPERT_LAYER_JOIN=1` (`f90a3430`) can overlap those trades but did not consistently speed up the complete request. For **cold prompt TTFT**, `STRATA_DFLASH2_SKIP_COLD=1` (`6e8bd737`) skips only obsolete draft projections. For **short appends after RESTORE**, use `STRATA_DFLASH2_PARTIAL=1` with an already loaded Q4_0, or test `--lookup-epoch` (`ac2d7b55`) on repetitive coding continuations if loading a drafter is undesirable. These are opt-ins, not a combined service preset. Keep the installed W1 for interactive delivery; none won both time to correct and delivery latency consistently. See [worker settings](../production/README.md).
 
 ## Where the time goes
 
@@ -105,6 +105,14 @@ At 128K coding/reasoning accepted 83/114 and 54/71 guesses. Both arms of each pa
 
 The in-tree HIP Release (`ac2d7b55`, ELF `bc85df4ad5247ab9f8e53bb6f4dd5baf4d0237d8ca265469d554ea9f37877bbc`) replicated the 197K result in reverse order. Each generated turn had to match the recorded sampled IDs *before* receiving the next prompt. Decode **20.89 → 19.52 s** W1 → lookup, 424/424 IDs, native p90 **54.70 → 59.03 ms**, same route counts and profile. This replay used recorded tool returns, not a fresh grading run. A 48-ID trace logged 27 W1 / 3 W2 / 4 W4 rounds; 936.37 ms in dispatches and 60.06 ms H2D across 2,376.00 ms between target logits. Rebuilding the whole CPU suffix index on the 5700X took only 2.58–2.82 ms median per 128K prompt and 3.37–3.77 ms near 197K; removing it wouldn't account for the reasoning regression. Plain flag-off Release still matched the complete baseline SAVE, 67 IDs and profile. `replay-release/`, `lookup-epoch/index-cost/`, `lookup-final-plain/`.
 
+The target-only lookup also ran through authenticated HTTP RESTORE on the same 66,527-row slot.
+No drafter or artificial warmup: E4 W1 / lookup generated identical SSE-visible text and the
+same correct second tool read plus final answer (136 tokens). First delivery was 677/672 ms for
+the tool and 596/619 ms for the answer. Lookup took **4.71 vs 4.92 s** but delivery-gap p90
+rose **33.77 → 47.80 ms**; 26/35 guesses accepted, zero repairs. Initial slots were 1,379/1,380.
+Like the native coding result, this supports an opt-in, not changing the interactive service.
+`lookup-sse-window/aggregate.json`.
+
 ## Full-history compact KV
 
 [LexiEngine's layout](https://github.com/W61k3r/LexiSuite-Releases/wiki/LexiEngine-Inkling-2) rotates Q/K with WHT128 and V by two WHT64s before q4_0 packing. Its [RX 7900 XTX results](https://github.com/W61k3r/LexiSuite-Releases/wiki/Benchmarks) use a different engine and GPU; they do not isolate the effect of rotation. We compared codecs without dropping global rows: eight global **logical visits** and an unchanged recent Q8 tail. The 40 exact local SWA rings are not counted as full history.
@@ -160,6 +168,10 @@ The reverse-order E8/32 comparison on the 197K coding task matched all 444 IDs o
 
 ## Receipts and controls
 
+The clean persisted-state prototype also passed a separate live E4, 128K coding/79 test. Both restored the same 131,063 target rows, generated the same 461 output IDs and passed 118/118. Including RESTORE, target-only cold W1 → full-state K3 took **25.43 → 23.31 s** (RESTORE **2.11 → 3.38 s**); p90 **47.1 → 108.7 ms**, 312/376 offers accepted. Malformed images were rejected before transfer; controlled failures after mutation terminated the worker. The subsequent three-arm replay on the same E4 history matched every ID, per-turn route count and profile. RESTORE + three GENs: **25.05 / 21.74 / 20.39 s** COLD / WARM / PARTIAL. Partial accepted 312/375, did not read 80 MiB of extra rings, and its p90 matched WARM within 0.03 ms. Full-state SAVE didn't pay back against partial rebuild on either the frozen 64K or the live-E4 128K replay. It stays private, not a new storage contract. `draft/promotion/`, `partial-frozen/epoch128/`.
+
+Running the installed W1 ELF on the same authenticated 66K fork independently gave **4.75 s** to the correct answer after RESTORE, **31.13 ms** SSE gap p90 (vs **4.29 s / 70.12 ms** partial K3). Installed RESTORE and server startup took 1.28 and 2.26 s. The model's parsed assistant content, reasoning and tool arguments matched across the four loaded-drafter choices; these SSE checks do not expose raw target logits. `sse-partial-prod/`, `sse-partial/`.
+
 Raw logs, models, prompts, token IDs, checkpoints, temporary workers and disassemblies stay on the profiling host. `$V` below is `~/.cache/opencode-tmp/opencode/polystrata-runs/venture-v2`. No service token or private task data are required for the aggregate reader.
 
 ```sh
@@ -178,3 +190,16 @@ The in-tree layer-join Release repeat confirmed overlap (**44.61/106.68 ms** of 
 On the combined Release with layer joins enabled, tracing a **4,113-row** cold prompt before the first target softcap found **12,874 → 6,474 dispatches** on the draft queue, off → on for cold skip. The 256 skipped tap gathers account for 2,048 unnecessary rows; K/V preparation preserved all 13 output IDs and route counts. At 16,384 fresh rows and stable staging the untraced combined Release ABBA measured **22.57/19.53/19.30/19.78 s** TTFT, same 49 IDs, same routes/profile. Both pairs improved; the magnitude varied. The separate ordinary-prefill natural-reserve timings were **16.48/16.00/16.16 s** in A/B/A order, but initial slots were 1,321/1,334/1,344 and B first differed from A1 at output 17. Do not use that as a bit-exact comparison.
 
 With ordinary staging and the cap restored (`cold-skip/capped-real-*`, no layer join) all three started at 1,197 slots. The two off legs and the on leg matched all 49 IDs, 13,165 GPU picks and the final profile. Cold skip again reduced TTFT: **16.24 / 15.90 / 16.32 s**, A/B/A. Decode on that leg was **33.89 vs 38.54 / 39.05 IDs/s** on the controls. Cold skip is not a decode optimization.
+
+### Final Release: short returns at matched placement
+
+At `f98ad12d`, `build-poly-hip/strata-poly` SHA-256 **`a9f5d8930c44df5bba690a21ab8877d37afdfe7bd4fcc2d646582aa4c19006fd`**. Both arms load Q4_0 and use dense target KV, compact SWA, E4, 64 trades, identical stable prefill, 5,200 MiB cap, 8 CPU workers, no synthetic 2,048-row excerpt. On target-only RESTORE the starting E4/K3 policy also uses W1 for these short turns: neither full continuation rebuilds a complete ring. The partial arm uses `STRATA_DFLASH2_PARTIAL=1`, K3. Each task generated freely from the saved prefix and its real tool replies; both policies made two successful reads, no retries. The original grader, fixtures and profile were verified against their pre-campaign SHA-256 digests after the original cache paths disappeared (`fixture-rescue/`). Failed harness launches were not used as evidence.
+
+| Returned task | Exact outputs (reasoning / total) and grade | Decode IDs/s, loaded W1 → partial | Time to correct after RESTORE, s | Including RESTORE, s | Native gap p90, ms |
+|---|---|---:|---:|---:|---:|
+| 197,021-row coding, seed 42 | 183 / 424; 118/118 | 20.27 → 25.04 | 26.45 → 22.01 | 29.84 → 25.46 | 54.69 → 129.00 |
+| 129,015-row reasoning, seed 79 | 514 / 648; 4/4 | 27.76 → 36.14 | 28.05 → 22.85 | 30.29 → 25.15 | 44.81 → 92.95 |
+
+Both sampled pairs matched every ID and per-turn route count and the final profile. The 197K **greedy** pair also matched all 49 IDs, 8,480/18,816 GPU routes and final profile; K3 kept 47/54 verified rows and decoded at 24.59 vs 19.57 IDs/s. Plain W1 again matched the starting Release's 67 IDs and complete SAVE; the full-warm 64K E4 K3 path reproduced its 49 IDs, 35/38 acceptance and final profile. See `partial-independent/recovered-{coding,reasoning}`, `replay-release/partial-greedy-{0,3}`, `partial-final-plain`, `partial-main-warm`. No production profile, installed executable, service state or user SAVE was replaced.
+
+Independent rollback check (`partial-check/`): after a nonzero RESTORE and 137 rebuilt rows, two K3 rounds each accepted two guesses and rejected the third. STOP then append matched same-layout W1's 32 IDs, all 32 full FP32 target logit vectors, 11,520 ordered committed routes and both full SAVEs (1,092 frozen expert slots). On identical post-RoPE tensors the partial and stock split GPU leaves agreed bit-for-bit at ages 2,047–2,049; poisoning stale ring slots was invisible to the partial reader and detectable by the unclamped negative control. This distinguishes target-state parity from a claim that partial and full rings always make identical guesses.
