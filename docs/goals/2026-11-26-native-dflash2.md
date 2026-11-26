@@ -15,6 +15,26 @@ Envelope: Inkling only; one RX 6700 XT (gfx1031), Ryzen 7 5700X, Tideglass. The 
 
 ## Production finish line
 
+### Venture Decode Architecture & Adaptive Residency V2 (active, 26 November)
+
+The follow-up starts at `1798843d`. Keep both controls: the installed dense W1 at its physical
+reserve and Q4_0 epoch-4 K3. The finish line is measured decode and time to a correct answer, not
+the number of ports. Record (1) a fresh critical path per committed row and bytes/time paid for
+admissions, (2) same-policy W1 parity and free-running agent outcomes for candidates, including
+reused long histories, and (3) the Release/deployment decision. Compare wide verification, donor
+kernels, full-history compact KV and draft RESTORE as hypotheses; don't count a leaf or format win
+as an engine win. Approximate codecs need independent long-task quality evidence. The change
+envelope is the Inkling HIP worker and its direct consumers; private inputs, raw traces, SAVEs
+and unqualified binaries stay in `polystrata-runs/venture-v2/`.
+
+[V2 measurements and controls](../../rdna2-rnd/dflash2/venture-v2/README.md): on real 64K coding,
+E4 K3 and E8 K7 charged 24.26 and 24.21 ms per fed speculative row; E8 reduced ask cost but
+verified 741 rows for 549 retained vs 582 for 502. Both matched their own W1; the different
+placements produced different trajectories. Direct stream markers found 357 ms of uncovered
+CPU tail in the short K3 profile. Test pricing by layer and actual bytes, overlap without lost
+GPU routes, and warm RESTORE. Wider alone is not a new default. P4 remains closed while
+qualification runs; the installed W1 executable and inactive-on-entry service are unchanged.
+
 | Required outcome | Primary evidence | State |
 | --- | --- | --- |
 | P1. Native, exact DFlash2 with live expert placement and transactional verification on dense Q8 + compact SWA. | Same-initial-layout loaded W1 vs verifier: logits, sampled IDs, routes, placement and committed state across partial accepts, swaps, KV growth, prefix reuse, cancellation and SAVE/RESTORE. | Verified on controlled fixtures; production-prefill parity not qualified |
