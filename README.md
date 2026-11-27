@@ -35,6 +35,8 @@ establish a general speed or answer-quality improvement. Inherited models and ba
 
 ## Inkling-2-Mini performance
 
+The [Tideglass Unbound v3 RDNA2 report](docs/goals/2026-11-27-tideglass-unbound-v3.md) tracks a separate mixed-precision build: 14.4754 GiB, 144 Q8_0 attention projections and 48 Q4_0/Q4_1 expert tensors. Its [verified manifest](bench/results/2026-11-27-tideglass-unbound-v3/v3.manifest.json) is available; the historical throughput table below measures **v2.1**, not v3.
+
 **Measured on November 27, 2026:** `main` at `d6913676` and the deployed `35c899cb` build on an RX 6700 XT
 (12 GiB, `gfx1031`), Ryzen 7 5700X, 32 GiB RAM and TheRock HIP 7.13. The installed service still uses
 `35c899cb` with [MECHUK's Tideglass v2.1](https://huggingface.co/MECHUK/Tideglass-Inkling-2-Mini-Unbound-v2.1-GGUF).
