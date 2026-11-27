@@ -1297,14 +1297,32 @@ int once(Session& ss, const std::vector<int32_t>& ids, const Pictures& pictures,
          const Sampling& s, int top_probs) {
     std::atomic<bool> stop{false};
     std::string out;
+    // Standalone benchmark only. Observe the callbacks, not process startup or stdout buffering.
+    const bool measure = std::getenv("STRATA_TOKEN_TIMING") && std::strcmp(std::getenv("STRATA_TOKEN_TIMING"), "1") == 0;
+    std::vector<double> intervals;
+    auto last = Clock::now();
+    double first_ms = 0.;
     const Session::Result r = ss.generate(
         ids, pictures, pad, -1, max_new, s, stop,
         [&](int32_t t) {
+            if (measure) {
+                const auto now = Clock::now();
+                const double ms = std::chrono::duration<double, std::milli>(now - last).count();
+                if (out.empty()) first_ms = ms;
+                else intervals.push_back(ms);
+                last = now;
+            }
             if (top_probs > 0) print_top(ss.picked_from, ss.engine.n_vocab(), top_probs);
             out += (out.empty() ? "" : ",") + std::to_string(t);
         },
         [](int64_t, int64_t, double, bool) {});
     std::printf("%s\n", out.c_str());
+    if (measure && !intervals.empty()) {
+        std::sort(intervals.begin(), intervals.end());
+        const auto rank = [&](double q) { return intervals[(size_t) std::ceil(q * intervals.size()) - 1]; };
+        std::fprintf(stderr, "token timing: first %.3f ms, interval p50 %.3f ms, p90 %.3f ms\n",
+                     first_ms, rank(0.5), rank(0.9));
+    }
     const strata::poly::Stats& st = ss.engine.stats();
     const double experts = (double) std::max<int64_t>(st.gpu_experts + st.cpu_experts, 1);
     std::fprintf(stderr,
@@ -1423,6 +1441,7 @@ void usage() {
 #endif
     std::fprintf(stderr,
                  "usage: strata-poly --model FILE.gguf (--serve | --tokens ID,ID,... [--max-new N])\n"
+                 "  --tokens -             read one comma-separated prompt ID list from stdin (long forced runs)\n"
                  "  --max-context N        tokens the attention caches hold (default 8192)\n"
                  "  --threads N            CPU threads for the experts that are not in VRAM (default: 70%% of the usable\n"
                  "                         CPUs; all of them in a container with a CPU quota)\n"
@@ -1669,7 +1688,13 @@ int main(int argc, char** argv) {
         else if (a == "--min-p") s.min_p = std::strtof(val(), nullptr);
         else if (a == "--seed") s.seed = std::strtoull(val(), nullptr, 10);
         else if (a == "--tokens" || a == "--eos-ids" || a == "--follow") {
-            if (!parse_ids(val(), a == "--tokens" ? ids : a == "--eos-ids" ? eos : follow)) {
+            const char* value = val();
+            std::string line;
+            if (a == "--tokens" && std::strcmp(value, "-") == 0) {
+                std::getline(std::cin, line);
+                value = line.c_str();
+            }
+            if (!parse_ids(value, a == "--tokens" ? ids : a == "--eos-ids" ? eos : follow)) {
                 std::fprintf(stderr, "strata-poly: %s takes token ids separated by commas\n", a.c_str());
                 return 2;
             }

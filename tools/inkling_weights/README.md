@@ -52,6 +52,36 @@ This fetches only the pinned header and 24 selected projections. The sidecar rec
 
 ## Guarded runtime pilots
 
+### Compact Tideglass Unbound v3
+
+Use local, unmodified GGUFs (parent and donor pins are checked, not just their names). The
+published v3 Q8_0 GGUF already has llama.cpp's gate/up packing. Do not apply the Prime LoRA again.
+From the repository root, with NumPy and the Release build's GGML archive:
+
+```sh
+models="$HOME/.lmstudio/models/unsloth/Inkling-2-Mini"
+work="$HOME/.cache/opencode-tmp/opencode/polystrata-runs/tideglass-v3"
+mkdir -p "$work"
+hf download nokeepai/Inkling-2-Mini-Unbound-GGUF Inkling-2-Mini-Unbound-v3-Q8_0.gguf \
+  --revision accd51aadc5aaef0d16f9a3e5d71f0b5dab02e9d --local-dir "$work"
+c++ -shared -Wl,-u,quantize_row_q4_0_ref -o "$work/libggml-v3.so" build-poly-hip/ggml/src/libggml-base.a -pthread
+TIDEGLASS_GGML="$work/libggml-v3.so" python -m unittest tools.inkling_weights.test_tideglass_v3
+parent="$models/Tideglass-Inkling-2-Mini-Unbound-v2.1"
+output="$models/Tideglass-Inkling-2-Mini-Unbound-v3"
+python -m tools.inkling_weights.transplant tideglass-v3 --base "$parent.gguf" \
+  --parent-manifest "$parent.manifest.json" --donor "$work/Inkling-2-Mini-Unbound-v3-Q8_0.gguf" \
+  --ggml "$work/libggml-v3.so" --output "$output.gguf" --manifest "$output.manifest.json"
+```
+
+The writer scans both inputs before conversion and the complete output before publication. It
+copies 144 attention payloads directly; for 48 expert tensors it dequantizes, requantizes, and
+checks one contiguous expert at a time. The sidecar includes all errors as per-tensor maximum
+absolute error and min/median/p90/max of the per-expert RMSEs (relative to the Q8 donor, not
+training weights). It also includes the GGML version and linked library digest. Existing output
+files are never overwritten. See the [deployment report](../../docs/goals/2026-11-27-tideglass-unbound-v3.md).
+
+### Frozen pilots
+
 Use these from the checkout with production inactive. Run them serially on the one GPU. Each engine process gets its own scratch directory and writable seed profile; none reads production sessions. The binaries, corpus, template and runtime flags come from the [experiment lock](../../docs/goals/inkling2-weights/experiment-lock.json).
 
 For these pilots only, AMDGPU memory/page-fault journal entries are warnings, whether historical or live. They are preserved in `guard/warnings.json` and do not require a reboot or by themselves fail a run. This does not mask GPU resets, hangs, OOM, low VRAM, invalid outputs, nonzero exits or timeouts. `run_guarded.py` remains strict by default for other callers.

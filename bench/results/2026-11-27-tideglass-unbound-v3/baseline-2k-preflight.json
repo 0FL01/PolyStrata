@@ -1,0 +1,19 @@
+{
+  "prefill_tps": 860.7,
+  "decode_tps": 48.67,
+  "gpu_hit_percent": 89.1,
+  "cpu_expert_ms_per_token": 0.5,
+  "ttft_ms": 2379.43,
+  "p50_interval_ms": 19.764,
+  "p90_interval_ms": 22.539,
+  "model": "Tideglass-Inkling-2-Mini-Unbound-v2.1.gguf",
+  "exe_sha256": "8da30e06ab0196d1ed5f952e69a90155afbe6efc4a93b85cea0f8405384f423e",
+  "prompt_tokens": 2048,
+  "forced_tokens": 256,
+  "prompt_sha256": "2ef214a7d142601ec402d757c1fe2eb70a8689e9e9c0f1431b366781270b14be",
+  "forced_sha256": "31b28c1a2fc13219eac6ac37a2f9a876c059fc767080a3ba85f8241c9001f95e",
+  "peak_device_used_mib": 10272.69921875,
+  "peak_rss_kib": 15442772,
+  "resident_experts_at_load": 1247,
+  "profile_seed_sha256": "cefaeb39df358fa3d9a80c0291663cba3155e9c5e9729d3fcdc80d4bce0d2ec1"
+}

@@ -656,10 +656,16 @@ def main() -> None:
     copy.add_argument('--plan', type=Path, default=RECORDS / 'transplant-plan.json')
     copy.add_argument('--lock', type=Path, default=RECORDS / 'experiment-lock.json')
     copy.add_argument('--recon', type=Path, default=RECORDS / 'recon-pins.json')
+    v3 = sub.add_parser('tideglass-v3', help='build compact Tideglass v3 from the pinned local Q8 donor')
+    for option in ('base', 'parent-manifest', 'donor', 'ggml', 'output', 'manifest'):
+        v3.add_argument('--' + option, type=Path, required=True)
     args = parser.parse_args()
     try:
         if args.command == 'inventory':
             result = inventory(args.base, read_json(args.lock)['sources'], read_json(args.recon))
+        elif args.command == 'tideglass-v3':
+            from .tideglass_v3 import build as build_v3
+            result = build_v3(args)
         else:
             result = build(args)
     except (OSError, ValueError, KeyError, struct.error, subprocess.TimeoutExpired) as exc:
