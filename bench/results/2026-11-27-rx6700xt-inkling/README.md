@@ -56,8 +56,11 @@ The input checksums below hash the comma-separated decimal token IDs with no tra
 
 | Context | Prompt SHA-256 | Continuation SHA-256 |
 | --- | --- | --- |
-| 2K | `2ef214a7d142601ec402d757c1fe2eb70a8689e9e0f1431b366781270b14be` | `31b28c1a2fc13219eac6ac37a2f9a876c059fc767080a3ba85f8241c9001f95e` |
+| 2K | `2ef214a7d142601ec402d757c1fe2eb70a8689e9e9c0f1431b366781270b14be` | `31b28c1a2fc13219eac6ac37a2f9a876c059fc767080a3ba85f8241c9001f95e` |
 | 16K | `d50eb0f1049f2fe7cc42660b540e32597634735320bcedc950713eb9d39a29ed` | `417baa39612443fb31d7ed7c0a672a5155fe227095b7d6078e32772eb2889395` |
+
+Corrected 2026-11-28: the 2K prompt hash was missing `9c`; the value now matches
+`baseline-2k-preflight.json` and `measurements.json` in the Tideglass v3 results.
 
 The local profile seeds were not published. Their SHA-256 values were
 `0e1f086d16b66a399192cc964a80678b9e5f6c2ec80122eb6abfb1a3ca5a074b` (Tideglass) and

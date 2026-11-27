@@ -64,9 +64,9 @@ then 2K/16K. No prefix or KV state is reused. The seed is local to this run; the
 a different seed. Run under `rdna2-rnd/scripts/run_guarded.py --warn-amdgpu-faults` with the guard's
 device path adjusted for the RX 6800 on this host. The free-VRAM threshold was left at 1536 MiB.
 
-Fixture SHA-256 values below exclude any trailing newline. The published RX 6700 XT 2K prompt
-hash has 62 hex characters; regenerating the fixture from the pinned source inserts the missing `9c`.
-The other three fixture hashes match the reference report exactly.
+Fixture SHA-256 values below exclude any trailing newline. The earlier RX 6700 XT report's 2K
+prompt hash was missing `9c`; it now carries the corrected 64-character value, which matches the
+fixture used here. The other three fixture hashes match the reference report exactly.
 
 | Prompt length | Prompt SHA-256 | Continuation SHA-256 |
 | ---: | --- | --- |
