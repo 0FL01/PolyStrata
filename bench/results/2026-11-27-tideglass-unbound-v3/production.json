@@ -23,5 +23,17 @@
   ],
   "coding_client": "codex-cli 0.166.0",
   "coding_client_answer": "6",
-  "unauthenticated_models_status": 401
+  "unauthenticated_models_status": 401,
+  "hub_revision": "030a3cd5b006d63a695bb6c543104c268d88a617",
+  "service_restarted_after_hub_publish": true,
+  "service_active": "active",
+  "model_argv": "52721 /home/stfu/.config/strata/inkling2-mini/strata-poly-35c899cb --serve --model /home/stfu/.lmstudio/models/unsloth/Inkling-2-Mini/Tideglass-Inkling-2-Mini-Unbound-v3.gguf --kv q8_0 --max-context 200000 --prompt-batch 2048 --vram-reserve-mib 2048 --threads 8 --expert-swaps 64 --conversation-cache-mib 0 --expert-profile /home/stfu/.local/state/strata/expert-profile.inkling2-mini-tideglass-unbound-v3.txt --disk-sessions",
+  "restart_api_model_id": "inkling-2-mini",
+  "restart_streaming_smoke": "v3-online",
+  "vision_dependency": {
+    "file": "Inkling-2-Mini-Q4_0.gguf",
+    "revision": "ad66863fd3b7f3236c0b7a0862412c9e00f78a6e",
+    "sha256": "e8a583198523fe1119120061ed68fc3ce14dd1052ef53815014c867b307b9e37",
+    "size_bytes": 15064977088
+  }
 }
