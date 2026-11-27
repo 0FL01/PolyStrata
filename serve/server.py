@@ -1305,11 +1305,16 @@ class StrataEngine:
         return f" cvec={int(on)}" if isinstance(on, bool) else ""
 
     def turn_key(self, ids) -> str:
-        """`turn_at=POS`: where the prompt's last turn begins (its last token of turn_ids).  strata-poly keeps a
-        checkpoint there, which the chat's next request goes on from; the Qwen3.8 engine skips the key and finds the
-        place itself."""
+        """`turn_at=POS`: where the prompt's last turn begins (its last token of turn_ids), and `sys_at=POS`:
+        where the first turn (system prompt + tools) ends when >= 2048 tokens so hot session cache can pin it."""
         at = next((i for i in range(len(ids) - 1, 0, -1) if ids[i] in self.turn_ids), None)
-        return f" turn_at={at}" if at is not None else ""
+        opens = (i for i, t in enumerate(ids) if t in self.turn_ids)
+        next(opens, None)
+        sys_end = next(opens, None)
+        out = f" turn_at={at}" if at is not None else ""
+        if sys_end is not None and sys_end >= WARM_MIN_TOKENS:
+            out += f" sys_at={sys_end}"
+        return out
 
     def _send(self, text: str):
         btrace("send>", text[:60])

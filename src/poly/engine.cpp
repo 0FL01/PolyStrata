@@ -3482,6 +3482,7 @@ void Engine::reset() {
         prepared_decode_ = -1;
     }
     if (uses_dflash2()) rewind_features(0);
+    on_reset();
     if (next_) next_->reset();
 }
 
@@ -3503,6 +3504,7 @@ void Engine::refreeze_experts() {
 
 void Engine::save_state(uint8_t* dst) {
     OnCard here(device_, split_);
+    if (up_) ck(cudaStreamSynchronize(cs(up_)), "save state");
     ck(cudaStreamSynchronize(cs(st_)), "save state");
     save_card_state(dst);
     if (next_) next_->save_state(dst + card_state_bytes());
@@ -3526,13 +3528,33 @@ void Engine::load_state(const uint8_t* src, int64_t pos) {
     if (pos < 0 || pos > opt_.max_context) throw std::logic_error("load_state: the position is outside the context");
     OnCard here(device_, split_);
     if (expert_join_layers_) settle_swaps();
+    if (up_) ck(cudaStreamSynchronize(cs(up_)), "load state");
     ck(cudaStreamSynchronize(cs(st_)), "load state");
-    ck(cudaMemcpy(state_, src, state_n_ * sizeof(float), cudaMemcpyHostToDevice), "load state");
-    load_extra(src + state_n_ * sizeof(float), pos);
+    if (!try_unpack_state(src, pos)) {
+        ck(cudaMemcpy(state_, src, state_n_ * sizeof(float), cudaMemcpyHostToDevice), "load state");
+        load_extra(src + state_n_ * sizeof(float), pos);
+    }
     pos_ = pos;
     ahead_pos_ = -1;
+    on_state_loaded(pos);
     if (uses_dflash2()) rewind_features(pos);
     if (next_) next_->load_state(src + card_state_bytes(), pos);
+}
+
+void Engine::save_conv_state(uint8_t*) {
+    throw std::logic_error("save_conv_state: not supported by this engine");
+}
+
+void Engine::load_conv_state(const uint8_t*, int64_t) {
+    throw std::logic_error("load_conv_state: not supported by this engine");
+}
+
+void Engine::save_swa_rows(int64_t, int64_t, uint8_t*) {
+    throw std::logic_error("save_swa_rows: not supported by this engine");
+}
+
+void Engine::load_swa_rows(const uint8_t*, int64_t, int64_t, int64_t, int64_t, int64_t) {
+    throw std::logic_error("load_swa_rows: not supported by this engine");
 }
 
 void Engine::save_rows(int64_t first, int64_t n, uint8_t* dst) {
@@ -5909,7 +5931,8 @@ void Engine::layer(int il, int n) {
 // A checkpoint inside the read (a mark) is taken a layer at a time: when a layer has run the tokens before it,
 // the layer's state is what save_state() would find there, and it is copied before the next call changes it.
 bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
-                  const std::function<bool(int, int)>* turn, int64_t draft_skip_before) {
+                  const std::function<bool(int, int)>* turn, int64_t draft_skip_before,
+                  const std::function<void(int64_t)>* on_mark) {
     if (n < 1 || n > read_rows_) throw std::logic_error("read takes 1 to max_read() tokens");
     for (const Image& im : images_)
         if (im.at < pos_ + n && im.at + im.n > pos_)
@@ -5957,9 +5980,10 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
                 // Do not split an eval at the cutoff: keep the original target and draft batch shapes.
                 eval_rows(tokens + call.at, call.m, false, pos_ + call.m <= draft_skip_before);
             }
-            if (call.mark >= 0 && marks[call.mark].state) {
+            if (call.mark >= 0 && (marks[call.mark].state || on_mark)) {
                 behind.wait();
-                save_state(marks[call.mark].state);
+                if (marks[call.mark].state) save_state(marks[call.mark].state);
+                else if (on_mark) (*on_mark)(pos_);
             }
             if (turn && c + 1 < n_calls && !(*turn)(c + 1, n_calls)) {
                 behind.wait();

@@ -297,7 +297,8 @@ public:
     /// window layer's rows among it.  The caller goes back to a state saved before (load_state()) or resets.
     /// For a cold DFlash2 prompt, calls ending at or before `draft_skip_before` do not project the draft's KV.
     bool read(const int32_t* tokens, int n, const Mark* marks = nullptr, int n_marks = 0,
-              const std::function<bool(int, int)>* turn = nullptr, int64_t draft_skip_before = 0);
+              const std::function<bool(int, int)>* turn = nullptr, int64_t draft_skip_before = 0,
+              const std::function<void(int64_t)>* on_mark = nullptr);
     /// The prompt's reads are done: the expert cache takes back what Options::stage_read_mib lent the staging
     /// buffer.  window() and step() do it too, if the caller has not.
     void end_read() {
@@ -376,6 +377,21 @@ public:
     void save_rows(int64_t first, int64_t n, uint8_t* dst);
     /// Rows [first, first + n) out of what save_rows wrote for [from, from + count).
     void load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n);
+
+    /// Half-open committed SWA row interval proved resident in VRAM for the current live lineage.
+    struct SwaRange { int64_t lo = 0, hi = 0; };
+    /// Optional incremental SWA + convolution checkpoint primitives (dense single-card Inkling).
+    virtual bool has_swa_delta() const { return false; }
+    virtual size_t conv_state_bytes() const { return 0; }
+    virtual size_t swa_row_bytes() const { return 0; }
+    virtual int64_t swa_ring_rows() const { return 0; }
+    virtual int64_t swa_history_rows() const { return 0; }
+    virtual SwaRange resident_swa_rows() const { return {}; }
+    virtual void save_conv_state(uint8_t* dst);
+    virtual void load_conv_state(const uint8_t* src, int64_t pos);
+    virtual void save_swa_rows(int64_t first, int64_t n, uint8_t* dst);
+    virtual void load_swa_rows(const uint8_t* src, int64_t from, int64_t count,
+                               int64_t first, int64_t n, int64_t target_pos);
 
     const Stats& stats() const;
     /// Between requests, and once after the load: of the experts the card has, the pages of the half used most
@@ -539,6 +555,11 @@ protected:
     virtual void load_extra(const uint8_t* src, int64_t pos) { (void) src, (void) pos; }
     /// One card's checkpoint after save_state() selected the card and joined st_. The default saves each layer.
     virtual void save_card_state(uint8_t* dst);
+    /// Optional packed full-state restore on one card after load_state() fenced st_/up_. False = fallback.
+    virtual bool try_unpack_state(const uint8_t* src, int64_t pos) { (void) src; (void) pos; return false; }
+    /// Lifecycle hooks for architecture-owned resident SWA lineage tracking.
+    virtual void on_reset() {}
+    virtual void on_state_loaded(int64_t pos) { (void) pos; }
     /// Layer il's part of what save_state() writes, to its place in dst: the layer's recurrent state, and what
     /// extra_bytes() counts for it, as they are once the layer has run every token before `pos`.  The card is
     /// done with the layer when this is called.  save_state() is this for every layer; read() calls it for a

@@ -531,6 +531,9 @@ struct Session {
         o.admit = [floor = (uint64_t) f.min_free_mib << 20](size_t bytes) {
             return strata::core::conversation_memory_admit(strata::core::available_host_bytes(), bytes, floor);
         };
+        o.l2_ok = [floor = ((uint64_t) f.min_free_mib + 1024ull) << 20]() {
+            return strata::core::conversation_memory_admit(strata::core::available_host_bytes(), 0, floor);
+        };
         return o;
     }
 
@@ -551,12 +554,15 @@ struct Session {
     template<class OnToken, class OnProgress>
     Result generate(const std::vector<int32_t>& ids, const Pictures& pictures, int32_t pad, int64_t turn_at,
                     int64_t max_new, const Sampling& s, const std::atomic<bool>& stop, OnToken on_token,
-                    OnProgress on_progress, const std::function<bool(int64_t)>* between = nullptr) {
+                    OnProgress on_progress, const std::function<bool(int64_t)>* between = nullptr,
+                    int64_t pin_at = -1) {
         Result r;
         const int64_t n = (int64_t) ids.size();
         Clock::time_point t0 = Clock::now(), shown = t0;   // bringing a parked conversation back is prompt time
+        const bool has_vision = !pictures.at.empty() ||
+            std::any_of(ids.begin(), ids.end(), [](int32_t t) { return t < 0; });
         engine.images(pictures.at.data(), (int) pictures.at.size());
-        r.resume = kept.resume(ids);
+        r.resume = kept.resume(ids, has_vision);
         static const bool skip_cold_draft = [] {
             const char* flag = std::getenv("STRATA_DFLASH2_SKIP_COLD");
             return flag && flag[0] == '1' && flag[1] == '\0';
@@ -573,6 +579,7 @@ struct Session {
                          double(freed) / double(1ull << 30), had, engine.cached_experts());
         }
         kept.turn_at(turn_at);
+        if (pin_at > 0 && pin_at < n) kept.pin_at(pin_at);
         asked += n;
         reused += r.resume;
         on_progress(r.resume, n, 0.0, true);
@@ -622,7 +629,10 @@ struct Session {
                     }
                     return true;
                 };
-                if (!engine.read(ids.data() + i, (int) m, marks.data(), (int) marks.size(), &turn, draft_skip_before)) {
+                const std::function<void(int64_t)> on_mark = [&](int64_t pos) { kept.capture_mark_at(pos); };
+                const auto* mark_cb = kept.uses_swa_delta() ? &on_mark : nullptr;
+                if (!engine.read(ids.data() + i, (int) m, marks.data(), (int) marks.size(), &turn, draft_skip_before,
+                                 mark_cb)) {
                     kept.rewind();
                     r.finish = "cancel";
                     break;
@@ -703,6 +713,7 @@ struct Session {
                     if (!use.k) {
                         engine.eval_decode(t);
                         kept.read(&t, 1);
+                        kept.on_decode_commit();
                         t = pick(engine.logits());
                         if (adaptive) df_policy.observe(use, 0, 0, 0, 0., ms_since(round));
                         ++df_serial;
@@ -734,6 +745,7 @@ struct Session {
                     }
                     engine.keep(fed);
                     kept.read(w, fed);
+                    kept.on_decode_commit();
                     const int accepted = fed - 1 + (!more || replay);
                     const int compared = accepted + (more && !replay && fed < width);
                     r.guessed += use.k;
@@ -742,6 +754,7 @@ struct Session {
                         ++df_replay;
                         engine.eval_decode(t);
                         kept.read(&t, 1);
+                        kept.on_decode_commit();
                         t = pick(engine.logits());
                     }
                     if (adaptive) df_policy.observe(use, accepted, compared, match, proposal_ms, ms_since(round) - proposal_ms);
@@ -796,6 +809,7 @@ struct Session {
                 if (use.t == 1) {
                     engine.eval_decode(t);
                     kept.read(&t, 1);
+                    kept.on_decode_commit();
                     t = pick(engine.logits());
                     policy.observe(false, 1, 0, 0, count(1, 1));
                     continue;
@@ -811,6 +825,7 @@ struct Session {
                 while (right < use.t - 1 && t == w[right + 1] && (more = show(t))) t = pick(engine.logits_of(++right));
                 engine.keep(right + 1);
                 kept.read(w, right + 1);
+                kept.on_decode_commit();
                 r.guessed += use.t - 1;
                 r.guessed_right += right + (more ? 0 : 1);
                 policy.observe(use.lookup, use.t, right, match, count(use.t, right + 1));
@@ -832,13 +847,15 @@ struct Session {
 // the key image_pad, the token whose runs in the ids are the pictures' places.  turn_at is the place in the ids
 // where the prompt's last turn begins (the server knows the template's turn tokens): a checkpoint goes there.
 bool parse_gen(const std::string& line, long long& max_new, Sampling& s, int32_t& pad, int64_t& turn_at,
-               std::string& pictures, std::vector<int32_t>& ids) {
+               int64_t& pin_at, std::string& pictures, std::vector<int32_t>& ids) {
     const bool geni = line.rfind("GENI ", 0) == 0;
     char* p = nullptr;
     max_new = std::strtoll(line.c_str() + (geni ? 5 : 4), &p, 10);
     if (max_new < 1) return false;
     pad = -1;
     turn_at = -1;
+    pin_at = -1;
+    int64_t sys_at = -1;
     for (;;) {   // key=value tokens, then the file and the ids
         while (*p == ' ') ++p;
         const char* start = p;
@@ -862,8 +879,11 @@ bool parse_gen(const std::string& line, long long& max_new, Sampling& s, int32_t
         else if (key == "seed") s.seed = std::strtoull(v, nullptr, 10);
         else if (key == "image_pad") pad = (int32_t) std::atoi(v);
         else if (key == "turn_at") turn_at = std::strtoll(v, nullptr, 10);
+        else if (key == "pin") pin_at = std::strtoll(v, nullptr, 10);
+        else if (key == "sys_at") sys_at = std::strtoll(v, nullptr, 10);
         // other keys belong to the other engine and are skipped
     }
+    if (pin_at < 1 && sys_at > 0) pin_at = sys_at;
     pictures.clear();
     if (geni) {
         const char* end = std::strchr(p, ' ');
@@ -1078,7 +1098,7 @@ int serve(Session& ss, bool want_disk_sessions) {
         Sampling s;
         std::vector<int32_t> ids;
         int32_t pad = -1;
-        int64_t turn_at = -1;
+        int64_t turn_at = -1, pin_at = -1;
         std::string file;
         // VRAM [reserve_mib], the server's POST /v1/vram: the expert cache sized again between requests, to leave
         // that much VRAM to other programs; alone, back to what the engine started with
@@ -1130,7 +1150,7 @@ int serve(Session& ss, bool want_disk_sessions) {
             std::fflush(stdout);
             continue;
         }
-        if (!parse_gen(line, max_new, s, pad, turn_at, file, ids)) {
+        if (!parse_gen(line, max_new, s, pad, turn_at, pin_at, file, ids)) {
             std::printf("ERR bad request\n");
             std::fflush(stdout);
             continue;
@@ -1190,7 +1210,7 @@ int serve(Session& ss, bool want_disk_sessions) {
                     }
                     std::fflush(stdout);
                 },
-                slots.empty() ? nullptr : &between);
+                slots.empty() ? nullptr : &between, pin_at);
             if (r.gave_way >= 0) {
                 engine.copy_seq(0, gives_to + 1);
                 slots[(size_t) gives_to] = Slot{};
@@ -1274,6 +1294,9 @@ int serve(Session& ss, bool want_disk_sessions) {
                          "parked in %zu MiB, %zu pushed out; %lld MiB of VRAM free at the end\n",
                  ss.reused, ss.asked, ss.asked > 0 ? 100.0 * (double) ss.reused / (double) ss.asked : 0.0,
                  ss.kept.parked(), ss.kept.parked_bytes() >> 20, ss.kept.evictions(), (long long) engine.vram_free_mib());
+    if (ss.kept.uses_swa_delta())
+        std::fprintf(stderr, "strata-poly: hot session cache: %zu component trims, %zu in-VRAM SWA fast rollbacks\n",
+                     ss.kept.component_trims(), ss.kept.swa_fast_rollbacks());
     return 0;
 }
 
@@ -1525,6 +1548,11 @@ void usage() {
                  "  --conversation-cache-min-tokens N   a conversation shorter than this is not parked (default 1024)\n"
                  "  --conversation-cache-min-free-mib N park only while this much physical RAM stays free (default\n"
                  "                         2560)\n"
+                 "  --hot-cache            opt-in Hot Session Cache & Exact SWA State Replay (full-tip parking,\n"
+                 "                         incremental SWA+conv deltas, pinned prefix anchors, L2/L3 spill)\n"
+                 "  --swa-delta-every N    with --hot-cache: decode tokens between incremental SWA deltas (default 256)\n"
+                 "  --conversation-cache-l2-mib N  with --hot-cache: parked MiB kept hot in RAM before L3 spill\n"
+                 "                         (default: same as --conversation-cache-mib while host RAM has headroom)\n"
                  "  --disk-sessions        with --serve: opt in to SAVE/RESTORE for Inkling-2-Mini without DSpark\n"
                  "  --batch N              N answers written together, each in a sequence of its own with its own\n"
                  "                         state and attention rows (default 0 = one at a time; at most 8);\n"
@@ -1677,6 +1705,9 @@ int main(int argc, char** argv) {
         else if (a == "--conversation-cache-slots") cache.o.park_slots = std::atoi(val());
         else if (a == "--conversation-cache-min-tokens") cache.o.park_min = std::atoll(val());
         else if (a == "--conversation-cache-min-free-mib") cache.min_free_mib = std::atoll(val());
+        else if (a == "--hot-cache") cache.o.hot_cache = true;
+        else if (a == "--swa-delta-every") cache.o.swa_delta_every = std::atoll(val());
+        else if (a == "--conversation-cache-l2-mib") cache.o.l2_ram_mib = std::atoll(val());
         else if (a == "--dump-layers") o.dump = true;
         else if (a == "--images") images = val();
         else if (a == "--image-pad") image_pad = std::atoi(val());
@@ -1732,10 +1763,11 @@ int main(int argc, char** argv) {
     if (check > 0) o.kv_grow = false;
     // over --tail-skip, as Strata's engine reads it: =0 turns a model's default off
     if (const char* v = std::getenv("STRATA_ROUTE_TAIL_SKIP")) o.tail_skip = std::atoi(v);
+    if (const char* v = std::getenv("STRATA_HOT_SESSION_CACHE"); v && std::string(v) == "1") cache.o.hot_cache = true;
     const long long most = 1LL << 24;   // MiB: 16 TiB
     if (cache.o.checkpoints < 0 || cache.o.every < 0 || cache.o.park_mib < 0 || cache.o.park_mib > most ||
         cache.o.park_slots < 0 || cache.o.park_slots > 1024 || cache.o.park_min < 0 || cache.min_free_mib < 0 ||
-        cache.min_free_mib > most) {
+        cache.min_free_mib > most || cache.o.swa_delta_every < 0 || cache.o.l2_ram_mib < -1 || cache.o.l2_ram_mib > most) {
         std::fprintf(stderr, "strata-poly: a cache option is negative or too large\n");
         return 2;
     }

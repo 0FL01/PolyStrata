@@ -23,6 +23,17 @@ public:
     void load_card_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n) override;
     size_t kv_fixed_bytes() const override { return hot_bytes_; }
     size_t kv_codec_saved_bytes(int64_t rows) const override;
+    bool has_swa_delta() const override;
+    size_t conv_state_bytes() const override;
+    size_t swa_row_bytes() const override;
+    int64_t swa_ring_rows() const override { return swa_plan_.ring_rows; }
+    int64_t swa_history_rows() const override { return std::min(opt_.max_context, kWindow - 1); }
+    SwaRange resident_swa_rows() const override;
+    void save_conv_state(uint8_t* dst) override;
+    void load_conv_state(const uint8_t* src, int64_t pos) override;
+    void save_swa_rows(int64_t first, int64_t n, uint8_t* dst) override;
+    void load_swa_rows(const uint8_t* src, int64_t from, int64_t count,
+                       int64_t first, int64_t n, int64_t target_pos) override;
 
 protected:
     void load_geometry() override;
@@ -37,6 +48,9 @@ protected:
     size_t recurrent_floats() const override;
     size_t extra_bytes() const override;
     void save_card_state(uint8_t* dst) override;
+    bool try_unpack_state(const uint8_t* src, int64_t pos) override;
+    void on_reset() override;
+    void on_state_loaded(int64_t pos) override;
     void save_layer(int il, int64_t pos, uint8_t* dst) override;
     void load_extra(const uint8_t* src, int64_t pos) override;
     int card_session_layout() const override;
@@ -149,6 +163,11 @@ private:
     void control(const Block& b, int il, int stream, float* in, int n);
     void ring_state(int visit, int64_t pos, const uint8_t* src, uint8_t* dst);
     bool try_pack_state(uint8_t* dst);
+    void touch_host_pages(uint8_t* dst, size_t bytes) const;
+    void fence_stage(const char* what);
+    int64_t ring_valid_lo_ = 0;
+    int64_t ring_valid_hi_ = 0;
+    int64_t ring_high_water_ = 0;
 
     // The DSpark drafter (--draft-model, a `dflash` GGUF with dspark_hidden_out): Engine::draft_ without a block
     // layer.  It reads the model's rows entering visits kTap (ds_taps_, every call) and its normed output (hn_ + n_embd_);

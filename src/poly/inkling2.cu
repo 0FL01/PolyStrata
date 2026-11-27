@@ -1077,12 +1077,67 @@ void Inkling2::save_hybrid_rows(int64_t first, int64_t n, uint8_t* dst) {
 #endif
 }
 
+void Inkling2::touch_host_pages(uint8_t* dst, size_t bytes) const {
+    if (!dst || bytes < (size_t(2) << 20) || !workers_ || workers_->threads() <= 1) return;
+    constexpr size_t kTouchJob = size_t(2) << 20;
+    const int jobs = (int) (bytes / kTouchJob + (bytes % kTouchJob != 0));
+    const auto touch_pages = [dst, bytes](int job) {
+        constexpr size_t kJob = size_t(2) << 20, kStep = 4096;
+        const size_t first = (size_t) job * kJob, end = std::min(bytes, first + kJob);
+        volatile uint8_t* const out = dst;
+        for (size_t at = first; at < end; at += kStep) out[at] = 0;
+        if (first < end) out[end - 1] = 0;
+    };
+    workers_->run(jobs, std::ref(touch_pages));
+}
+
+void Inkling2::fence_stage(const char* what) {
+    if (up_) ck(cudaStreamSynchronize(cs(up_)), what);
+    ck(cudaStreamSynchronize(cs(st_)), what);
+    staged_.clear();
+    staged_il_ = -1;
+}
+
 void Inkling2::save_card_rows(int64_t first, int64_t n, uint8_t* dst) {
     if (first < 0 || n < 0 || first > opt_.max_context || n > opt_.max_context - first)
         throw std::logic_error("save_rows: outside context");
     if (!n) return;
     ck(cudaStreamSynchronize(cs(st_)), "save Inkling rows");
     if (v4_) return save_hybrid_rows(first, n, dst);
+    static const bool pack = [] {
+        const char* p = std::getenv("STRATA_INKLING_STATE_PACK");
+        return p && p[0] == '1' && p[1] == '\0';
+    }();
+    if (pack && !draft_ && !recording_ && !split_ && !next_) {
+        const size_t total = (size_t) n * card_row_bytes();
+        touch_host_pages(dst, total);
+        if (direct_stage_ && stage_ && stage_bytes_ >= total) {
+            fence_stage("pack Inkling rows");
+            uint8_t* out = stage_;
+            for (int i = 0; i < kVisits; ++i) if (!local(i)) {
+                for (const auto& p : caches_[i].planes) if (p.stride) {
+                    const size_t bytes = (size_t) n * p.stride;
+                    ck(cudaMemcpyAsync(out, p.data + first * p.stride, bytes, cudaMemcpyDeviceToDevice, cs(st_)),
+                       "pack Inkling rows");
+                    out += bytes;
+                }
+            }
+            ck(cudaMemcpyAsync(dst, stage_, total, cudaMemcpyDeviceToHost, cs(st_)), "save packed Inkling rows");
+            ck(cudaStreamSynchronize(cs(st_)), "save packed Inkling rows");
+            return;
+        }
+        uint8_t* out = dst;
+        for (int i = 0; i < kVisits; ++i) if (!local(i)) {
+            for (const auto& p : caches_[i].planes) if (p.stride) {
+                const size_t bytes = (size_t) n * p.stride;
+                ck(cudaMemcpyAsync(out, p.data + first * p.stride, bytes, cudaMemcpyDeviceToHost, cs(st_)),
+                   "save Inkling rows");
+                out += bytes;
+            }
+        }
+        ck(cudaStreamSynchronize(cs(st_)), "save Inkling rows");
+        return;
+    }
     for (int i = 0; i < kVisits; ++i) if (!local(i)) {
         for (const auto& p : caches_[i].planes) if (p.stride) {
             const size_t bytes = (size_t) n * p.stride;
@@ -1105,6 +1160,45 @@ void Inkling2::load_card_rows(const uint8_t* src, int64_t from, int64_t count, i
     if (!n) return;
     cover(first + n);
     ck(cudaStreamSynchronize(cs(st_)), "load Inkling rows");
+    static const bool pack = [] {
+        const char* p = std::getenv("STRATA_INKLING_STATE_PACK");
+        return p && p[0] == '1' && p[1] == '\0';
+    }();
+    if (pack && !v4_ && !draft_ && !recording_ && !split_ && !next_) {
+        const size_t total = (size_t) n * card_row_bytes();
+        if (first == from && n == count && direct_stage_ && stage_ && stage_bytes_ >= total) {
+            fence_stage("unpack Inkling rows");
+            ck(cudaMemcpyAsync(stage_, src, total, cudaMemcpyHostToDevice, cs(st_)), "load packed Inkling rows");
+            const uint8_t* in = stage_;
+            for (int i = 0; i < kVisits; ++i) if (!local(i)) {
+                Cache& c = caches_[i];
+                c.indexed = std::min(c.indexed, (int) (first / inkling::kKvPage));
+                for (int j = 0; j < 4; ++j) {
+                    const auto& p = c.planes[j];
+                    if (!p.stride) continue;
+                    const size_t bytes = (size_t) n * p.stride;
+                    ck(cudaMemcpyAsync(p.data + first * p.stride, in, bytes, cudaMemcpyDeviceToDevice, cs(st_)),
+                       "unpack Inkling rows");
+                    in += bytes;
+                }
+            }
+            ck(cudaStreamSynchronize(cs(st_)), "load packed Inkling rows");
+            return;
+        }
+        for (int i = 0; i < kVisits; ++i) if (!local(i)) {
+            Cache& c = caches_[i];
+            c.indexed = std::min(c.indexed, (int) (first / inkling::kKvPage));
+            for (int j = 0; j < 4; ++j) {
+                const auto& p = c.planes[j];
+                if (!p.stride) continue;
+                ck(cudaMemcpyAsync(p.data + first * p.stride, src + (first - from) * p.stride, (size_t) n * p.stride,
+                                   cudaMemcpyHostToDevice, cs(st_)), "load Inkling rows");
+                src += (size_t) count * p.stride;
+            }
+        }
+        ck(cudaStreamSynchronize(cs(st_)), "load Inkling rows");
+        return;
+    }
     for (int i = 0; i < kVisits; ++i) if (!local(i)) {
         Cache& c = caches_[i];
         c.indexed = std::min(c.indexed, (int) (first / inkling::kKvPage));
@@ -1173,6 +1267,7 @@ void Inkling2::import_native_state(const uint8_t* src, int64_t pos) {
     }
     pos_ = pos;
     ahead_pos_ = -1;
+    on_state_loaded(pos);
 }
 
 size_t Inkling2::swa_state_bytes() const {
@@ -1304,22 +1399,10 @@ bool Inkling2::try_pack_state(uint8_t* dst) {
         }
 
     // Fault this checkpoint in parallel before the bulk D2H.
-    if (workers_ && workers_->threads() > 1) {
-        constexpr size_t kTouchJob = size_t(2) << 20;
-        const int jobs = (int) (bytes / kTouchJob + (bytes % kTouchJob != 0));
-        const auto touch_pages = [dst, bytes](int job) {
-            constexpr size_t kJob = size_t(2) << 20, kStep = 4096;
-            const size_t first = (size_t) job * kJob, end = std::min(bytes, first + kJob);
-            volatile uint8_t* const out = dst;
-            for (size_t at = first; at < end; at += kStep) out[at] = 0;
-            if (first < end) out[end - 1] = 0;
-        };
-        workers_->run(jobs, std::ref(touch_pages));
-    }
+    touch_host_pages(dst, bytes);
 
     // stage_ no longer holds weights, including if an enqueue below throws. clear() retains capacity.
-    staged_.clear();
-    staged_il_ = -1;
+    fence_stage("pack Inkling state");
     ck(cudaMemsetAsync(stage_, 0, bytes, cs(st_)), "pack Inkling state padding");
     ck(cudaMemcpyAsync(stage_, state_, state_bytes, cudaMemcpyDeviceToDevice, cs(st_)),
        "pack Inkling convolution state");
@@ -1357,6 +1440,204 @@ bool Inkling2::try_pack_state(uint8_t* dst) {
     ck(cudaStreamSynchronize(cs(st_)), "save packed Inkling state");
     // No caller can start its next prefetch or narrow/unmap stage_ until all copies above have completed.
     return true;
+}
+
+bool Inkling2::try_unpack_state(const uint8_t* src, int64_t pos) {
+    static const bool pack = [] {
+        const char* p = std::getenv("STRATA_INKLING_STATE_PACK");
+        return p && p[0] == '1' && p[1] == '\0';
+    }();
+    if (!pack || !src || draft_ || v4_ || !looped_ || !direct_stage_ || !stage_ || split_ || next_ || recording_ ||
+        lo_ != 0 || hi_ != n_layer_ || n_layer_ != kPhysical || layers_.size() != kPhysical ||
+        state_n_ != rec_n_ || rec_n_ != (size_t) kVisits * kConvFloats || !state_ ||
+        swa_plan_.ring_rows <= 0 || pos < 0 || pos > opt_.max_context)
+        return false;
+    const size_t state_bytes = state_n_ * sizeof(float), bytes = card_state_bytes();
+    if (stage_bytes_ < bytes) return false;
+    const int64_t keep = std::min(opt_.max_context, kWindow - 1);
+    const int64_t first = std::max<int64_t>(0, pos - keep);
+    const size_t one = (size_t) keep * kv_bytes();
+    if (bytes != state_bytes + (kVisits - kVisits / kBlock) * one || swa_plan_.ring_rows < keep) return false;
+    for (int i = 0; i < kVisits; ++i) if (local(i))
+        for (int j = 0; j < 4; ++j) {
+            const auto& p = caches_[i].planes[j];
+            const size_t stride = j % 2 ? (q8() ? kKey / 32 * sizeof(uint16_t) : 0)
+                                       : kKey * (q8() ? 1 : sizeof(uint16_t));
+            if (p.stride != stride || (stride && !p.data)) return false;
+        }
+    fence_stage("unpack Inkling state");
+    ck(cudaMemcpyAsync(stage_, src, bytes, cudaMemcpyHostToDevice, cs(st_)), "load packed Inkling state");
+    ck(cudaMemcpyAsync(state_, stage_, state_bytes, cudaMemcpyDeviceToDevice, cs(st_)),
+       "unpack Inkling convolution state");
+    for (int i = 0; i < kVisits; ++i) {
+        if (!local(i)) {
+            caches_[i].indexed = std::min(caches_[i].indexed, (int) (pos / inkling::kKvPage));
+            continue;
+        }
+        const uint8_t* plane = stage_ + state_bytes + (i - i / kBlock) * one;
+        for (const auto& p : caches_[i].planes) if (p.stride) {
+            for (int64_t row = first; row < pos;) {
+                const auto [at, count] = inkling::swa_ring_span(row, pos, swa_plan_.ring_rows);
+                const size_t off = (size_t) (row - (pos - keep)) * p.stride;
+                ck(cudaMemcpyAsync(p.data + at * p.stride, plane + off, (size_t) count * p.stride,
+                                   cudaMemcpyDeviceToDevice, cs(st_)), "unpack Inkling SWA state");
+                row += count;
+            }
+            plane += (size_t) keep * p.stride;
+        }
+    }
+    ck(cudaStreamSynchronize(cs(st_)), "load packed Inkling state");
+    return true;
+}
+
+void Inkling2::on_reset() {
+    ring_valid_lo_ = 0;
+    ring_valid_hi_ = 0;
+    ring_high_water_ = 0;
+}
+
+void Inkling2::on_state_loaded(int64_t pos) {
+    const int64_t keep = std::min(opt_.max_context, kWindow - 1);
+    ring_valid_lo_ = std::max<int64_t>(0, pos - keep);
+    ring_valid_hi_ = pos;
+    ring_high_water_ = pos;
+}
+
+bool Inkling2::has_swa_delta() const {
+    const int64_t keep = std::min(opt_.max_context, kWindow - 1);
+    return looped_ && q8() && !v4_ && !k256_ && !draft_ && !split_ && !next_ &&
+           opt_.batch == 0 && bound_ == 0 && lo_ == 0 && hi_ == n_layer_ &&
+           n_layer_ == kPhysical && layers_.size() == kPhysical &&
+           state_n_ == rec_n_ && rec_n_ == (size_t) kVisits * kConvFloats &&
+           state_ != nullptr && swa_plan_.ring_rows >= keep;
+}
+
+size_t Inkling2::conv_state_bytes() const { return has_swa_delta() ? state_n_ * sizeof(float) : 0; }
+
+size_t Inkling2::swa_row_bytes() const {
+    return has_swa_delta() ? (kVisits - kVisits / kBlock) * kv_bytes() : 0;
+}
+
+Engine::SwaRange Inkling2::resident_swa_rows() const {
+    if (!has_swa_delta() || win_ != 0 || ring_valid_lo_ == INT64_MAX) return {0, 0};
+    const int64_t hi = std::min(ring_valid_hi_, pos_);
+    if (ring_valid_lo_ >= hi) return {0, 0};
+    return {ring_valid_lo_, hi};
+}
+
+void Inkling2::save_conv_state(uint8_t* dst) {
+    if (!has_swa_delta() || !dst || win_ != 0 || recording_)
+        throw std::logic_error("save_conv_state: unavailable or unsettled engine state");
+    ck(cudaStreamSynchronize(cs(st_)), "save Inkling conv state");
+    const size_t bytes = state_n_ * sizeof(float);
+    touch_host_pages(dst, bytes);
+    ck(cudaMemcpy(dst, state_, bytes, cudaMemcpyDeviceToHost), "save Inkling conv state");
+}
+
+void Inkling2::load_conv_state(const uint8_t* src, int64_t pos) {
+    if (!has_swa_delta() || !src || win_ != 0 || recording_ || pos < 0 || pos > opt_.max_context)
+        throw std::logic_error("load_conv_state: invalid state or position");
+    if (expert_join_layers_) settle_swaps();
+    if (up_) ck(cudaStreamSynchronize(cs(up_)), "load Inkling conv state");
+    ck(cudaStreamSynchronize(cs(st_)), "load Inkling conv state");
+    ck(cudaMemcpy(state_, src, state_n_ * sizeof(float), cudaMemcpyHostToDevice), "load Inkling conv state");
+    pos_ = pos;
+    ahead_pos_ = -1;
+    on_state_loaded(pos);
+    if (uses_dflash2()) rewind_features(pos);
+}
+
+void Inkling2::save_swa_rows(int64_t first, int64_t n, uint8_t* dst) {
+    if (!has_swa_delta() || !dst || win_ != 0 || recording_ || first < 0 || n <= 0 ||
+        n > swa_plan_.ring_rows || first > pos_ || n > pos_ - first)
+        throw std::logic_error("save_swa_rows: invalid range or unsettled state");
+    const SwaRange live = resident_swa_rows();
+    if (first < live.lo || first + n > live.hi)
+        throw std::logic_error("save_swa_rows: requested rows are no longer resident in the SWA ring");
+    const size_t total = (size_t) n * swa_row_bytes();
+    touch_host_pages(dst, total);
+    if (direct_stage_ && stage_ && stage_bytes_ >= total) {
+        fence_stage("pack Inkling SWA rows");
+        uint8_t* out = stage_;
+        for (int i = 0; i < kVisits; ++i) if (local(i)) {
+            for (const auto& p : caches_[i].planes) if (p.stride) {
+                for (int64_t row = first; row < first + n;) {
+                    const auto [at, count] = inkling::swa_ring_span(row, first + n, swa_plan_.ring_rows);
+                    const size_t bytes = (size_t) count * p.stride;
+                    ck(cudaMemcpyAsync(out, p.data + at * p.stride, bytes, cudaMemcpyDeviceToDevice, cs(st_)),
+                       "pack Inkling SWA rows");
+                    out += bytes;
+                    row += count;
+                }
+            }
+        }
+        ck(cudaMemcpyAsync(dst, stage_, total, cudaMemcpyDeviceToHost, cs(st_)), "save packed Inkling SWA rows");
+        ck(cudaStreamSynchronize(cs(st_)), "save packed Inkling SWA rows");
+        return;
+    }
+    ck(cudaStreamSynchronize(cs(st_)), "save Inkling SWA rows");
+    uint8_t* out = dst;
+    for (int i = 0; i < kVisits; ++i) if (local(i)) {
+        for (const auto& p : caches_[i].planes) if (p.stride) {
+            for (int64_t row = first; row < first + n;) {
+                const auto [at, count] = inkling::swa_ring_span(row, first + n, swa_plan_.ring_rows);
+                const size_t bytes = (size_t) count * p.stride;
+                ck(cudaMemcpyAsync(out, p.data + at * p.stride, bytes, cudaMemcpyDeviceToHost, cs(st_)),
+                   "save Inkling SWA rows");
+                out += bytes;
+                row += count;
+            }
+        }
+    }
+    ck(cudaStreamSynchronize(cs(st_)), "save Inkling SWA rows");
+}
+
+void Inkling2::load_swa_rows(const uint8_t* src, int64_t from, int64_t count,
+                             int64_t first, int64_t n, int64_t target_pos) {
+    if (!has_swa_delta() || !src || win_ != 0 || recording_ ||
+        from < 0 || count <= 0 || first < from || n <= 0 || first - from > count || n > count - (first - from) ||
+        target_pos < 0 || target_pos > opt_.max_context || n > swa_plan_.ring_rows ||
+        first < std::max<int64_t>(0, target_pos - swa_plan_.ring_rows) || first + n > target_pos)
+        throw std::logic_error("load_swa_rows: invalid range or target position");
+    // Invalidate live SWA provenance while overwriting ring slots; load_conv_state() publishes the restored window.
+    ring_valid_lo_ = INT64_MAX;
+    ring_valid_hi_ = 0;
+    const size_t total = (size_t) n * swa_row_bytes();
+    if (first == from && n == count && direct_stage_ && stage_ && stage_bytes_ >= total) {
+        fence_stage("unpack Inkling SWA rows");
+        ck(cudaMemcpyAsync(stage_, src, total, cudaMemcpyHostToDevice, cs(st_)), "load packed Inkling SWA rows");
+        const uint8_t* in = stage_;
+        for (int i = 0; i < kVisits; ++i) if (local(i)) {
+            for (const auto& p : caches_[i].planes) if (p.stride) {
+                for (int64_t row = first; row < first + n;) {
+                    const auto [at, cnt] = inkling::swa_ring_span(row, first + n, swa_plan_.ring_rows);
+                    const size_t bytes = (size_t) cnt * p.stride;
+                    ck(cudaMemcpyAsync(p.data + at * p.stride, in, bytes, cudaMemcpyDeviceToDevice, cs(st_)),
+                       "unpack Inkling SWA rows");
+                    in += bytes;
+                    row += cnt;
+                }
+            }
+        }
+        ck(cudaStreamSynchronize(cs(st_)), "load packed Inkling SWA rows");
+        return;
+    }
+    ck(cudaStreamSynchronize(cs(st_)), "load Inkling SWA rows");
+    for (int i = 0; i < kVisits; ++i) if (local(i)) {
+        for (const auto& p : caches_[i].planes) if (p.stride) {
+            const uint8_t* plane_src = src + (size_t) (first - from) * p.stride;
+            for (int64_t row = first; row < first + n;) {
+                const auto [at, cnt] = inkling::swa_ring_span(row, first + n, swa_plan_.ring_rows);
+                const size_t bytes = (size_t) cnt * p.stride;
+                ck(cudaMemcpyAsync(p.data + at * p.stride, plane_src, bytes, cudaMemcpyHostToDevice, cs(st_)),
+                   "load Inkling SWA rows");
+                plane_src += bytes;
+                row += cnt;
+            }
+            src += (size_t) count * p.stride;
+        }
+    }
+    ck(cudaStreamSynchronize(cs(st_)), "load Inkling SWA rows");
 }
 
 void Inkling2::save_layer(int il, int64_t pos, uint8_t* dst) {
@@ -1763,6 +2044,10 @@ void Inkling2::run_visits(int n) {
         ~Lanes() { kernels::iq_set_slot_lanes(false); }
     } lanes;
     depth_n_ = 0;
+    const int64_t prev_lo = ring_valid_lo_, prev_hi = ring_valid_hi_, prev_hw = ring_high_water_;
+    // Conservatively invalidate before modifying SWA rings; publish only after all 48 visits enqueue cleanly.
+    ring_valid_lo_ = INT64_MAX;
+    ring_valid_hi_ = 0;
     for (visit_ = 0; visit_ < kVisits; ++visit_) {
         if (visit_ == kStart) axpy(r_, 1.f, prelude_, n * kWidth, false, st_);
         if (visit_ == kStart + kCore || visit_ == kStart + 2 * kCore) {
@@ -1780,6 +2065,16 @@ void Inkling2::run_visits(int n) {
                        "Inkling draft taps");
         layer(physical(visit_), n);
     }
+    const int64_t new_hw = std::max(prev_hw, pos_ + n);
+    const int64_t ring_min = swa_plan_.ring_rows > 0 ? std::max<int64_t>(0, new_hw - swa_plan_.ring_rows) : INT64_MAX;
+    if (prev_lo != INT64_MAX && prev_lo <= pos_ && pos_ <= prev_hi && swa_plan_.ring_rows > 0) {
+        ring_valid_lo_ = std::max(prev_lo, ring_min);
+        ring_valid_hi_ = pos_ + n;
+    } else if (pos_ == 0 && swa_plan_.ring_rows > 0) {
+        ring_valid_lo_ = ring_min;
+        ring_valid_hi_ = n;
+    }
+    ring_high_water_ = new_hw;
 }
 
 float* Inkling2::feature_output() {
