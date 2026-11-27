@@ -35,7 +35,7 @@ establish a general speed or answer-quality improvement. Inherited models and ba
 
 ## Inkling-2-Mini performance
 
-The RX 6700 XT production host runs **Tideglass Unbound v3** (14.4754 GiB) with a 200,000-token context limit. In a fresh same-binary v2.1/v3 comparison on that host, both passed **55/58** quality trials, not the same 55. On the 53 both solved, median wall time to a correct answer fell from **3.32 to 2.93 s**. V3 used 18.7% fewer reasoning tokens overall, but missed one of two restored 197K repository questions; v2.1 answered both.
+The RX 6700 XT production config selects **Tideglass Unbound v3** (14.4754 GiB) with a 200,000-token context limit. In a fresh same-binary v2.1/v3 comparison on that host, both passed **55/58** quality trials, not the same 55. On the 53 both solved, median wall time to a correct answer fell from **3.32 to 2.93 s**. V3 used 18.7% fewer reasoning tokens overall, but missed one of two restored 197K repository questions; v2.1 answered both.
 
 | Input tokens | Prefill v2.1 → v3, tok/s | Forced decode v2.1 → v3, tok/s |
 | ---: | ---: | ---: |

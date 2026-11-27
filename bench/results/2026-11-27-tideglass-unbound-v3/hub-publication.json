@@ -1,0 +1,17 @@
+{
+  "repo": "MECHUK/Tideglass-Inkling-2-Mini-Unbound-v2.1-GGUF",
+  "revision": "030a3cd5b006d63a695bb6c543104c268d88a617",
+  "files": {
+    "Tideglass-Inkling-2-Mini-Unbound-v3.gguf": {
+      "size_bytes": 15542835904,
+      "sha256": "0797a36af531aec9788544123c90c95138f49414530101c6d3dfeed7aeb08bf4"
+    },
+    "Tideglass-Inkling-2-Mini-Unbound-v3.manifest.json": {
+      "size_bytes": 294589,
+      "sha256": "0ea0943e37f47e1f16a0510cad67c66a87f736c73942ef1b04e3e060cbbcf10d"
+    }
+  },
+  "verification": "Hub LFS size and digest matched the verified local artifact; the manifest fetched at this revision matched byte-for-byte.",
+  "model_url": "https://huggingface.co/MECHUK/Tideglass-Inkling-2-Mini-Unbound-v2.1-GGUF/blob/030a3cd5b006d63a695bb6c543104c268d88a617/Tideglass-Inkling-2-Mini-Unbound-v3.gguf",
+  "manifest_url": "https://huggingface.co/MECHUK/Tideglass-Inkling-2-Mini-Unbound-v2.1-GGUF/blob/030a3cd5b006d63a695bb6c543104c268d88a617/Tideglass-Inkling-2-Mini-Unbound-v3.manifest.json"
+}

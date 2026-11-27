@@ -1,5 +1,7 @@
 # Tideglass v2.1 / v3, RX 6700 XT
 
+The final GGUF and verified tensor manifest are published in [MECHUK/Tideglass-Inkling-2-Mini-Unbound-v2.1-GGUF](https://huggingface.co/MECHUK/Tideglass-Inkling-2-Mini-Unbound-v2.1-GGUF/tree/030a3cd5b006d63a695bb6c543104c268d88a617). Both artifact digests were checked against the Hub; the manifest downloaded back byte-for-byte. See the pinned [publication record](hub-publication.json).
+
 Run from the checkout. [`inputs.json`](inputs.json) pins the GGUFs, binary, tokenizer template, corpus and original long prompt files. A means v2.1, B means v3. The 2K parent-only preflight is separate from the post-build paired series. [`row-samples.json`](row-samples.json) contains 24 actual layer-0 source and target row checks, including rows on either side of the half-matrix boundary. On those rows, cosine similarity to the same v2.1 row was at least 0.996; the maximum absolute similarity to the other half was 0.228, to the next expert 0.084. Those bounds are a mapping sanity check, not model quality.
 
 ## Reproduce

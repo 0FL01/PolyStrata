@@ -1,14 +1,14 @@
 # Tideglass Unbound v3 on RDNA2
 
-Status: complete. Source: 2026-11-27 Tideglass v3 deployment request (§§1–13).
+Status: active (Hub publication complete; restart blocked on missing vision model). Source: 2026-11-27 Tideglass v3 deployment request (§§1–13), followed by user's request to upload and then switch production.
 
 | Outcome | Acceptance and primary evidence | Status |
 |---|---|---|
 | R1 (§§3–7,9) | Reproducible compact GGUF beside v2.1; pinned provenance, independent reader checks, full-file and per-payload hashes; 144 Q8 attention + 48 Q4 experts + 512 byte-identical inherited tensors. | Verified |
 | R2 (§§9–10) | Guarded gfx1031 load and paired 2K/16K/64K/197K forced timings, including resource and expert metrics, on one Release binary. | Verified |
 | R3 (§11) | Frozen tasks and multi-step coding/tool/long-context workloads: success, thinking, iterations and elapsed time to a correct answer across seeds/efforts. | Verified |
-| R4 (§12) | Same production API, vision and context; v3-only sessions and profile; verify argv, chat, reasoning, actual tool round-trip, client and SAVE/RESTORE. | Verified |
-| R5 (§13) | Publish pipeline, tests, measured results and report; clean private intermediates. | Verified |
+| R4 (§12) | Same production API, vision and context; v3-only sessions and profile; verify argv, chat, reasoning, actual tool round-trip, client and SAVE/RESTORE. | In progress |
+| R5 (§13) | Publish pipeline, tests, measured results and report; clean private intermediates. | In progress |
 
 Scope: tools/inkling_weights, benchmark results, README, local model artifacts and production config. Preserve parent tokenizer, metadata and shapes, W1/W3 and expert order, Q4_1 down in blocks 0–2 only. No engine optimization or unrelated changes. Prefer a verified high-precision merged source for experts; use pinned Q8 if unavailable. Recreate KV, never share writable state between models.
 
@@ -77,7 +77,9 @@ V3 was faster on 36 of the 53 shared successes. It passed C++ debug at low/42 an
 
 ## Deployment and rollback
 
-The active user `strata.service` was started with the v3 GGUF. The actual engine argv, `/v1/models` and [production smoke](../../bench/results/2026-11-27-tideglass-unbound-v3/production.json) confirm `strata-poly-35c899cb` and API ID `inkling-2-mini` on loopback port 8080. Only `--model`, `--expert-profile` and `slot_save_path` changed in the parsed config. The profile was seeded with the v3 warm-up; slots use `slots-tideglass-unbound-v3`. The binary, 200,000-token capacity, flags, tokenizer, CPU vision config and API key did not change. Service enablement policy was not changed.
+The v3 deployment was previously verified: actual engine argv, `/v1/models` and [production smoke](../../bench/results/2026-11-27-tideglass-unbound-v3/production.json) confirm `strata-poly-35c899cb` and API ID `inkling-2-mini` on loopback port 8080. Only `--model`, `--expert-profile` and `slot_save_path` changed in the parsed config. The profile was seeded with the v3 warm-up; slots use `slots-tideglass-unbound-v3`. The binary, 200,000-token capacity, flags, tokenizer, CPU vision config and API key did not change.
+
+After the user requested the Hub upload, publication was verified at commit `030a3cd5b006d63a695bb6c543104c268d88a617`: the GGUF LFS digest/size match the local artifact, and the fetched manifest is byte-identical. Restarting the service exposed a missing existing dependency: configured CPU vision encoder `strata-vision-690b87d8` cannot open its configured `Inkling-2-Mini-Q4_0.gguf` text model. That original source is absent. Its exact source is Bartowski revision `ad66863fd3b7f3236c0b7a0862412c9e00f78a6e`, size 15,064,977,088, SHA-256 `e8a583198523fe1119120061ed68fc3ce14dd1052ef53815014c867b307b9e37`. Recovery from the pin is in progress to preserve the existing vision setup. The main server is not running; the v3 model path and separate profile/session settings remain configured. No Q4 path substitution or vision-disable workaround was made.
 
 Authenticated SSE returned reasoning and a `read_build(component="compiler")` call; the client performed the lookup and returned it under the real call ID. The next streamed answer was `572913` with a natural stop. Unauthenticated `/v1/models` returned 401. Production saved and restored 215 tokens (96,619,780 bytes); the temporary smoke slot was removed. Codex CLI 0.166.0, isolated read-only, used the local Responses API and correctly answered `sum(range(4))` with `6`. After the API smoke the engine RSS was 15,340,608 KiB and total board usage 10,274 MiB. No image inference was benchmarked in this campaign.
 
