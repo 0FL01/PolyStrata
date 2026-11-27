@@ -35,23 +35,28 @@ establish a general speed or answer-quality improvement. Inherited models and ba
 
 ## Inkling-2-Mini performance
 
-**Deployed RDNA2 engine: `35c899cb` with [MECHUK's Tideglass v2.1](https://huggingface.co/MECHUK/Tideglass-Inkling-2-Mini-Unbound-v2.1-GGUF).**
-The table compares the deployed weights with Bartowski's original Q4_0 on the same RX 6700 XT (12 GiB,
-`gfx1031`), Ryzen 7 5700X and 32 GiB RAM. Rates are engine tokens/s, not HTTP latency.
+**Measured on November 27, 2026:** `main` at `d6913676` and the deployed `35c899cb` build on an RX 6700 XT
+(12 GiB, `gfx1031`), Ryzen 7 5700X, 32 GiB RAM and TheRock HIP 7.13. The installed service still uses
+`35c899cb` with [MECHUK's Tideglass v2.1](https://huggingface.co/MECHUK/Tideglass-Inkling-2-Mini-Unbound-v2.1-GGUF).
+Rates are engine tokens/s, not HTTP latency.
 
-| GGUF | 2K prefill | 2K decode | 16K prefill | 16K decode |
-| --- | ---: | ---: | ---: | ---: |
-| **Tideglass v2.1 (deployed)** | **685.2** | **43.24** | **934.7** | **44.35** |
-| Bartowski Q4_0 | 638.3 | 49.30 | 898.7 | 44.44 |
+| GGUF | Engine | 2K prefill | 2K decode | 16K prefill | 16K decode |
+| --- | --- | ---: | ---: | ---: | ---: |
+| **Tideglass v2.1** | **`main`** | **1006.2** | **49.62** | **1060.8** | **43.65** |
+| Bartowski Q4_0 | `main` | 1027.7 | 51.68 | 1051.9 | 46.07 |
+| Tideglass v2.1 | `35c899cb` (deployed) | 968.1 | 49.14 | 1054.2 | 44.10 |
 
 Each cell is the median of three untraced runs. Each run started a fresh process with a copy of that model's
-expert profile, dense Q8_0 KV, the settings below and no DSpark. Both models read the first 2,048 or 16,384
-tokens of `src/poly/main.cpp` from `35c899cb` (no chat template), then decoded the next 256 or 128 IDs as a
-forced continuation. The 2K prefill rates varied widely: 537.3–952.0 tokens/s on Tideglass and 280.2–904.8
-on Bartowski. At 16K, Tideglass decode ranged from 43.92 to 44.49 tokens/s. This measures throughput on the
-same code, not answer quality or an engine speedup.
+expert profile, dense Q8_0 global KV, compact sliding-window attention, the settings below and no drafter.
+Both models read the first 2,048 or 16,384 tokens of `src/poly/main.cpp` from `35c899cb` (no chat template),
+then decoded the next 256 or 128 IDs as a forced continuation. On Tideglass, `main`'s 2K prefill median was
+3.9% higher than the same-day deployed build, but the run ranges overlap. At 16K its prefill median was
+0.6% higher and its decode median was 1.0% lower. Both builds produced the same 160 IDs in a separate greedy
+2K run. These checks measure throughput and token agreement on this workload, not answer quality.
+[Per-run results and method](bench/results/2026-11-27-rx6700xt-inkling/README.md).
 
-For a different workload, the [197K agent measurements](docs/goals/2026-11-25-adaptive-global-kv/production.md#service-selection-and-deployment)
+For a different workload, the earlier
+[197K agent measurements](docs/goals/2026-11-25-adaptive-global-kv/production.md#service-selection-and-deployment)
 record **22.20–24.54 decode tokens/s** across four freely generated Tideglass coding and reasoning runs after
 session restore. Those are deployed dense-mode rates, not experimental sparse-attention results.
 
