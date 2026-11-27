@@ -1,0 +1,18 @@
+# Tideglass v2.1 / v3, RX 6700 XT
+
+Run from the checkout. [`inputs.json`](inputs.json) pins the GGUFs, binary, tokenizer template, corpus and original long prompt files. A means v2.1, B means v3. The 2K parent-only preflight is separate from the post-build paired series. [`row-samples.json`](row-samples.json) contains 24 actual layer-0 source and target row checks, including rows on either side of the half-matrix boundary. On those rows, cosine similarity to the same v2.1 row was at least 0.996; the maximum absolute similarity to the other half was 0.228, to the next expert 0.084. Those bounds are a mapping sanity check, not model quality.
+
+## Reproduce
+
+1. Build both inputs as described in the [report](../../../docs/goals/2026-11-27-tideglass-unbound-v3.md) and [writer instructions](../../../tools/inkling_weights/README.md#compact-tideglass-unbound-v3). Use a HIP Release `strata-poly` supporting `--tokens -`. Leave the GPU free and use the same executable for both arms.
+2. Under `~/.cache/opencode-tmp/opencode/polystrata-runs/<run>`, set `WORK=<run>/pairs` (new directory) and `HISTORY64`, `HISTORY197` to the archived prompt CSVs in `inputs.json`. The prompts contain earlier turns; only these read-only token inputs cross models, not KV or expert profiles. Run `bash bench/results/2026-11-27-tideglass-unbound-v3/run-pairs.sh`. Its 2K/16K schedule is ABBA; 64K is AB and 197K BA. Exclude warm-up. Decode throughput counts N−1 timed decode steps for N emitted IDs. The first attempt to use the long history's immediate suffix hit EOS; scored long runs instead use the ordinary 16K C++ suffix.
+3. For each model and each suite below, run a separate resident native engine under `rdna2-rnd/scripts/run_guarded.py --warn-amdgpu-faults`. The original v2.1 preflight warm-up supplied its quality profile; build the other model's profile with the same 2K warm-up, starting empty. Pass `--profile` a model-specific seed, never a live production profile. The worker copies it, writes its own state, and exits after the suite. For example:
+
+   ```sh
+   .venv/bin/python rdna2-rnd/scripts/run_guarded.py --warn-amdgpu-faults --output "$RUN/quality-$ARM-short-guard" -- \
+     timeout --foreground 3600 .venv/bin/python -m tools.inkling_weights.tideglass_quality \
+       --model "$MODEL" --exe "$EXE" --profile "$PROFILE" --output "$RUN/quality-$ARM-short"
+   ```
+
+   Change `short` to `repair` and append `--repair` for iterative Python debug. The repair tool checks a restricted expression AST on 88 reference vectors; code is not executed. To pass, the model reads the source and contract, gets a passing tool response, and returns that expression. Change `short` to `long` and append `--history "$HISTORY197"` for the long task. Do not carry old sessions into a new arm. Wall time starts before rendering the first request and includes client grading and tool calls, but not engine start or the long history's separately reported SAVE/RESTORE. Both long seeds restore the history at low effort. Short runs exercise all 32 frozen tasks at low/42, the four critical tasks at the other three seed/effort combinations, and both C++ and DevOps tool-return cases at all four combinations. The tested set isn't a random sample of production traffic.
+4. After both arms finish, `python bench/results/2026-11-27-tideglass-unbound-v3/collect.py "$RUN" measurements.json` exports quality scores, per-run rates, latency and memory, and times on *the same successful tasks*. A failure keeps a null time-to-correct rather than counting as an instant solution. `task_s` includes failed trials. No generated text, private history, credentials or journal data are published.

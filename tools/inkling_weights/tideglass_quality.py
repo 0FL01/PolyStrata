@@ -34,6 +34,33 @@ DEBUG = [
                 '/etc/atlas.conf': '[server]\nruntime_dir=/run/atlas-17\nsocket_name=local.sock'},
          check={'kind': 'json', 'value': {'socket': '/run/atlas-17/local.sock'}})]
 
+PROBE = dict(name='test_expression', description='Check one candidate expression against the billing regression tests. '
+             'Returns the first counterexample or PASS.', parameters=dict(type='object',
+             properties={'expression': {'type':'string'}}, required=['expression']))
+REPAIR = dict(id='billing-repair', max_new_tokens=1024, probe=True,
+              prompt='Repair the Python expression in billing.py. Read the source and the contract it names using '
+              'read_fixture. Use test_expression on your proposed fix. If tests fail, revise the candidate and test '
+              'again. After PASS, return just the tested expression. Use only integer arithmetic, comparisons, '
+              'min/max, and conditional expressions. No commands or imports.',
+              files={'billing.py':'def cost(n, level):\n    # contract: rates-v4\n    return min(39, (n//4)*7 + level*5)',
+                     'rates-v4':'For n <= 0 charge zero. Otherwise level 0 has base 5 and includes the first 3 '
+                     'units, then charges 7 per started group of 4 additional units, capped at 39 total. Level 1 '
+                     'has base 9 and includes the first 8 units, then 5 per started group of 3, capped at 43 total.'},
+              check={'kind':'python_expr', 'variables':['n','level'], 'vectors':[
+                  [[n, level], 0 if n <= 0 else min(cap, base+rate*((max(0,n-free)+group-1)//group))]
+                  for level, (free,group,rate,base,cap) in enumerate(((3,4,7,5,39),(8,3,5,9,43)))
+                  for n in (*range(-2, 41), 1000)]})
+
+
+def test_expression(expr, check):
+    if not isinstance(expr, str) or not expr.strip():
+        return 'Expected a nonempty expression.'
+    for vector in check['vectors']:
+        ok, why = validate({'check':{**check, 'vectors':[vector]}}, expr)
+        if not ok:
+            return f'{why}; arguments {vector[0]}, expected {vector[1]}'
+    return 'PASS'
+
 
 def dump(path, obj):
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2)+'\n')
@@ -48,8 +75,10 @@ def task(w, case, tok, template, seed, effort, prefix=()):
     start = time.monotonic()
     turns = []
     passed = False
-    for i in range(4 if files else 1):
-        norm, tools, kw = openai_to_messages(dict(messages=msgs, tools=[TOOL] if files else [], reasoning_effort=effort))
+    tested = None
+    for i in range(7 if case.get('probe') else 4 if files else 1):
+        declarations = [TOOL, PROBE] if case.get('probe') else [TOOL] if files else []
+        norm, tools, kw = openai_to_messages(dict(messages=msgs, tools=declarations, reasoning_effort=effort))
         rendered = template.render(norm, tools=tools, **kw)
         ids = tok.encode(rendered, parse_special=True)
         if prefix:
@@ -81,22 +110,33 @@ def task(w, case, tok, template, seed, effort, prefix=()):
         if not eos:
             break
         if not calls:
-            passed = validate(case, answer)[0] and set(seen) == files.keys()
+            passed = (validate(case, answer)[0] and set(seen) >= files.keys() and
+                      (not case.get('probe') or answer.strip() == tested))
             break
         if not files or len(calls) != 1:
             break
         c = calls[0]
-        if c.name != TOOL['name'] or not isinstance(c.arguments, dict) or set(c.arguments) != {'name'}:
+        if not isinstance(c.arguments, dict):
             break
-        key = c.arguments['name']
-        if not isinstance(key, str) or key not in files:
+        if case.get('probe') and c.name == PROBE['name'] and set(c.arguments) == {'expression'}:
+            key = 'test_expression'
+            expr = c.arguments['expression']
+            value = test_expression(expr, case['check'])
+            if value == 'PASS':
+                tested = expr.strip()
+        elif c.name == TOOL['name'] and set(c.arguments) == {'name'}:
+            key = c.arguments['name']
+            if not isinstance(key, str) or key not in files:
+                break
+            value = files[key]
+        else:
             break
         repeated += int(key in seen)
         seen.append(key)
         cid = f'fixture_{i}'
         msgs += [dict(role='assistant', content=answer, reasoning_content=reasoning,
                       tool_calls=[dict(id=cid, type='function', function=dict(name=c.name, arguments=c.arguments))]),
-                 dict(role='tool', tool_call_id=cid, content=files[key])]
+                 dict(role='tool', tool_call_id=cid, content=value)]
     wall = time.monotonic()-start
     return dict(id=case['id'], seed=seed, effort=effort, success=passed, task_s=wall,
                 time_to_correct_s=wall if passed else None, generated_tokens=generated, reasoning_tokens=thinking,
@@ -109,6 +149,7 @@ def main():
     for name in ('model', 'exe', 'profile', 'output'):
         p.add_argument('--'+name, type=Path, required=True)
     p.add_argument('--history', type=Path, help='197K CPython turn-1.prompt.csv: build and test a distinct SAVE')
+    p.add_argument('--repair', action='store_true', help='run only the iterative patch/test/repair workload')
     args = p.parse_args()
     os.umask(0o077)
     cfg = json.loads(CONFIG.read_bytes())
@@ -126,7 +167,11 @@ def main():
                 dump(out/f'{c["id"]}-{seed}-{effort}.json', r)
                 del r['turns']
                 scores.write(json.dumps(r)+'\n')
-            if args.history:
+            if args.repair:
+                for effort in ('low', 'high'):
+                    for seed in (42, 79):
+                        run(REPAIR, seed, effort)
+            elif args.history:
                 original = read_ids(args.history)
                 prefix = original[:197021]
                 if len(original) != 197135 or tok.decode(prefix[-1:]) != INKLING_STOP:
