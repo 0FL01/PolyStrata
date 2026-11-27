@@ -1,0 +1,27 @@
+{
+  "model": "inkling-2-mini",
+  "loaded": "Tideglass-Inkling-2-Mini-Unbound-v3.gguf",
+  "native_exe": "/home/stfu/.config/strata/inkling2-mini/strata-poly-35c899cb",
+  "native_pid": 39011,
+  "rss": "VmRSS:\t15340608 kB",
+  "total_board_vram_mib": 10274.17578125,
+  "models_ok": true,
+  "streamed": true,
+  "reasoning": true,
+  "tool": "read_build",
+  "tool_return": "572913",
+  "slot_tokens": 215,
+  "slot_bytes": 96619780,
+  "save_ms": 409.2,
+  "restore_ms": 114.6,
+  "endpoint": "http://127.0.0.1:8080",
+  "context": 200000,
+  "unchanged_except": [
+    "--model",
+    "--expert-profile",
+    "slot_save_path"
+  ],
+  "coding_client": "codex-cli 0.166.0",
+  "coding_client_answer": "6",
+  "unauthenticated_models_status": 401
+}

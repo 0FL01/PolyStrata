@@ -35,10 +35,21 @@ establish a general speed or answer-quality improvement. Inherited models and ba
 
 ## Inkling-2-Mini performance
 
-The [Tideglass Unbound v3 RDNA2 report](docs/goals/2026-11-27-tideglass-unbound-v3.md) tracks a separate mixed-precision build: 14.4754 GiB, 144 Q8_0 attention projections and 48 Q4_0/Q4_1 expert tensors. Its [verified manifest](bench/results/2026-11-27-tideglass-unbound-v3/v3.manifest.json) is available; the historical throughput table below measures **v2.1**, not v3.
+The RX 6700 XT production host runs **Tideglass Unbound v3** (14.4754 GiB) with a 200,000-token context limit. In a fresh same-binary v2.1/v3 comparison on that host, both passed **55/58** quality trials, not the same 55. On the 53 both solved, median wall time to a correct answer fell from **3.32 to 2.93 s**. V3 used 18.7% fewer reasoning tokens overall, but missed one of two restored 197K repository questions; v2.1 answered both.
+
+| Input tokens | Prefill v2.1 → v3, tok/s | Forced decode v2.1 → v3, tok/s |
+| ---: | ---: | ---: |
+| 2,048 | 826.1 → 864.1 | 45.28 → 45.81 |
+| 16,384 | 1032.7 → 1044.4 | 43.66 → 44.09 |
+| 65,536 | 861.0 → 856.6 | 36.02 → 36.48 |
+| 197,000 | 543.1 → 551.1 | 22.02 → 21.90 |
+
+These post-reboot runs used the same gfx1031 Release binary and separate model-specific profiles. Two runs per arm at 2K/16K; one at 64K/197K. [Report, regressions and deployment](docs/goals/2026-11-27-tideglass-unbound-v3.md) · [Per-run measurements](bench/results/2026-11-27-tideglass-unbound-v3/measurements.json) · [GGUF manifest](bench/results/2026-11-27-tideglass-unbound-v3/v3.manifest.json).
+
+### Earlier same-day engine comparison
 
 **Measured on November 27, 2026:** `main` at `d6913676` and the deployed `35c899cb` build on an RX 6700 XT
-(12 GiB, `gfx1031`), Ryzen 7 5700X, 32 GiB RAM and TheRock HIP 7.13. The installed service still uses
+(12 GiB, `gfx1031`), Ryzen 7 5700X, 32 GiB RAM and TheRock HIP 7.13. At the time the service used
 `35c899cb` with [MECHUK's Tideglass v2.1](https://huggingface.co/MECHUK/Tideglass-Inkling-2-Mini-Unbound-v2.1-GGUF).
 Rates are engine tokens/s, not HTTP latency.
 
