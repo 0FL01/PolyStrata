@@ -24,14 +24,16 @@ def main():
     flags = cfg['args'].copy()
     flags.remove('--disk-sessions')
     n, m = args.length, (256 if args.length == 2048 else 128)
-    if args.history:
-        ids = list(map(int, args.history.read_text().strip().split(',')))
-    else:
-        source = subprocess.check_output(['git', 'show', '35c899cb:src/poly/main.cpp']).decode()
-        ids = Tokenizer.from_dir(Path(cfg['tokenizer'])).encode(source, parse_special=False)
-    if len(ids) < n+m:
-        raise ValueError(f'need {n+m} token IDs, got {len(ids)}')
-    prefix, follow = (','.join(map(str, part)) for part in (ids[:n], ids[n:n+m]))
+    source = subprocess.check_output(['git', 'show', '35c899cb:src/poly/main.cpp']).decode()
+    code = Tokenizer.from_dir(Path(cfg['tokenizer'])).encode(source, parse_special=False)
+    ids = list(map(int, args.history.read_text().strip().split(','))) if args.history else code
+    # The long histories contain natural turn ends (including EOS). Don't disable normal EOS
+    # handling or count a truncated decode; use the same frozen ordinary C++ suffix as at 16K.
+    start = 16384 if args.history else n
+    suffix = code[start:start+m]
+    if len(ids) < n or len(suffix) != m or 200006 in suffix:
+        raise ValueError('incomplete prompt or invalid forced continuation')
+    prefix, follow = (','.join(map(str, part)) for part in (ids[:n], suffix))
     out = args.output.resolve()
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
     profile = out / 'profile'
