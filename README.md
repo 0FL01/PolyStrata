@@ -46,13 +46,6 @@ The RX 6700 XT production config selects **Tideglass Unbound v3** (14.4754 GiB) 
 
 These post-reboot runs used the same gfx1031 Release binary and separate model-specific profiles. Two runs per arm at 2K/16K; one at 64K/197K. [Report, regressions and deployment](docs/goals/2026-11-27-tideglass-unbound-v3.md) · [Per-run measurements](bench/results/2026-11-27-tideglass-unbound-v3/measurements.json) · [GGUF manifest](bench/results/2026-11-27-tideglass-unbound-v3/v3.manifest.json).
 
-### Community benchmark: RX 6800
-
-On an RX 6800 (16 GiB, `gfx1030`) with a Core i5-14600K and ROCm 10.1, RedStrata `b2a9f328` ran Bartowski's
-Inkling-2-Mini Q4_0 with the README preset and no drafter. Median prefill / forced decode was
-**1467.0 / 66.78 tok/s at 2K** and **1406.3 / 62.10 tok/s at 16K**, from three runs per size.
-[Settings and per-run results](bench/results/2026-11-27-rx6800-inkling/README.md).
-
 ### Earlier same-day engine comparison
 
 **Measured on November 27, 2026:** `main` at `d6913676` and the deployed `35c899cb` build on an RX 6700 XT
@@ -129,6 +122,8 @@ result comes from a separate paired engine benchmark.
 It is off in the measured production configuration: the speculative verifier has not matched ordinary decode
 with the live expert cache. [Measurements and limits](docs/goals/2026-11-24-inkling2-dspark-disk.md).
 
+**Community RX 6800:** On an RX 6800 (16 GiB, `gfx1030`) with a Core i5-14600K and ROCm 10.1, a community run measured median prefill / forced decode of **1467.0 / 66.78 tok/s at 2K** and **1406.3 / 62.10 tok/s at 16K**, from three runs per size on Bartowski's Q4_0 file with the README preset at `b2a9f328`. The GPU, CPU, ROCm version, expert-profile seed and engine revision differ from the RX 6700 XT measurements above, so this is not a controlled comparison; [settings and per-run results](bench/results/2026-11-27-rx6800-inkling/README.md).
+
 ## Run Inkling-2-Mini
 
 Inkling is not in the interactive installer yet. On Linux, set up the [HIP build prerequisites](docs/AMD_HIP.md#build)
@@ -152,7 +147,7 @@ python tools/strata_tokenizer.py --gguf /path/to/Inkling-2-Mini-Q4_0.gguf --out 
 
 On another RDNA2 card, set `CMAKE_HIP_ARCHITECTURES` to its target (gfx1030 for the RX 6800 / 6900, gfx1032 for
 the RX 6600, gfx1034 for the RX 6500 / 6400, gfx1035 / gfx1036 for Ryzen iGPUs). The speed options below take any
-of them. Only the RX 6700 XT has been run on real hardware.
+of them. The maintainers have run only the RX 6700 XT on real hardware; a community run also covers the RX 6800 (`gfx1030`) with Q4_0 ([settings and per-run results](bench/results/2026-11-27-rx6800-inkling/README.md)).
 
 Save this as `strata-inkling-2-mini.json` in the repository root, using the same GGUF path as above.
 The `env` block includes the speed options used in the measurements; they are not engine defaults.
