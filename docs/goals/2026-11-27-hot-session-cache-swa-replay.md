@@ -33,8 +33,8 @@ drops (354,745 recomputed tokens). Five concrete causes accounted for almost all
 
 ## What changed
 
-All Hot Session Cache behavior is opt-in (`--hot-cache` / `STRATA_HOT_SESSION_CACHE=1`). Default legacy behavior stays
-byte-identical (`conversations_test`: 54,954 checks passed).
+In this initial rollout the Hot Session Cache was opt-in (`--hot-cache` / `STRATA_HOT_SESSION_CACHE=1`).
+For current defaults and overrides, see [conversation parking](../INKLING2.md#conversation-parking).
 
 ### Stage A — Fast packed transfers & exact SWA delta primitives (`src/poly/engine.{hpp,cpp}`, `src/poly/inkling2.{hpp,cu}`)
 - Added `fence_stage()` (`up_` + `st_` sync) before borrowing `stage_`.

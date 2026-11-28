@@ -28,6 +28,7 @@
 #include <functional>
 #include <iostream>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -486,6 +487,8 @@ struct CacheFlags {
     CacheOptions o;
     long long min_free_mib = 2560;   // parking leaves this much physical RAM free
     bool park_auto = false;          // --conversation-cache-mib auto: park_mib from the RAM free once loaded
+    std::optional<bool> hot;         // unset: choose after loading the engine and sizing parking
+    bool delta_every_set = false;
 };
 
 struct Session {
@@ -1548,10 +1551,11 @@ void usage() {
                  "  --conversation-cache-min-tokens N   a conversation shorter than this is not parked (default 1024)\n"
                  "  --conversation-cache-min-free-mib N park only while this much physical RAM stays free (default\n"
                  "                         2560)\n"
-                 "  --hot-cache            opt-in Hot Session Cache & Exact SWA State Replay (full-tip parking,\n"
-                 "                         incremental SWA+conv deltas, pinned prefix anchors, L2/L3 spill)\n"
-                 "  --swa-delta-every N    with --hot-cache: decode tokens between incremental SWA deltas (default 256)\n"
-                 "  --conversation-cache-l2-mib N  with --hot-cache: parked MiB kept hot in RAM before L3 spill\n"
+                 "  --hot-cache / --no-hot-cache  force hot cache on supported engines / use legacy cache\n"
+                 "                         (default: hot on supported --serve engines with parking enabled)\n"
+                 "  --swa-delta-every N    decode tokens between hot-cache SWA deltas (0: off; default 0 in auto,\n"
+                 "                         256 when hot cache is forced on)\n"
+                 "  --conversation-cache-l2-mib N  with hot cache: parked MiB kept hot in RAM before L3 spill\n"
                  "                         (default: same as --conversation-cache-mib while host RAM has headroom)\n"
                  "  --disk-sessions        with --serve: opt in to SAVE/RESTORE for Inkling-2-Mini without DSpark\n"
                  "  --batch N              N answers written together, each in a sequence of its own with its own\n"
@@ -1705,8 +1709,11 @@ int main(int argc, char** argv) {
         else if (a == "--conversation-cache-slots") cache.o.park_slots = std::atoi(val());
         else if (a == "--conversation-cache-min-tokens") cache.o.park_min = std::atoll(val());
         else if (a == "--conversation-cache-min-free-mib") cache.min_free_mib = std::atoll(val());
-        else if (a == "--hot-cache") cache.o.hot_cache = true;
-        else if (a == "--swa-delta-every") cache.o.swa_delta_every = std::atoll(val());
+        else if (a == "--hot-cache" || a == "--no-hot-cache") cache.hot = a == "--hot-cache";
+        else if (a == "--swa-delta-every") {
+            cache.o.swa_delta_every = std::atoll(val());
+            cache.delta_every_set = true;
+        }
         else if (a == "--conversation-cache-l2-mib") cache.o.l2_ram_mib = std::atoll(val());
         else if (a == "--dump-layers") o.dump = true;
         else if (a == "--images") images = val();
@@ -1763,7 +1770,10 @@ int main(int argc, char** argv) {
     if (check > 0) o.kv_grow = false;
     // over --tail-skip, as Strata's engine reads it: =0 turns a model's default off
     if (const char* v = std::getenv("STRATA_ROUTE_TAIL_SKIP")) o.tail_skip = std::atoi(v);
-    if (const char* v = std::getenv("STRATA_HOT_SESSION_CACHE"); v && std::string(v) == "1") cache.o.hot_cache = true;
+    if (const char* v = std::getenv("STRATA_HOT_SESSION_CACHE"); !cache.hot.has_value() && v) {
+        if (std::strcmp(v, "1") == 0) cache.hot = true;
+        else if (std::strcmp(v, "0") == 0) cache.hot = false;
+    }
     const long long most = 1LL << 24;   // MiB: 16 TiB
     if (cache.o.checkpoints < 0 || cache.o.every < 0 || cache.o.park_mib < 0 || cache.o.park_mib > most ||
         cache.o.park_slots < 0 || cache.o.park_slots > 1024 || cache.o.park_min < 0 || cache.min_free_mib < 0 ||
@@ -1825,6 +1835,18 @@ int main(int argc, char** argv) {
             else
                 std::fprintf(stderr, "strata-poly: conversation cache off: not enough free RAM to park conversations "
                                      "(--conversation-cache-mib N asks for one anyway)\n");
+        }
+        const bool auto_hot = want_serve && cache.o.park_mib > 0 && cache.o.park_slots > 0 && cache.o.checkpoints > 0;
+        cache.o.hot_cache = engine.has_swa_delta() && cache.hot.value_or(auto_hot);
+        if (cache.o.hot_cache) {
+            if (!cache.hot.has_value() && !cache.delta_every_set) cache.o.swa_delta_every = 0;
+            const auto l2_mib = cache.o.l2_ram_mib >= 0 ? cache.o.l2_ram_mib : cache.o.park_mib;
+            std::fprintf(stderr, "strata-poly: hot session cache enabled (%s): parking %lld MiB, L2 %lld MiB, "
+                                 "decode delta every %lld tokens (0 is off)\n",
+                         cache.hot.has_value() ? "forced" : "auto", (long long) cache.o.park_mib,
+                         (long long) l2_mib, (long long) cache.o.swa_delta_every);
+        } else if (cache.hot.value_or(false)) {
+            std::fprintf(stderr, "strata-poly: hot session cache not supported by this engine configuration; using legacy cache\n");
         }
         Session ss(engine, eos, cache, lookup, dflash2_budget_ms);
         if (draft_max > 0 || (engine.uses_dspark() && draft_max == 0))

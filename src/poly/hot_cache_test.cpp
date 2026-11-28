@@ -413,6 +413,23 @@ void test_component_eviction_and_fuzz() {
     }
 }
 
+void test_snapshot_memory_pressure() {
+    auto o = hot_opts();
+    int attempts = 0;
+    bool room = false;
+    o.admit = [&](size_t) { ++attempts; return room; };
+    HotChat c(o);
+    std::vector<int32_t> a = text(1, 90);
+    check(c.ask(a, 50) == 0, "cold request can proceed without snapshot memory");
+    check(c.e.swa_d2h_rows == 0, "declined snapshots do not copy SWA rows");
+    check(attempts == 5, "one prefill snapshot and four decode attempts spaced 16 tokens apart");
+    room = true;
+    const auto tip = (int64_t) a.size();
+    auto next = a + text(2, 10);
+    check(c.ask(next, 20) == tip, "live extension still reuses the tip under pressure");
+    check(c.e.swa_d2h_rows > 0, "snapshot capture resumes when memory is available");
+}
+
 }  // namespace
 
 int main() {
@@ -421,6 +438,7 @@ int main() {
     test_spec_verifier_overwrite_and_rollback();
     test_vision_isolation_and_adopt();
     test_component_eviction_and_fuzz();
+    test_snapshot_memory_pressure();
     std::printf("hot_cache_test: %d checks passed\n", checks);
     return 0;
 }

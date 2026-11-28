@@ -65,7 +65,7 @@ struct CacheOptions {
     int64_t park_mib = 0;      ///< host memory for parked conversations; 0: none is parked
     int park_slots = 4;        ///< parked conversations at most
     int64_t park_min = 1024;   ///< a conversation with fewer tokens before its last checkpoint is not parked
-    bool hot_cache = false;    ///< opt-in Hot Session Cache & Exact SWA State Replay (full-tip parking, SWA deltas,
+    bool hot_cache = false;    ///< resolved Hot Session Cache & Exact SWA State Replay (full-tip parking, SWA deltas,
                                ///< pinned prefix anchors, component-level eviction, hierarchical L2/L3 spill)
     int64_t swa_delta_every = 256;   ///< decode tokens between incremental SWA+conv delta checkpoints (0: off)
     int64_t active_delta_rows = 4096;///< max rolling delta span behind tip on the active conversation
@@ -85,7 +85,7 @@ public:
     /// The tokens the engine has read.
     const std::vector<int32_t>& seq() const { return slots_[cur_].seq; }
 
-    /// Whether the opt-in Hot Session Cache & Exact SWA State Replay path is active on this engine.
+    /// Whether the Hot Session Cache & Exact SWA State Replay path is active on this engine.
     bool uses_swa_delta() const {
         if (!o_.hot_cache) return false;
         if constexpr (HasSwaDelta<E>) return e_.has_swa_delta();
@@ -260,7 +260,8 @@ public:
             const int64_t tip = len(s);
             if (tip < 1 || e_.pos() != tip) return;
             const int64_t last_p = s.snaps.empty() ? 0 : s.snaps.back().pos;
-            if (tip - last_p < o_.swa_delta_every) return;
+            if (tip - std::max(last_p, last_delta_attempt_) < o_.swa_delta_every) return;
+            last_delta_attempt_ = tip;  // don't retry on every token if the host is short of RAM
             capture_snap_hot(s.snaps, nullptr, tip, false, true);
             prune_active_snaps_hot(s);
         }
@@ -627,7 +628,7 @@ private:
         return true;
     }
 
-    // ---- Hot Session Cache & Exact SWA State Replay path (opt-in, requires HasSwaDelta<E>) ----
+    // ---- Hot Session Cache & Exact SWA State Replay path (requires HasSwaDelta<E>) ----
 
     static bool swa_covers(const ConvSnap& sn, int64_t hist) {
         if (sn.pos < 1 || !sn.conv) return false;
@@ -726,15 +727,18 @@ private:
                 slices.clear();
                 covered = need_lo;
             }
-            if (covered < pos) {
+            const int64_t n_new = pos - covered;
+            const size_t swa_bytes = (size_t) n_new * e_.swa_row_bytes();
+            const size_t conv_bytes = e_.conv_state_bytes();
+            if (o_.admit && !o_.admit(swa_bytes + conv_bytes)) return false;
+            if (n_new > 0) {
                 if (covered < live.lo || pos > live.hi || pos - covered > e_.swa_ring_rows()) return false;
-                const int64_t n_new = pos - covered;
-                const BlobPtr swa_b = blob((size_t) n_new * e_.swa_row_bytes());
+                const BlobPtr swa_b = blob(swa_bytes);
                 if (!swa_b) return false;
                 e_.save_swa_rows(covered, n_new, swa_b->data());
                 slices.push_back({swa_b, covered, n_new, covered, n_new});
             }
-            const BlobPtr conv_b = blob(e_.conv_state_bytes());
+            const BlobPtr conv_b = blob(conv_bytes);
             if (!conv_b) return false;
             e_.save_conv_state(conv_b->data());
             ConvSnap sn{pos, pinned, is_delta, conv_b, std::move(slices)};
@@ -967,6 +971,7 @@ private:
         const int64_t n = (int64_t) ids.size();
         turn_ = -1;
         pin_ = -1;
+        last_delta_attempt_ = 0;
         size_t best = cur_;
         int64_t at = 0, same = 0;
         for (size_t i = 0; i < slots_.size(); ++i) {
@@ -1022,6 +1027,7 @@ private:
     std::vector<ConvSnap> pending_snaps_; // captured during read() under hot_cache, published in read()
     int64_t turn_ = -1;             // turn_at()'s place in the prompt being read; -1: none
     int64_t pin_ = -1;              // pin_at()'s shared-prefix anchor; -1: none
+    int64_t last_delta_attempt_ = 0; // in this request, including attempts declined for lack of RAM
 };
 
 }  // namespace strata::poly

@@ -86,6 +86,33 @@ For matched-budget runs, `STRATA_INKLING_EXPERT_KV_MIB` limits the expert arena 
 one card with VMM and no pool. It does **not** limit total process VRAM or replace `--vram-reserve-mib`.
 Do not freeze a full startup arena and then try to grow into the same budget: frozen experts cannot be evicted.
 
+### Conversation parking
+
+`strata-poly --serve` uses the hot session cache automatically on supported dense Q8 Inkling configurations
+when conversation parking is enabled. It parks a text conversation at its last committed token, so switching
+back can reuse the reply as well as the prompt. `--conversation-cache-mib auto` sizes parking from available
+RAM after model load; `0` keeps parking off. V4, K256 and DSpark use the legacy cache. When the hot cache is
+selected, the startup log reports its mode and configured budget.
+
+Automatic hot cache keeps prompt checkpoints, but does not take periodic snapshots during generation.
+New snapshots are skipped if they would leave less than `--conversation-cache-min-free-mib` available.
+For workloads that edit the end of a reply (for example, tool-call JSON), `--swa-delta-every 256` enables them.
+`--hot-cache` forces the hot path on supported engines and retains the original 256-token interval unless set
+explicitly; `--no-hot-cache` selects the legacy path. `STRATA_HOT_SESSION_CACHE=1` or `0` can set the same
+override when neither flag is given. See the [RX 6700 XT benchmarks](goals/2026-11-27-hot-session-cache-swa-replay.md).
+
+In a guarded RX 6700 XT run with Tideglass v3 Q4_0, dense Q8 KV, frozen experts (1,151 GPU slots),
+4 GiB of parking, six slots and eight prompt checkpoints, six requests after the first cold request took
+**8.72 s** total to first token with legacy parking, **7.68 s** with automatic hot cache, and **6.66 s**
+with automatic hot cache and a 256-token decode interval. The prompts were 497 tokens to about 3.8K and covered
+plain continuation, a late reply edit, a short side request and switches. For the first 576-token reply,
+p99 token gaps were 41.2, 41.3 and 41.6 ms respectively; the maxima were 42.9, 49.7 and 72.5 ms.
+On the first return after switching, legacy replayed 64 more tokens; both hot variants first differed
+from its greedy output at token 37. With the 256-token interval, the late-edit reply also first differed
+at token 64. The other replies matched in this run. A separate full-tip switch (`A → B → A`) in automatic
+mode reused all 2,564 tokens and matched all 64 greedy IDs and the saved state byte for byte against
+uninterrupted `A` on the same card and model.
+
 ### Optional global attention and storage
 
 Dense Q8 remains the reference. K256 and V4 are independent of each other and of compact SWA. Both need Q8
