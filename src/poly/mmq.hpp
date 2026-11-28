@@ -13,12 +13,14 @@ namespace strata::poly {
 class Mmq {
 public:
     Mmq();
+    explicit Mmq(bool nvfp4_auto) : Mmq() { nvfp4_auto_ = nvfp4_auto; }
     ~Mmq();
     Mmq(const Mmq&) = delete;
     Mmq& operator=(const Mmq&) = delete;
 
     /// This build multiplies ggml_type, and the card has a tile for a matrix of [w_rows, w_cols] of it.
-    static bool fits(int ggml_type, int64_t w_rows, int64_t w_cols);
+    /// nvfp4_auto selects the RDNA2 NVFP4 default for Inkling routed experts; an explicit env value still wins.
+    static bool fits(int ggml_type, int64_t w_rows, int64_t w_cols, bool nvfp4_auto = false);
     /// Bytes of `rows` rows of `cols` values as quantize() writes them.
     static size_t q8_bytes(int64_t rows, int64_t cols);
     /// quantize() keeps the rows' block sums in halves for a matrix of ggml_type (guard_half_sums()).
@@ -45,6 +47,7 @@ public:
 
 private:
     void* ctx_ = nullptr;   ///< llama.cpp's launch context: a small scratch pool
+    [[maybe_unused]] bool nvfp4_auto_ = false;
 };
 
 }  // namespace strata::poly

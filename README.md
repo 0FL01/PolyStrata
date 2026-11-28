@@ -199,6 +199,8 @@ Open the web chat at `http://127.0.0.1:8080` or use `http://127.0.0.1:8080/v1` a
 URL for your app. Keep the server on loopback unless you set an API key.
 If you switch GGUFs, keep separate expert profiles and disk session directories.
 A snapshot saved with a different weights file cannot be restored on Q4_0.
+Inkling GGUFs with supported NVFP4 expert matrices automatically use [RDNA2 W4A8 MMQ](docs/NVFP4.md#hip-rdna2-inkling-2-mini)
+for prompt batches. On older builds this needs `STRATA_HIP_NVFP4_MMQ=1` in `env`.
 
 ## Other models
 

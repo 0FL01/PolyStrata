@@ -56,16 +56,18 @@ float* fp4_scales(void* xq, int64_t rows, int64_t cols) {
 }
 
 #if STRATA_POLY_HIP_NVFP4
-bool hip_nvfp4_fits(int64_t w_rows, int64_t w_cols, const ggml_cuda_device_info::cuda_device_info& dev) {
-    // ggml_cuda_info() gives gfx103N the cc RDNA2 + N. Limit this experiment to Inkling's fused gate/up and down
+bool hip_nvfp4_fits(int64_t w_rows, int64_t w_cols, const ggml_cuda_device_info::cuda_device_info& dev,
+                    bool nvfp4_auto) {
+    // ggml_cuda_info() gives gfx103N the cc RDNA2 + N. Limit this path to Inkling's fused gate/up and down
     // shapes; RDNA2 uses wave32 DP4A tiles, with no stream-k.
     if (!GGML_CUDA_CC_IS_RDNA2(dev.cc) || dev.warp_size != 32 || w_rows != 2304 ||
         (w_cols != 2304 && w_cols != 1152)) return false;
-    static const bool asked = [] {
+    // -1 leaves the choice to the model, 0 is an explicit opt-out, 1 an explicit opt-in.
+    static const int setting = [] {
         const char* v = std::getenv("STRATA_HIP_NVFP4_MMQ");
-        return v && v[0] == '1' && v[1] == '\0';
+        return v ? (v[0] == '1' && v[1] == '\0' ? 1 : 0) : -1;
     }();
-    return asked && nvfp4_w4a8_fits(w_rows, dev.cc, dev.smpbo);
+    return (setting < 0 ? nvfp4_auto : setting == 1) && nvfp4_w4a8_fits(w_rows, dev.cc, dev.smpbo);
 }
 #endif
 
@@ -87,7 +89,7 @@ Mmq::~Mmq() { delete (ggml_backend_cuda_context*) ctx_; }
 // step they read on into what lies behind it, and multiply that by the zeros quantize() pads the rows of x with.
 // So what lies behind a matrix must be readable and must not be read as an infinite block scale: the engine keeps
 // zero bytes there (kTail in runtime.hpp), as ggml-cuda does behind its tensors.
-bool Mmq::fits(int type, int64_t w_rows, int64_t w_cols) {
+bool Mmq::fits(int type, int64_t w_rows, int64_t w_cols, [[maybe_unused]] bool nvfp4_auto) {
     const ggml_type t = (ggml_type) type;
     const auto& dev = ggml_cuda_info().devices[ggml_cuda_get_device()];
     switch (t) {
@@ -101,7 +103,7 @@ bool Mmq::fits(int type, int64_t w_rows, int64_t w_cols) {
             if (!nvfp4_fp4(dev.cc)) return nvfp4_w4a8_fits(w_rows, dev.cc, dev.smpbo);
             break;
 #elif STRATA_POLY_HIP_NVFP4
-        case GGML_TYPE_NVFP4: return hip_nvfp4_fits(w_rows, w_cols, dev);
+        case GGML_TYPE_NVFP4: return hip_nvfp4_fits(w_rows, w_cols, dev, nvfp4_auto);
 #endif
         default: return false;
     }
@@ -206,8 +208,11 @@ void Mmq::mul(const void* w, int type, int64_t w_rows, int64_t w_cols, size_t st
 #elif STRATA_POLY_HIP_NVFP4
         case GGML_TYPE_NVFP4: {
             const auto& dev = ggml_cuda_info().devices[ggml_cuda_get_device()];
-            if (!hip_nvfp4_fits(w_rows, w_cols, dev))
+            if (!hip_nvfp4_fits(w_rows, w_cols, dev, nvfp4_auto_))
                 throw std::runtime_error("mmq: HIP NVFP4 W4A8 not enabled or unsupported");
+            static const int logged = std::fputs(
+                "strata-poly: using NVFP4 W4A8 MMQ on RDNA2 (STRATA_HIP_NVFP4_MMQ=0 disables it)\n", stderr);
+            (void) logged;
             static const bool tail = [] {
                 const char* v = std::getenv("STRATA_HIP_NVFP4_TAIL");
                 return v && v[0] == '1' && v[1] == '\0';
@@ -244,9 +249,6 @@ void Mmq::mul(const void* w, int type, int64_t w_rows, int64_t w_cols, size_t st
             } else if (use_lean) nvfp4_w4a8_lean(ctx, a, s);
             else nvfp4_w4a8(ctx, a, s);   // Q8_1 activation scales live in xq, not in a.y_scale
             ck("mmq product");
-            static const int logged = std::fputs(
-                "strata-poly: STRATA_HIP_NVFP4_MMQ=1: using NVFP4 W4A8 MMQ on RDNA2\n", stderr);
-            (void) logged;
             return;
         }
 #endif

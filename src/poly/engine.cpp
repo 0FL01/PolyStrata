@@ -3350,21 +3350,23 @@ void Engine::alloc() {
     // A prompt batch runs a layer's routed experts through MMQ when the card has a tile for each of their types
     // (batched()).  The model's layers: the draft block's experts never run a batch at a time.
     const size_t n = (size_t) rows_;
+    const bool nvfp4_auto = looped_;   // Inkling; only the routed expert geometry below opts into auto.
     bool tiles = false, mixed_tiles = false;
     size_t one_expert = 0;
     for (int il = 0; il < n_layer_; ++il) {
         Layer& L = layers_[(size_t) il];
         if (!L.moe) continue;
         // a mixed layer multiplies gate and up apart (moe_rows()), each a matrix of n_ff rows
-        const bool gu_fits = L.mixed() ? Mmq::fits((int) L.gu_type, n_ff_exp_, n_embd_) &&
-                                             Mmq::fits((int) L.u_type, n_ff_exp_, n_embd_)
-                                       : Mmq::fits((int) L.gu_type, 2 * n_ff_exp_, n_embd_);
-        L.mmq = opt_.gpu_experts && rows_ >= kStageRows && gu_fits && Mmq::fits((int) L.d_type, n_embd_, n_ff_exp_);
+        const bool gu_fits = L.mixed() ? Mmq::fits((int) L.gu_type, n_ff_exp_, n_embd_, nvfp4_auto) &&
+                                             Mmq::fits((int) L.u_type, n_ff_exp_, n_embd_, nvfp4_auto)
+                                       : Mmq::fits((int) L.gu_type, 2 * n_ff_exp_, n_embd_, nvfp4_auto);
+        L.mmq = opt_.gpu_experts && rows_ >= kStageRows && gu_fits &&
+                Mmq::fits((int) L.d_type, n_embd_, n_ff_exp_, nvfp4_auto);
         tiles = tiles || L.mmq;
         mixed_tiles = mixed_tiles || (L.mmq && L.mixed());
         one_expert = std::max(one_expert, L.gu_step + L.d_bytes);
     }
-    if (tiles) mmq_ = std::make_unique<Mmq>();
+    if (tiles) mmq_ = std::make_unique<Mmq>(nvfp4_auto);
 
     shared_scratch();   // the first pass only counts
     assign_scratch();

@@ -751,9 +751,10 @@ for the coding request. It does not speed up the cold prompt read. See the
 
 ### Inkling-2-Mini prompt MMQ on RDNA2
 
-`STRATA_HIP_NVFP4_MMQ=1` enables the wave32 DP4A expert prompt path for Inkling-2-Mini's NVFP4 matrices on an RX 6700 XT
-build (`gfx1031`). It keeps 8-bit activations (W4A8), does not change the KV format, and does not switch single-token
-decode to MMQ. It is off by default. Batched GPU products and the CPU fallback can differ in rounding.
+An RDNA2 build automatically takes the wave32 DP4A expert prompt path for Inkling-2-Mini's supported NVFP4
+matrices. `STRATA_HIP_NVFP4_MMQ=0` restores the old path, and `=1` explicitly enables MMQ on supported shapes.
+It keeps 8-bit activations (W4A8) and leaves the KV format and single-token decode path alone. Batched GPU
+products and the CPU fallback can differ in rounding. See [NVFP4 dispatch](NVFP4.md#hip-rdna2-inkling-2-mini).
 The RDNA2-only switches in this section and below take any gfx1030 to gfx1036 card; they were measured on the
 RX 6700 XT only. On that card, run as gfx1030 and gfx1032 (`HSA_OVERRIDE_GFX_VERSION=10.3.0` / `10.3.2` with a
 gfx1030-gfx1036 build), the production Inkling switches turned on and greedy token IDs matched the native
@@ -782,7 +783,7 @@ weight/activation formats and the default-off path are unchanged. The K128 full-
 it accelerated down but slowed gate/up; this narrower change avoids that regression.
 
 `STRATA_HIP_NVFP4_SCALE_BITS=1` (opt-in, RDNA2) builds the lean NVFP4 MMQ loader's FP32 scales from the
-UE4M3 bits. It needs `STRATA_HIP_NVFP4_MMQ=1` and `STRATA_HIP_NVFP4_LEAN=1`; tiles of at most eight rows keep
+UE4M3 bits. It needs active NVFP4 MMQ and `STRATA_HIP_NVFP4_LEAN=1`; tiles of at most eight rows keep
 their previous kernels. With `STRATA_HIP_NVFP4_TAIL=1`, the same scale construction applies to eligible lean
 down-tail calls without changing their tile selection. On the same RX 6700 XT, J64 gate/up (128 experts ×
 128 rows, `[2304,2304]`) went from 10.92 to 9.58 ms with a byte-identical FP32 dump. A 32,768-token prompt

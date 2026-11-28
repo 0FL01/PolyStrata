@@ -239,17 +239,19 @@ A HIP build of `strata-poly` with an RDNA2 target (e.g. `-DSTRATA_ENABLE_HIP=ON 
 `STRATA_HIP_HAS_RDNA2` is set by the build. No native FP4 matrix instructions are required: E2M1 weights are
 decoded to integer values, Q8_1 activations are multiplied with wave32 DP4A, and block scales are applied in FP32.
 
-All four switches are opt-in and require the exact value `1`:
+Inkling automatically takes W4A8 MMQ for routed expert batches on RDNA2 when the build has the instances and
+all projections of that layer fit. The three kernel variants are opt-in and require the exact value `1`:
 
 | Environment variable | Effect and dispatch restrictions |
 | --- | --- |
-| `STRATA_HIP_NVFP4_MMQ=1` | Enables W4A8 MMQ on RDNA2 wave32 for Inkling's joined gate/up (2304 output rows × 2304 input columns) and down (2304 × 1152), subject to tile/shared-memory availability. |
+| `STRATA_HIP_NVFP4_MMQ` | Unset: automatic for Inkling routed expert batches. `0`: use the old fallback. `1`: explicitly enable the same path for eligible products. All modes check RDNA2, wave32, supported shapes (2304 × 2304 gate/up and 2304 × 1152 down) and available shared memory. |
 | `STRATA_HIP_NVFP4_TAIL=1` | Uses the specialized grouped down kernel for eligible 2304 × 1152 products: at least 128 rows in the largest expert batch, auto-selected J64 tile, valid layout and sufficient shared memory. Omits the final zero-padded K128 activation half, retaining the original K256 weight load and accumulation order. Otherwise uses regular W4A8 MMQ. |
 | `STRATA_HIP_NVFP4_LEAN=1` | Selects the lean DP4A variants for expert batches with more than eight rows in the largest group; starts zero accumulators with VOP3 `v_dot4_i32_i8` and an inline zero. Smaller batches retain the regular variants. |
 | `STRATA_HIP_NVFP4_SCALE_BITS=1` | With LEAN active, constructs FP32 scales directly from UE4M3 exponent/fraction bits, preserving ggml's scale conversion. Applies to both regular and eligible tail kernels. No effect without the lean dispatch. |
 
-Enable the base MMQ path first; the other switches only change eligible NVFP4 prompt products. With MMQ disabled
-or an unsupported device/shape, `Mmq::fits()` rejects NVFP4 and the model uses its existing non-MMQ path.
+The other switches only change eligible NVFP4 prompt products. With MMQ disabled or an unsupported device/shape,
+`Mmq::fits()` rejects NVFP4 and the model uses its existing non-MMQ path. Calls below 32 rows keep the existing
+small-call path. MMQ and the fallback can differ in rounding.
 These flags do not select the weight quantization, change KV precision or enable Blackwell W4A4. Decode uses
 the existing NVFP4 MMVQ kernels; CPU experts use ggml-cpu.
 
@@ -261,6 +263,10 @@ export STRATA_HIP_NVFP4_TAIL=1
 export STRATA_HIP_NVFP4_LEAN=1
 export STRATA_HIP_NVFP4_SCALE_BITS=1
 ```
+
+`TAIL` has no effect when only gate/up is NVFP4 and down is IQ4_NL or Q5_1. On that mixed layout, enabling the
+base path on the RX 6700 XT recovered about 6.4× throughput in the same 10,865-token replay. See the
+[mixed-quant results](goals/2026-11-28-native-nvfp4-mixed-prefill.md).
 
 The flags are not a universal performance recommendation. Compare with the base MMQ path using the same GGUF,
 prompt, continuation and expert placement. The RDNA2 path has been run end to end on RX 6700 XT (gfx1031);

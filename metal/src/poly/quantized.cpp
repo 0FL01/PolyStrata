@@ -144,7 +144,7 @@ namespace strata::poly {
 using namespace metal_detail;
 Mmq::Mmq() = default;
 Mmq::~Mmq() = default;
-bool Mmq::fits(int t,int64_t rows,int64_t cols) {
+bool Mmq::fits(int t,int64_t rows,int64_t cols,bool /*nvfp4_auto*/) {
     return kernels::native_mmvq_supported(t) && rows>0 && rows<=INT32_MAX && cols>0 && cols<=INT32_MAX && cols%ggml_blck_size(ggml_type(t))==0;
 }
 // room for either form of the rows: q8_1, or fp16 on the matrix-unit path (mm_rows())
