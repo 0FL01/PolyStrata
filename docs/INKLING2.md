@@ -128,6 +128,7 @@ KV, the HIP decode reader, a single sequence without DSpark, and a context of at
 | `STRATA_INKLING_FUND_EXPERTS=1` | Allow the cache to use actual savings for ordinary whole-expert slots. A combined budget counts the index, packed planes and fixed hot ring. Without funding, charge saved KV bytes to placement instead. |
 | `STRATA_INKLING_V4_SCALAR=1` | Reference CPU packer for V4. Otherwise use the byte-identical AVX2/F16C refit on eligible CPUs/blocks and scalar elsewhere. This is not a different attention policy. |
 | `STRATA_INKLING_V4_STATE_PACK=1` | With V4 and `STRATA_INKLING_STATE_PACK=1`, capture the convolution state, SWA and exact Q8 V tail in one host copy when the existing expert stage fits. Otherwise use ordinary copies. Same checkpoint bytes; no wider stage or extra VRAM. |
+| `STRATA_INKLING_RECLAIM_SAFE=1` | Linux/RDNA2 only. Before HIP starts, set `GPU_PINNED_MIN_XFER_SIZE=1048576` and `HSA_USERPTR_FOR_PAGED_MEM=0` unless already set. This reduces exposure to GPU queue pauses when the kernel invalidates host mappings. It does not change the expert upload order, the conversation cache, or the model. |
 | `STRATA_INKLING_SUFFIX_H2=1` | On RDNA2 with V4, use split Flash16 for global prefill batches of at least 32 rows once a sealed row is visible. The kernel reads old V4 and the wrapped Q8 tail directly. Its half-precision products and different reductions can change answers. It does not select pages for a prompt or change W1. |
 
 A compact checkpoint saves the exact native V tail for its own position. Restoring a branch does not guess

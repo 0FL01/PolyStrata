@@ -1741,6 +1741,20 @@ std::unique_ptr<Engine> Engine::open(const Options& o) {
         throw std::runtime_error("--cache-bias is supported for qwen35moe models; this is a '" + name + "' model");
     if (inkling2) {
 #if defined(STRATA_USE_HIP)
+#ifdef __linux__
+        // Inkling requires RDNA2. Set these before the first HIP call: KFD can stop every queue in this process
+        // while restoring invalidated host mappings. Keep pageable transfers in ROCclr's staging buffers and
+        // keep ROCr's pageable allocations off KFD USERPTR. Explicitly registered expert uploads, the cache
+        // layout and the stream dependencies stay unchanged.
+        if (const char* safe = std::getenv("STRATA_INKLING_RECLAIM_SAFE"); safe && std::strcmp(safe, "1") == 0) {
+            if (setenv("GPU_PINNED_MIN_XFER_SIZE", "1048576", 0) != 0 ||
+                setenv("HSA_USERPTR_FOR_PAGED_MEM", "0", 0) != 0)
+                throw std::runtime_error("could not set Inkling's ROCm host-memory policy");
+            std::fprintf(stderr, "strata-poly: Inkling ROCm host memory: GPU_PINNED_MIN_XFER_SIZE=%s "
+                                 "HSA_USERPTR_FOR_PAGED_MEM=%s\n",
+                         std::getenv("GPU_PINNED_MIN_XFER_SIZE"), std::getenv("HSA_USERPTR_FOR_PAGED_MEM"));
+        }
+#endif
         auto engine = std::make_unique<Inkling2>();
         engine->load(o);
         return engine;

@@ -333,11 +333,10 @@ selection of a 256-query batch is 0.29 -> 0.21 ms at 98K, 1.16 -> 0.49 ms at 262
 
 ## Linux: verify timeouts while the kernel reclaims host memory (experimental workarounds)
 
-A `verify: timed out at layer N` or "no progress for 60 s" message does not by itself mean a kernel or handshake bug. Two
-community reports found the same mechanism: the GPU's queues are suspended while the kernel reclaims host pages the GPU
-has pinned through a KFD userptr, and a restore that keeps returning `-EAGAIN` leaves them suspended for tens of seconds.
-Each report is one machine, one workaround, and the cause is not confirmed on either; neither is a default or a general
-speed claim, and neither is known to matter on Windows or on other ROCm versions.
+A `verify: timed out at layer N` or "no progress for 60 s" message does not by itself mean a kernel or handshake bug. The
+kernel can suspend the process's GPU queues when it invalidates host mappings. If the driver keeps retrying the restore,
+the queues stay suspended. The two community reports below each cover one machine and one workaround; they do not
+establish a default or a general speed gain.
 
 - **Paged host allocations (#750, two Radeon AI PRO R9700, ROCm 7.2):** tracing correlated a timeout with about 31 s of
   USERPTR queue suspension on both cards. ROCr uses USERPTR for paged host allocations unless `HSA_USERPTR_FOR_PAGED_MEM=0`.
@@ -350,6 +349,11 @@ speed claim, and neither is known to matter on Windows or on other ROCm versions
 ```json
 "env": { "GPU_PINNED_MIN_XFER_SIZE": "1048576" }
 ```
+
+For Inkling on Linux/RDNA2, `"env": { "STRATA_INKLING_RECLAIM_SAFE": "1" }` selects both settings before the first
+HIP call. Explicit values of either ROCm variable take precedence. Remove the Inkling flag and restart to use the old
+policy. It is opt-in: the alternate allocations can consume more of the GPU driver's GTT budget, and SVM queue
+pauses can still occur. See the [RX 6700 XT investigation](goals/2026-11-28-rdna2-expert-upload-stall.md).
 
 Change one setting at a time with the rest of the configuration the same, restart the engine so the runtime reads it, and
 remove it to go back to the default. Check free RAM and the driver's GTT limit before large-context tests. If the engine
