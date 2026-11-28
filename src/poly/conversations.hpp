@@ -67,6 +67,7 @@ struct CacheOptions {
     int64_t park_min = 1024;   ///< a conversation with fewer tokens before its last checkpoint is not parked
     bool hot_cache = false;    ///< resolved Hot Session Cache & Exact SWA State Replay (full-tip parking, SWA deltas,
                                ///< pinned prefix anchors, component-level eviction, hierarchical L2/L3 spill)
+    bool reuse_live_vision = false; ///< the engine can resume from a causal image prefix in its live sequence
     int64_t swa_delta_every = 256;   ///< decode tokens between incremental SWA+conv delta checkpoints (0: off)
     int64_t active_delta_rows = 4096;///< max rolling delta span behind tip on the active conversation
     int64_t parked_tail_rows = 512;  ///< pre-tip delta span retained on parked slots before Tier-2 trim
@@ -101,7 +102,7 @@ public:
         size_t best = cur_;
         int64_t at = 0, same = 0;
         for (size_t i = 0; i < slots_.size(); ++i) {
-            if (has_vision || slots_[i].has_vision) continue;
+            if (!can_resume(i, has_vision)) continue;
             const int64_t c = common(slots_[i].seq, ids), r = reach(i, c, n);
             if (r > at || (r == at && i == cur_)) best = i, at = r, same = c;
         }
@@ -110,7 +111,6 @@ public:
             // nothing kept starts like this
             if (!cur().seq.empty() && !cur().has_vision && park(slots_.size())) cur_ = take(cur_);
             slots_[cur_] = Slot{};
-            slots_[cur_].has_vision = has_vision;
             e_.reset();
         } else if (best != cur_ || at < len(cur())) {
             if (best != cur_) enter(best, at);
@@ -119,6 +119,7 @@ public:
             if (same >= cur().prompt || !branch(at)) cut(cur(), at);
             e_.load_state(state_at(cur(), at), at);
         }
+        cur().has_vision = has_vision;
         cur().stamp = clock_;
         return at;
     }
@@ -428,6 +429,12 @@ private:
         return (int64_t) n;
     }
 
+    bool can_resume(size_t i, bool has_vision) const {
+        // Image row IDs incorporate the embeddings. Keep reuse local to the live sequence on causal engines;
+        // an engine with bidirectional image attention can already depend on rows after the checkpoint.
+        return !(has_vision || slots_[i].has_vision) || (i == cur_ && o_.reuse_live_vision);
+    }
+
     static void collect_blobs(const Slot& s, std::vector<const Blob*>& out) {
         for (const Checkpoint& m : s.marks)
             if (m.state) out.push_back(m.state.get());
@@ -558,7 +565,8 @@ private:
     // read after that cannot be come back to and is dropped.  False: it cannot be kept.
     bool park(size_t keep) {
         Slot& s = cur();
-        if (o_.park_mib < 1 || o_.park_slots < 1 || s.marks.empty() || s.marks.back().pos < o_.park_min) return false;
+        if (o_.park_mib < 1 || o_.park_slots < 1 || s.has_vision || s.marks.empty() ||
+            s.marks.back().pos < o_.park_min) return false;
         const Clock::time_point t0 = Clock::now();
         const int64_t end = s.marks.back().pos, from = saved(s);
         cut(s, end);
@@ -975,7 +983,7 @@ private:
         size_t best = cur_;
         int64_t at = 0, same = 0;
         for (size_t i = 0; i < slots_.size(); ++i) {
-            if (has_vision || slots_[i].has_vision) continue;
+            if (!can_resume(i, has_vision)) continue;
             const int64_t c = common(slots_[i].seq, ids), r = reach_hot(i, c, n);
             if (r > at || (r == at && i == cur_)) best = i, at = r, same = c;
         }
@@ -983,7 +991,6 @@ private:
         if (at == 0) {
             if (!cur().seq.empty() && !cur().has_vision && park_hot(slots_.size())) cur_ = take(cur_);
             slots_[cur_] = Slot{};
-            slots_[cur_].has_vision = has_vision;
             e_.reset();
         } else if (best != cur_ || at < len(cur())) {
             const bool same_slot = best == cur_;
@@ -999,6 +1006,7 @@ private:
             insert_snap_hot(cur().snaps, target_snap);
             restore_snap_hot(target_snap, same_slot);
         }
+        cur().has_vision = has_vision;
         cur().stamp = clock_;
         return at;
     }

@@ -307,6 +307,8 @@ public:
 
     /// Whether the architecture reads pictures.
     virtual bool sees() const { return false; }
+    /// Whether an image's cached rows depend only on the prefix through those rows.
+    virtual bool causal_image_rows() const { return false; }
     /// The pictures of the sequence, in its order, in place of the ones set before.  eval() reads a row that lies
     /// in one from the picture and not from its token, so their rows must stay where they are while tokens are
     /// read.  A sequence that is come back to must get the pictures it was read with.

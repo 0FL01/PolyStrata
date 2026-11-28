@@ -257,7 +257,8 @@ struct HotChat {
                 for (const auto& d : due) {
                     e.eval(ids.data() + i + done, d.first - done);
                     done = d.first;
-                    kept.capture_mark_at(i + done);
+                    if (d.second) e.save_state(d.second);
+                    else kept.capture_mark_at(i + done);
                 }
                 e.eval(ids.data() + i + done, m - done);
             } else {
@@ -365,15 +366,31 @@ void test_spec_verifier_overwrite_and_rollback() {
     check(at >= (int64_t) a.size() - 20, "rollback across speculative partial-accept windows hit delta snap");
 }
 
-void test_vision_isolation_and_adopt() {
-    HotChat c(hot_opts(16, 4, 16));
-    std::vector<int32_t> vis = text(50, 180);
-    vis[50] = -1;
-    check(c.ask(vis, 10, -1, -1, true) == 0, "vision prompt runs cleanly");
-    // Same tokens with vision MUST NOT reuse or cross-share
-    std::vector<int32_t> vis2 = vis + text(51, 20);
-    check(c.ask(vis2, 5, -1, -1, true) == 0, "vision requests stay isolated");
+void test_live_vision_resume() {
+    for (const bool hot : {false, true}) {
+        auto o = hot_opts();
+        o.hot_cache = hot;
+        o.reuse_live_vision = true;
+        HotChat c(o);
+        auto prompt = text(50, 180);
+        check(c.ask(prompt, 10) == 0, "text turn before an image");
+        auto vis = prompt + text(51, 60);
+        const auto image = (int64_t) prompt.size() + 3;
+        vis[(size_t) image] = -1;
+        check(c.ask(vis, 10, image, -1, true) == (int64_t) prompt.size(), "adding an image keeps the live text prefix");
+        auto next = vis + text(52, 20);
+        check(c.ask(next, 5, -1, -1, true) == (int64_t) vis.size(), "same image keeps the live multimodal prefix");
+        auto changed = next;
+        changed[(size_t) image] = -2;
+        check(c.ask(changed, 5, image, -1, true) == image, "a different image rolls back to before its rows");
+        auto other = text(53, 220);
+        check(c.ask(other, 5) == 0 && c.kept.parked() == 0, "the live image conversation is not parked");
+        check(c.ask(next, 5, -1, -1, true) == 0, "vision does not reuse another slot");
+    }
+}
 
+void test_adopt() {
+    HotChat c(hot_opts(16, 4, 16));
     // Simulate DiskSessions RESTORE -> adopt(), then switch away and back -> Full-Tip Parking preserves it!
     c.e.reset();
     std::vector<int32_t> restored = text(60, 250);
@@ -436,7 +453,8 @@ int main() {
     test_full_tip_and_decode_deltas();
     test_pinned_prefix_and_shared_sessions();
     test_spec_verifier_overwrite_and_rollback();
-    test_vision_isolation_and_adopt();
+    test_live_vision_resume();
+    test_adopt();
     test_component_eviction_and_fuzz();
     test_snapshot_memory_pressure();
     std::printf("hot_cache_test: %d checks passed\n", checks);

@@ -94,6 +94,9 @@ back can reuse the reply as well as the prompt. `--conversation-cache-mib auto` 
 RAM after model load; `0` keeps parking off. V4, K256 and DSpark use the legacy cache. When the hot cache is
 selected, the startup log reports its mode and configured budget.
 
+A prompt with pictures can reuse a matching prefix in the live conversation. Image rows are matched by IDs
+derived from the embeddings, not by the image placeholder. Vision requests do not share parked slots.
+
 Automatic hot cache keeps prompt checkpoints, but does not take periodic snapshots during generation.
 New snapshots are skipped if they would leave less than `--conversation-cache-min-free-mib` available.
 For workloads that edit the end of a reply (for example, tool-call JSON), `--swa-delta-every 256` enables them.

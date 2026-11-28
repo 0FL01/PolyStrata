@@ -1837,6 +1837,7 @@ int main(int argc, char** argv) {
                                      "(--conversation-cache-mib N asks for one anyway)\n");
         }
         const bool auto_hot = want_serve && cache.o.park_mib > 0 && cache.o.park_slots > 0 && cache.o.checkpoints > 0;
+        cache.o.reuse_live_vision = engine.causal_image_rows();
         cache.o.hot_cache = engine.has_swa_delta() && cache.hot.value_or(auto_hot);
         if (cache.o.hot_cache) {
             if (!cache.hot.has_value() && !cache.delta_every_set) cache.o.swa_delta_every = 0;

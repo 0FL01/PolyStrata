@@ -14,6 +14,7 @@ class Inkling2 final : public Engine {
 public:
     ~Inkling2() override;
     bool sees() const override { return true; }
+    bool causal_image_rows() const override { return true; }
     bool dflash2_ready(bool full_window = false) const override;
     bool dflash2_failed() const override;
     void dflash2_propose(int32_t anchor, int k, int32_t* out) override;
