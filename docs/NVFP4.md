@@ -208,8 +208,8 @@ engine's own q8_1 kernels, which decode UE4M3/E2M1 in software. The engine was b
 on the RTX 5090 with the host answering as that generation. On those builds `mmq_nvfp4_parity` and
 `nvfp4_expert_gpu_parity` gave results identical to sm_120.
 
-HIP: the decode kernels use no CUDA-only intrinsics. The NVFP4 MMQ instance and the W4A8 unit are CUDA-only and
-guarded (`GGML_USE_HIP`). Neither was built for HIP here.
+HIP: the shared decode kernels use no CUDA-only intrinsics. The `strata` pack engine's NVFP4 MMQ units in
+`src/prefill/` are CUDA-only. The separate `strata-poly` engine has an RDNA2 W4A8 prompt path (see below).
 
 ## strata-poly: NVFP4 GGUFs
 
@@ -220,8 +220,9 @@ too small for the blocks' E4M3 scales, and llama.cpp multiplies the product by t
 
 - Decode: the kernels the Qwen3.8 engine decodes NVFP4 with (`iq_mmvq`, `vec_dot_nvfp4_q8_1`): the weights times
   Q8_1 rows. `native_mmvq()` hands type 40 to them.
-- Prompt: llama.cpp's MMQ tiles. On every card they are W4A8 by default, the precision decode runs at
-  (`src/poly/mmq_nvfp4.cu`, built the way `mmq_nvfp4_w4a8.cu` above is). On an RTX 50 card (sm_120),
+- Prompt: llama.cpp's MMQ tiles. On CUDA they are W4A8 by default, the precision decode runs at
+  (`src/poly/mmq_nvfp4.cu`, built the way `mmq_nvfp4_w4a8.cu` above is). HIP RDNA2 supports opt-in W4A8 for
+  Inkling-2-Mini's expert shapes (see below). On an RTX 50 card (sm_120),
   `STRATA_PREFILL_NVFP4=w4a4` takes llama.cpp's FP4 x FP4 tiles on its FP4 tensor cores instead: the instance is built
   for 12.0a beside MXFP4's, and the rows' per-row float scale goes behind their FP4 blocks.
 - CPU experts: ggml-cpu's `ggml_vec_dot_nvfp4_q8_0`.
@@ -229,8 +230,49 @@ too small for the blocks' E4M3 scales, and llama.cpp multiplies the product by t
   products before the activation (`ExpertScales`, in each path's SwiGLU), and its down scale on its weight in the
   token's sum. Down's scale on the hidden instead would leave it near 1e-5 before its 8-bit quantization (see "Where
   the global scales go"). Only an NVFP4 tensor's `.scale` is read: Gemma 4's `ffn_down_exps.scale` is its own.
-- Not built: Metal (no NVFP4 kernels); HIP (no NVFP4 prompt product, the batch goes through the decode kernels; not
-  run here).
+- Metal: no NVFP4 kernels.
+
+### HIP RDNA2: Inkling-2-Mini
+
+A HIP build of `strata-poly` with an RDNA2 target (e.g. `-DSTRATA_ENABLE_HIP=ON -DSTRATA_ENABLE_CUDA=OFF
+-DCMAKE_HIP_ARCHITECTURES=gfx1031`) includes NVFP4 W4A8 MMQ and its specialized variants when
+`STRATA_HIP_HAS_RDNA2` is set by the build. No native FP4 matrix instructions are required: E2M1 weights are
+decoded to integer values, Q8_1 activations are multiplied with wave32 DP4A, and block scales are applied in FP32.
+
+All four switches are opt-in and require the exact value `1`:
+
+| Environment variable | Effect and dispatch restrictions |
+| --- | --- |
+| `STRATA_HIP_NVFP4_MMQ=1` | Enables W4A8 MMQ on RDNA2 wave32 for Inkling's joined gate/up (2304 output rows × 2304 input columns) and down (2304 × 1152), subject to tile/shared-memory availability. |
+| `STRATA_HIP_NVFP4_TAIL=1` | Uses the specialized grouped down kernel for eligible 2304 × 1152 products: at least 128 rows in the largest expert batch, auto-selected J64 tile, valid layout and sufficient shared memory. Omits the final zero-padded K128 activation half, retaining the original K256 weight load and accumulation order. Otherwise uses regular W4A8 MMQ. |
+| `STRATA_HIP_NVFP4_LEAN=1` | Selects the lean DP4A variants for expert batches with more than eight rows in the largest group; starts zero accumulators with VOP3 `v_dot4_i32_i8` and an inline zero. Smaller batches retain the regular variants. |
+| `STRATA_HIP_NVFP4_SCALE_BITS=1` | With LEAN active, constructs FP32 scales directly from UE4M3 exponent/fraction bits, preserving ggml's scale conversion. Applies to both regular and eligible tail kernels. No effect without the lean dispatch. |
+
+Enable the base MMQ path first; the other switches only change eligible NVFP4 prompt products. With MMQ disabled
+or an unsupported device/shape, `Mmq::fits()` rejects NVFP4 and the model uses its existing non-MMQ path.
+These flags do not select the weight quantization, change KV precision or enable Blackwell W4A4. Decode uses
+the existing NVFP4 MMVQ kernels; CPU experts use ggml-cpu.
+
+For an experimental run with all four variants available, add to the existing Inkling launch environment:
+
+```sh
+export STRATA_HIP_NVFP4_MMQ=1
+export STRATA_HIP_NVFP4_TAIL=1
+export STRATA_HIP_NVFP4_LEAN=1
+export STRATA_HIP_NVFP4_SCALE_BITS=1
+```
+
+The flags are not a universal performance recommendation. Compare with the base MMQ path using the same GGUF,
+prompt, continuation and expert placement. The RDNA2 path has been run end to end on RX 6700 XT (gfx1031);
+see the [Inkling throughput report](goals/2026-11-21-inkling2-rdna2-throughput.md),
+[prefill specialization report](goals/2026-11-22-inkling2-prefill-e2e.md), and
+[quant comparison](../README.md#earlier-quant-comparison).
+The runtime gates and dispatch are in [mmq.cu](../src/poly/mmq.cu), with implementations in
+[mmq_nvfp4.cu](../src/poly/mmq_nvfp4.cu), [mmq_nvfp4_tail.cu](../src/poly/mmq_nvfp4_tail.cu),
+[mmq_nvfp4_lean.cu](../src/poly/mmq_nvfp4_lean.cu), and
+[mmq_nvfp4_scale_bits.cuh](../src/poly/mmq_nvfp4_scale_bits.cuh).
+
+### CUDA measurements
 
 Measured on lab-pro6000 (RTX PRO 6000 Blackwell Server Edition, sm_120, other users' jobs on the same card), with
 `WhiskyAKM/LFM2.5-24B-A2B-NVFP4-GGUF` (every matrix NVFP4, no global scales).
